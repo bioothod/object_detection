@@ -22,12 +22,19 @@ def pad_resize_image(image, dims):
     image = tf.cast(image, dtype=tf.uint8)
     return image
 
+# do not use padded resize, since bbox scaling does not yet support this
+def simple_resize_image(image, dims):
+    image = tf.image.resize(image, dims)
+    image = tf.cast(image, dtype=tf.uint8)
+    return image
+
 def try_resize(image, output_height, output_width):
     shape = tf.shape(image)
     image = tf.cond(tf.logical_and(tf.equal(shape[0], output_height),
                                    tf.equal(shape[1], output_width)),
                     lambda: image,
-                    lambda: pad_resize_image(image, [output_height, output_width]))
+                    #lambda: pad_resize_image(image, [output_height, output_width]))
+                    lambda: simple_resize_image(image, [output_height, output_width]))
     return image
 
 def mean_subtraction(image, means):
@@ -47,10 +54,9 @@ def mean_subtraction(image, means):
 _vgg_means = [91.4953, 103.8827, 131.0912]
 
 def prepare_image_for_training(image, output_height, output_width, dtype=tf.float32, autoaugment_name=None):
-    max_scale = 1.4
+    max_scale = 1
     image = try_resize(image, int(max_scale*output_height), int(max_scale*output_width))
-    image = tf.image.random_crop(image, [output_height, output_width, 3])
-    image = tf.image.random_flip_left_right(image)
+    #image = tf.image.random_flip_left_right(image)
 
     if autoaugment_name:
         image = autoaugment.distort_image_with_autoaugment(image, autoaugment_name)

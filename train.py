@@ -6,15 +6,18 @@ import sys
 import numpy as np
 import tensorflow as tf
 
-import batch
+import coco
 import efficientnet
+import image as image_draw
 import preprocess
-import validation
 
 from tensorflow.keras import Model
 import tensorflow.keras.layers as layers
 
-logger = logging.getLogger('vggface_emotions')
+from PIL import Image
+
+
+logger = logging.getLogger('objdet')
 logger.propagate = False
 logger.setLevel(logging.INFO)
 __fmt = logging.Formatter(fmt='%(asctime)s.%(msecs)03d: %(message)s', datefmt='%d/%m/%y %H:%M:%S')
@@ -23,8 +26,10 @@ __handler.setFormatter(__fmt)
 logger.addHandler(__handler)
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--input_json', type=str, required=True, help='Json file which describes classes and contains lists of filenames of data files')
-parser.add_argument('--validation_json', type=str, required=True, help='Validation json file which describes classes and contains lists of filenames of data files')
+parser.add_argument('--train_coco_annotations', type=str, required=True, help='Path to MS COCO dataset: annotations json file')
+parser.add_argument('--train_coco_data_dir', type=str, required=True, help='Path to MS COCO dataset: image directory')
+parser.add_argument('--eval_coco_annotations', type=str, required=True, help='Path to MS COCO dataset: annotations json file')
+parser.add_argument('--eval_coco_data_dir', type=str, required=True, help='Path to MS COCO dataset: image directory')
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch.')
 parser.add_argument('--num_epochs', type=int, default=100, help='Number of epochs to run.')
 parser.add_argument('--epoch', type=int, default=0, help='Initial epoch\'s number')
@@ -49,16 +54,6 @@ autoaugment_name_choice = ['v0']
 parser.add_argument('--autoaugment_name', type=str, choices=autoaugment_name_choice, help='Autoaugment name, choices: {}'.format(autoaugment_name_choice))
 FLAGS = parser.parse_args()
 
-def tf_read_image(filename, label, image_size, is_training, dtype):
-    image = tf.io.read_file(filename)
-
-    #image = tf.image.decode_jpeg(image, dct_method='INTEGER_ACCURATE', channels=3)
-    image = tf.image.decode_jpeg(image, channels=3)
-
-    image = preprocess.processing_function(image, image_size, image_size, is_training, dtype, FLAGS.autoaugment_name)
-
-    return image, label
-
 def calc_epoch_steps(bg):
     return (bg.num_files() + FLAGS.batch_size - 1) // FLAGS.batch_size
 
@@ -73,22 +68,18 @@ def train():
     handler.setFormatter(__fmt)
     logger.addHandler(handler)
 
-    train_bg = batch.generator(FLAGS.input_json, split_to=1, use_chunk=0)
-    eval_bg = batch.generator(FLAGS.validation_json, 1, 0)
-
-    num_classes = train_bg.num_classes()
     image_size = efficientnet.efficientnet_params(FLAGS.model_name)[2]
 
     num_replicas = 1
-    dstrategy = tf.distribute.MirroredStrategy()
-    num_replicas = dstrategy.num_replicas_in_sync
-    with dstrategy.scope():
-    #if True:
+    #dstrategy = tf.distribute.MirroredStrategy()
+    #num_replicas = dstrategy.num_replicas_in_sync
+    #with dstrategy.scope():
+    if True:
         initial_learning_rate = FLAGS.initial_learning_rate * num_replicas
         FLAGS.batch_size *= num_replicas
 
         params = {
-            'num_classes': num_classes,
+            'num_classes': None,
             'data_format': FLAGS.data_format,
             'relu_fn': local_swish
         }
@@ -110,19 +101,19 @@ def train():
 
         global_step = tf.Variable(1, dtype=tf.int64, name='global_step')
         model = efficientnet.build_model(model_name=FLAGS.model_name, override_params=params)
-        for name, endpoint in model.endpoints:
-            logger.info('{}: {}'.format(name, endpoint))
+        #_ = model(tf.zeros((1, image_size, image_size, 3)), features_only=True)
+        #for name, endpoint in model.endpoints.items():
+        #    logger.info('{}: {}'.format(name, endpoint.shape))
 
-        exit(0)
+        #exit(0)
 
         num_params = np.sum([np.prod(v.shape) for v in model.trainable_variables])
         dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
 
-        logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, num_classes: {}, trainable variables: {}, trainable params: {}, dtype: {}, autoaugment_name: {}'.format(
-            num_replicas, checkpoint_dir, FLAGS.model_name, image_size, num_classes, len(model.trainable_variables), int(num_params), dtype, FLAGS.autoaugment_name))
+        logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, trainable variables: {}, trainable params: {}, dtype: {}, autoaugment_name: {}'.format(
+            num_replicas, checkpoint_dir, FLAGS.model_name, image_size, len(model.trainable_variables), int(num_params), dtype, FLAGS.autoaugment_name))
 
         has_moving_average_decay = (FLAGS.moving_average_decay > 0)
-        # This is essential, if using a keras-derived model.
 
         restore_vars_dict = None
 
@@ -137,23 +128,83 @@ def train():
 
             ema_vars = list(set(ema_vars))
 
-        def create_dataset(name, bg, is_training):
-            paths, labels = bg.get()
+        def create_dataset(name, ann_file, data_dir, is_training):
+            ds = coco.COCO(ann_file, data_dir)
+            def gen():
+                for filename, image_id, anns in zip(*ds.get_images()):
+                    orig_im = Image.open(filename)
+                    orig_width = orig_im.width
+                    orig_height = orig_im.height
 
-            dataset = tf.data.Dataset.from_tensor_slices((paths, labels))
-            dataset = dataset.map(lambda path, label: tf_read_image(path, label, image_size, is_training, dtype), num_parallel_calls=FLAGS.num_cpus)
-            #dataset = dataset.cache()
+                    if orig_im.mode != "RGB":
+                        orig_im = orig_im.convert("RGB")
+
+                    size = (image_size, image_size)
+                    im = orig_im.resize(size, resample=Image.BILINEAR)
+
+                    a = np.asarray(im)
+
+                    fanns = []
+                    for bb, c in anns:
+                        x1, x2, y1, y2 = [bb[0], bb[0]+bb[2], bb[1], bb[1]+bb[3]]
+                        fbb = [x1/orig_width, y1/orig_height, x2/orig_width, y2/orig_height, float(c)]
+                        fanns.append(fbb)
+
+                    logger.info('{}: {} {} -> {}, anns: {}'.format(filename, a.shape, orig_im.size, im.size, len(fanns)))
+
+                    yield filename, image_id, a, fanns
+
+
+            dataset = tf.data.Dataset.from_generator(gen,
+                                                     output_types=(tf.string, tf.int32, tf.uint8, dtype),
+                                                     output_shapes=(tf.TensorShape([]),
+                                                                    tf.TensorShape([]),
+                                                                    tf.TensorShape([image_size, image_size, 3]),
+                                                                    tf.TensorShape([None, 5])))
+
             dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
             dataset = dataset.shuffle(FLAGS.batch_size * 2)
             dataset = dataset.batch(FLAGS.batch_size)
             dataset = dataset.repeat()
 
-            logger.info('{}: dataset has been created'.format(name))
+            #logger.info('{}: dataset has been created, filename: {}, images: {}, categories: {}'.format(name, ann_file, ds.num_images(), ds.num_classes()))
 
-            return dataset
+            return dataset, ds.num_images(), ds.num_classes(), ds.cat_names()
 
-        train_dataset = create_dataset('train', train_bg, is_training=True)
-        eval_dataset = create_dataset('eval', eval_bg, is_training=False)
+        train_dataset, train_num_images, train_num_classes, cat_names = create_dataset('train', FLAGS.train_coco_annotations, FLAGS.train_coco_data_dir, is_training=True)
+        if False:
+            data_dir = os.path.join(FLAGS.train_dir, 'tmp')
+            os.makedirs(data_dir, exist_ok=True)
+
+            for t in train_dataset.take(16):
+                filename, image_id, image, anns = t
+
+                h = tf.cast(tf.shape(image)[0], tf.float32)
+                w = tf.cast(tf.shape(image)[1], tf.float32)
+
+                filename = str(filename)
+                new_anns = []
+                for ann in anns:
+
+                    x1, y1, x2, y2, c = ann[0], ann[1], ann[2], ann[3], ann[4]
+                    x1 *= w
+                    x2 *= w
+                    y1 *= h
+                    y2 *= h
+
+                    nbb = [x1.numpy(), y1.numpy(), x2.numpy(), y2.numpy()]
+                    #nbb = [x.numpy(), y.numpy(), fw.numpy(), fh.numpy()]
+
+                    new_anns.append((nbb, int(c)))
+
+                filename = str(filename)
+
+                dst = '{}/{}.jpg'.format(data_dir, image_id)
+                image_draw.draw_im(image.numpy(), new_anns, dst, cat_names)
+
+
+            exit(0)
+        eval_dataset, eval_num_images, eval_num_classes, cat_names = create_dataset('eval', FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, is_training=False)
 
         opt = tf.keras.optimizers.Adam(learning_rate=initial_learning_rate)
 
