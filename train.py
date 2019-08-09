@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import re
 import sys
 
 import numpy as np
@@ -54,11 +55,44 @@ autoaugment_name_choice = ['v0']
 parser.add_argument('--autoaugment_name', type=str, choices=autoaugment_name_choice, help='Autoaugment name, choices: {}'.format(autoaugment_name_choice))
 FLAGS = parser.parse_args()
 
+def tf_read_image(filename, anns, image_size, is_training, dtype):
+    image = tf.io.read_file(filename)
+    image = tf.image.decode_jpeg(image, channels=3)
+
+    orig_height = tf.shape(image)[0]
+    orig_width = tf.shape(image)[1]
+
+    image = preprocess.simple_resize_image(image, [image_size, image_size])
+
+    fanns = []
+    for bb, c in anns:
+        x1, x2, y1, y2 = [bb[0], bb[0]+bb[2], bb[1], bb[1]+bb[3]]
+        fbb = [x1/orig_width, y1/orig_height, x2/orig_width, y2/orig_height, float(c)]
+        fanns.append(fbb)
+
+
 def calc_epoch_steps(bg):
     return (bg.num_files() + FLAGS.batch_size - 1) // FLAGS.batch_size
 
 def local_swish(x):
     return x * tf.nn.sigmoid(x)
+
+def intersect(box_a, box_b):
+    max_xy = tf.minimum(box_a[:, None, 2:], box_b[None, :, 2:])
+    min_xy = tf.maximum(box_a[:, None, :2], box_b[None, :, :2])
+    #inter = tf.clip_by_value((max_xy - min_xy), 0, 10000000)
+    inter = tf.nn.relu(max_xy - min_xy)
+    return inter[:, :, 0] * inter[:, :, 1]
+
+def box_sz(b):
+    x = b[:, 2] - b[:, 0]
+    y = b[:, 3] - b[:, 1]
+    return x * y
+
+def jaccard(box_a, box_b):
+    inter = intersect(box_a, box_b)
+    union = tf.expand_dims(box_sz(box_a), 1) + tf.expand_dims(box_b, 0) - inter
+    return inter / union
 
 def train():
     checkpoint_dir = os.path.join(FLAGS.train_dir, 'checkpoints')
@@ -99,19 +133,22 @@ def train():
 
         #tf.keras.backend.set_learning_phase(1)
 
+        output_endpoints = []
+
         global_step = tf.Variable(1, dtype=tf.int64, name='global_step')
         model = efficientnet.build_model(model_name=FLAGS.model_name, override_params=params)
-        #_ = model(tf.zeros((1, image_size, image_size, 3)), features_only=True)
-        #for name, endpoint in model.endpoints.items():
-        #    logger.info('{}: {}'.format(name, endpoint.shape))
-
-        #exit(0)
+        _ = model(tf.zeros((1, image_size, image_size, 3)), features_only=True)
+        for name, endpoint in model.endpoints.items():
+            m = re.match('reduction_[\d]+$', name)
+            if m:
+                output_endpoints.append((name, endpoint))
 
         num_params = np.sum([np.prod(v.shape) for v in model.trainable_variables])
         dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
 
         logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, trainable variables: {}, trainable params: {}, dtype: {}, autoaugment_name: {}'.format(
             num_replicas, checkpoint_dir, FLAGS.model_name, image_size, len(model.trainable_variables), int(num_params), dtype, FLAGS.autoaugment_name))
+        logger.info('output endpoints: {}'.format([e.shape for name, e in output_endpoints]))
 
         has_moving_average_decay = (FLAGS.moving_average_decay > 0)
 
@@ -172,39 +209,56 @@ def train():
             return dataset, ds.num_images(), ds.num_classes(), ds.cat_names()
 
         train_dataset, train_num_images, train_num_classes, cat_names = create_dataset('train', FLAGS.train_coco_annotations, FLAGS.train_coco_data_dir, is_training=True)
-        if False:
+        #eval_dataset, eval_num_images, eval_num_classes, cat_names = create_dataset('eval', FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, is_training=False)
+
+        if True:
             data_dir = os.path.join(FLAGS.train_dir, 'tmp')
             os.makedirs(data_dir, exist_ok=True)
 
-            for t in train_dataset.take(16):
-                filename, image_id, image, anns = t
+            for b in train_dataset.take(1):
+                for t in b:
+                    filename, image_id, image, anns = t
 
-                h = tf.cast(tf.shape(image)[0], tf.float32)
-                w = tf.cast(tf.shape(image)[1], tf.float32)
+                    h = tf.cast(tf.shape(image)[0], tf.float32)
+                    w = tf.cast(tf.shape(image)[1], tf.float32)
 
-                filename = str(filename)
-                new_anns = []
-                for ann in anns:
+                    filename = str(filename)
+                    new_anns = []
+                    for ann in anns:
 
-                    x1, y1, x2, y2, c = ann[0], ann[1], ann[2], ann[3], ann[4]
-                    x1 *= w
-                    x2 *= w
-                    y1 *= h
-                    y2 *= h
+                        x1, y1, x2, y2, c = ann[0], ann[1], ann[2], ann[3], ann[4]
+                        x1 *= w
+                        x2 *= w
+                        y1 *= h
+                        y2 *= h
 
-                    nbb = [x1.numpy(), y1.numpy(), x2.numpy(), y2.numpy()]
-                    #nbb = [x.numpy(), y.numpy(), fw.numpy(), fh.numpy()]
+                        nbb = [x1.numpy(), y1.numpy(), x2.numpy(), y2.numpy()]
+                        new_anns.append((nbb, int(c)))
 
-                    new_anns.append((nbb, int(c)))
+                    filename = str(filename)
 
-                filename = str(filename)
-
-                dst = '{}/{}.jpg'.format(data_dir, image_id)
-                image_draw.draw_im(image.numpy(), new_anns, dst, cat_names)
+                    dst = '{}/{}.jpg'.format(data_dir, image_id)
+                    image_draw.draw_im(image.numpy(), new_anns, dst, cat_names)
 
 
-            exit(0)
-        eval_dataset, eval_num_images, eval_num_classes, cat_names = create_dataset('eval', FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, is_training=False)
+        anc_grid = 4
+        k = 1
+
+        anc_offset = 1 / (anc_grid * 2)
+        anc_x = np.repeat(np.linspace(anc_offset, 1 - anc_offset, anc_grid), anc_grid)
+        anc_y = np.tile(np.linspace(anc_offset, 1 - anc_offset, anc_grid), anc_grid)
+
+        anc_ctrs = np.tile(np.stack([anc_x, anc_y], axis=1), (k, 1))
+        anc_sizes = np.array([[1 / anc_grid, 1 / anc_grid] for i in range(anc_grid * anc_grid)])
+        anchors = np.concatenate([anc_ctrs, anc_sizes], axis=1)
+
+        def hw2corners(ctr, hw):
+            return tf.concat([ctr - hw/2, ctr + hw/2], axis=1)
+
+        anchor_cnr = hw2corners(anchors[:, :2], anchors[:, 2:])
+
+        logger.info('anchors:\n{}\ncenters:\n{}'.format(anchors, anchor_cnr))
+        exit(0)
 
         opt = tf.keras.optimizers.Adam(learning_rate=initial_learning_rate)
 

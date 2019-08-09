@@ -11,19 +11,25 @@ def show_img(im, figsize=None, ax=None):
 
     ax.imshow(im)
 
-    ax.get_xaxis().set_visible(False)
-    ax.get_yaxis().set_visible(False)
+    ax.set_xticks(np.linspace(0, 224, 8))
+    ax.set_yticks(np.linspace(0, 224, 8))
+    ax.grid()
+    ax.set_yticklabels([])
+    ax.set_xticklabels([])
+
+    #ax.get_xaxis().set_visible(False)
+    #ax.get_yaxis().set_visible(False)
     return ax
 
 def draw_outline(o, lw):
     o.set_path_effects([patheffects.Stroke(linewidth=lw, foreground='black'), patheffects.Normal()])
 
 def draw_rect(ax, b):
-    patch = ax.add_patch(patches.Rectangle(b[:2], *b[-2:], fill=False, edgecolor='white', lw=2))
-    draw_outline(patch, 4)
+    patch = ax.add_patch(patches.Rectangle(b[:2], *b[-2:], fill=False, edgecolor='white', lw=1))
+    draw_outline(patch, 2)
 
 def draw_text(ax, xy, txt, sz=14):
-    text = ax.text(*xy, txt, verticalalignment='top', color='white', fontsize=sz, weight='bold')
+    text = ax.text(*xy, txt, verticalalignment='top', color='white', fontsize=sz, weight='normal')
     draw_outline(text, 1)
 
 def bb_hw(a):
