@@ -148,7 +148,9 @@ def train():
 
         logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, trainable variables: {}, trainable params: {}, dtype: {}, autoaugment_name: {}'.format(
             num_replicas, checkpoint_dir, FLAGS.model_name, image_size, len(model.trainable_variables), int(num_params), dtype, FLAGS.autoaugment_name))
-        logger.info('output endpoints: {}'.format([e.shape for name, e in output_endpoints]))
+
+        endpoint_shapes = [e.shape for name, e in output_endpoints]
+        logger.info('output endpoints: {}'.format(endpoint_shapes))
 
         has_moving_average_decay = (FLAGS.moving_average_decay > 0)
 
@@ -189,7 +191,7 @@ def train():
 
                     logger.info('{}: {} {} -> {}, anns: {}'.format(filename, a.shape, orig_im.size, im.size, len(fanns)))
 
-                    yield filename, image_id, a, fanns
+                    yield filename, image_id, a, fanns[:1]
 
 
             dataset = tf.data.Dataset.from_generator(gen,
@@ -215,30 +217,27 @@ def train():
             data_dir = os.path.join(FLAGS.train_dir, 'tmp')
             os.makedirs(data_dir, exist_ok=True)
 
-            for b in train_dataset.take(1):
-                for t in b:
-                    filename, image_id, image, anns = t
+            for filename, image_id, image, anns in train_dataset.take(1).unbatch():
+                h = tf.cast(tf.shape(image)[0], tf.float32)
+                w = tf.cast(tf.shape(image)[1], tf.float32)
 
-                    h = tf.cast(tf.shape(image)[0], tf.float32)
-                    w = tf.cast(tf.shape(image)[1], tf.float32)
+                filename = str(filename)
+                new_anns = []
+                for ann in anns:
 
-                    filename = str(filename)
-                    new_anns = []
-                    for ann in anns:
+                    x1, y1, x2, y2, c = ann[0], ann[1], ann[2], ann[3], ann[4]
+                    x1 *= w
+                    x2 *= w
+                    y1 *= h
+                    y2 *= h
 
-                        x1, y1, x2, y2, c = ann[0], ann[1], ann[2], ann[3], ann[4]
-                        x1 *= w
-                        x2 *= w
-                        y1 *= h
-                        y2 *= h
+                    nbb = [x1.numpy(), y1.numpy(), x2.numpy(), y2.numpy()]
+                    new_anns.append((nbb, int(c)))
 
-                        nbb = [x1.numpy(), y1.numpy(), x2.numpy(), y2.numpy()]
-                        new_anns.append((nbb, int(c)))
+                filename = str(filename)
 
-                    filename = str(filename)
-
-                    dst = '{}/{}.jpg'.format(data_dir, image_id)
-                    image_draw.draw_im(image.numpy(), new_anns, dst, cat_names)
+                dst = '{}/{}.jpg'.format(data_dir, image_id)
+                image_draw.draw_im(image.numpy(), new_anns, dst, cat_names)
 
 
         anc_grid = 4

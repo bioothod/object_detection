@@ -19,7 +19,7 @@ def show_img(im, figsize=None, ax=None):
 
     #ax.get_xaxis().set_visible(False)
     #ax.get_yaxis().set_visible(False)
-    return ax
+    return fig, ax
 
 def draw_outline(o, lw):
     o.set_path_effects([patheffects.Stroke(linewidth=lw, foreground='black'), patheffects.Normal()])
@@ -38,13 +38,14 @@ def bb_hw(a):
     return np.array([a[0], a[1], a[2]-a[0]+1, a[3]-a[1]+1])
 
 def draw_im(im, ann, dst, cat_names):
-    ax = show_img(im, figsize=(10, 10))
+    fig, ax = show_img(im, figsize=(10, 10))
     for b, c in ann:
         b = bb_hw(b)
         draw_rect(ax, b)
         draw_text(ax, b[:2], cat_names[c], sz=16)
 
     plt.savefig(dst)
+    plt.close(fig)
 
 def draw_filename(fn, ann, dst, cat_names):
     im = mpimg.imread(fn)
