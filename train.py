@@ -11,6 +11,7 @@ import coco
 import efficientnet
 import image as image_draw
 import preprocess
+import ssd
 
 from tensorflow.keras import Model
 import tensorflow.keras.layers as layers
@@ -71,8 +72,8 @@ def tf_read_image(filename, anns, image_size, is_training, dtype):
         fanns.append(fbb)
 
 
-def calc_epoch_steps(bg):
-    return (bg.num_files() + FLAGS.batch_size - 1) // FLAGS.batch_size
+def calc_epoch_steps(num_files):
+    return (num_files + FLAGS.batch_size - 1) // FLAGS.batch_size
 
 def local_swish(x):
     return x * tf.nn.sigmoid(x)
@@ -113,7 +114,7 @@ def train():
         FLAGS.batch_size *= num_replicas
 
         params = {
-            'num_classes': None,
+            'num_classes': None, # we are creaging a base model which only extract features and does not perform classification
             'data_format': FLAGS.data_format,
             'relu_fn': local_swish
         }
@@ -131,23 +132,31 @@ def train():
         if FLAGS.width_coefficient:
             params['width_coefficient'] = FLAGS.width_coefficient
 
-        #tf.keras.backend.set_learning_phase(1)
-
         output_endpoints = []
 
         global_step = tf.Variable(1, dtype=tf.int64, name='global_step')
-        model = efficientnet.build_model(model_name=FLAGS.model_name, override_params=params)
-        _ = model(tf.zeros((1, image_size, image_size, 3)), features_only=True)
-        for name, endpoint in model.endpoints.items():
+
+        base_model = efficientnet.build_model(model_name=FLAGS.model_name, override_params=params)
+        base_output = base_model(tf.zeros((1, image_size, image_size, 3)), features_only=True, training=True)
+        for name, endpoint in base_model.endpoints.items():
             m = re.match('reduction_[\d]+$', name)
-            if m:
+            if not m:
+                continue
+
+            shape = endpoint.shape
+            h = shape[1]
+            w = shape[2]
+
+            if w <= 7 or h <= 7:
                 output_endpoints.append((name, endpoint))
 
-        num_params = np.sum([np.prod(v.shape) for v in model.trainable_variables])
+        output_endpoints.append(('final_features', base_model.endpoints['features']))
+
+        base_num_params = np.sum([np.prod(v.shape) for v in base_model.trainable_variables])
         dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
 
-        logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, trainable variables: {}, trainable params: {}, dtype: {}, autoaugment_name: {}'.format(
-            num_replicas, checkpoint_dir, FLAGS.model_name, image_size, len(model.trainable_variables), int(num_params), dtype, FLAGS.autoaugment_name))
+        logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, base model trainable variables: {}, trainable params: {}, dtype: {}, autoaugment_name: {}'.format(
+            num_replicas, checkpoint_dir, FLAGS.model_name, image_size, len(base_model.trainable_variables), int(base_num_params), dtype, FLAGS.autoaugment_name))
 
         endpoint_shapes = [e.shape for name, e in output_endpoints]
         logger.info('output endpoints: {}'.format(endpoint_shapes))
@@ -211,9 +220,9 @@ def train():
             return dataset, ds.num_images(), ds.num_classes(), ds.cat_names()
 
         train_dataset, train_num_images, train_num_classes, cat_names = create_dataset('train', FLAGS.train_coco_annotations, FLAGS.train_coco_data_dir, is_training=True)
-        #eval_dataset, eval_num_images, eval_num_classes, cat_names = create_dataset('eval', FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, is_training=False)
+        eval_dataset, eval_num_images, eval_num_classes, cat_names = create_dataset('eval', FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, is_training=False)
 
-        if True:
+        if False:
             data_dir = os.path.join(FLAGS.train_dir, 'tmp')
             os.makedirs(data_dir, exist_ok=True)
 
@@ -240,24 +249,11 @@ def train():
                 image_draw.draw_im(image.numpy(), new_anns, dst, cat_names)
 
 
-        anc_grid = 4
-        k = 1
+        num_anchors = 1
+        model = ssd.SSD(base_model._global_params, output_endpoints, num_anchors, train_num_classes)
 
-        anc_offset = 1 / (anc_grid * 2)
-        anc_x = np.repeat(np.linspace(anc_offset, 1 - anc_offset, anc_grid), anc_grid)
-        anc_y = np.tile(np.linspace(anc_offset, 1 - anc_offset, anc_grid), anc_grid)
+        _ = model(base_model, tf.zeros((1, image_size, image_size, 3)), training=True)
 
-        anc_ctrs = np.tile(np.stack([anc_x, anc_y], axis=1), (k, 1))
-        anc_sizes = np.array([[1 / anc_grid, 1 / anc_grid] for i in range(anc_grid * anc_grid)])
-        anchors = np.concatenate([anc_ctrs, anc_sizes], axis=1)
-
-        def hw2corners(ctr, hw):
-            return tf.concat([ctr - hw/2, ctr + hw/2], axis=1)
-
-        anchor_cnr = hw2corners(anchors[:, :2], anchors[:, 2:])
-
-        logger.info('anchors:\n{}\ncenters:\n{}'.format(anchors, anchor_cnr))
-        exit(0)
 
         opt = tf.keras.optimizers.Adam(learning_rate=initial_learning_rate)
 
@@ -270,17 +266,17 @@ def train():
         checkpoint = tf.keras.callbacks.ModelCheckpoint(filepath, monitor='val_sparse_categorical_accuracy', verbose=1, save_best_only=True, mode='max')
         callbacks_list.append(checkpoint)
 
-        steps_per_epoch = calc_epoch_steps(train_bg)
+        steps_per_epoch = calc_epoch_steps(train_num_images)
         if FLAGS.steps_per_epoch > 0:
             steps_per_epoch = FLAGS.steps_per_epoch
-        steps_per_eval = calc_epoch_steps(eval_bg)
+        steps_per_eval = calc_epoch_steps(eval_num_images)
         if FLAGS.steps_per_eval > 0:
             steps_per_eval = FLAGS.steps_per_eval
 
-        logger.info('steps_per_epoch: {}/{}, steps_per_eval: {}/{}'.format(steps_per_epoch, calc_epoch_steps(train_bg), steps_per_eval, calc_epoch_steps(eval_bg)))
+        logger.info('steps_per_epoch: {}/{}, steps_per_eval: {}/{}'.format(steps_per_epoch, calc_epoch_steps(train_num_images), steps_per_eval, calc_epoch_steps(eval_num_images)))
 
         model.compile(optimizer=opt,
-                      loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+                      loss=ssd.SSD_Loss(),
                       metrics=[tf.keras.metrics.SparseCategoricalAccuracy()])
 
         if FLAGS.checkpoint:

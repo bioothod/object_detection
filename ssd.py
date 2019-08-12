@@ -1,106 +1,154 @@
+import logging
+
+import numpy as np
+import tensorflow as tf
+
 from efficientnet import conv_kernel_initializer
+
+logger = logging.getLogger('objdet')
+logger.setLevel(logging.INFO)
 
 class StdConv(tf.keras.layers.Layer):
     def __init__(self, global_params, num_filters, strides=2, dropout_rate=0.1):
         super(StdConv, self).__init__()
 
-        self._num_filters = num_filters
-        self._strides = strides
-        self._dropout_rate = dropout_rate
+        self.num_filters = num_filters
+        self.strides = strides
+        self.dropout_rate = dropout_rate
 
-        self._batch_norm_momentum = global_params.batch_norm_momentum
-        self._batch_norm_epsilon = global_params.batch_norm_epsilon
-        self._data_format = global_params.data_format
-        if self._data_format == 'channels_first':
-            self._channel_axis = 1
-            self._spatial_dims = [2, 3]
+        self.batch_norm_momentum = global_params.batch_norm_momentum
+        self.batch_norm_epsilon = global_params.batch_norm_epsilon
+        self.data_format = global_params.data_format
+        if self.data_format == 'channels_first':
+            self.channel_axis = 1
+            self.spatial_dims = [2, 3]
         else:
-            self._channel_axis = -1
-            self._spatial_dims = [1, 2]
+            self.channel_axis = -1
+            self.spatial_dims = [1, 2]
 
         self._build()
 
     def _build(self):
-        self._c0 = tf.keras.layers.Conv2D(
-            filters=self._num_filters,
+        self.c0 = tf.keras.layers.Conv2D(
+            filters=self.num_filters,
             kernel_size=3,
-            strides=self._strides,
-            data_format=self._data_format,
+            strides=self.strides,
+            data_format=self.data_format,
             kernel_initializer=conv_kernel_initializer,
             padding='same',
             use_bias=False)
 
-        self._bn0 = batchnorm(
-            axis=self._channel_axis,
-            momentum=self._batch_norm_momentum,
-            epsilon=self._batch_norm_epsilon)
+        self.bn0 = tf.keras.layers.BatchNormalization(
+            axis=self.channel_axis,
+            momentum=self.batch_norm_momentum,
+            epsilon=self.batch_norm_epsilon)
 
-        self._dropout0 = tf.keras.layers.Dropout(self._dropout_rate)
+        self.dropout0 = tf.keras.layers.Dropout(self.dropout_rate)
 
     def call(self, inputs, training=True):
-        return self._dropout0(self._bn0(self._c0(inputs), training=training))
+        return self.dropout0(self.bn0(self.c0(inputs), training=training))
 
-def flaten_conv(global_params, x, k):
-    if global_params.data_format == 'channels_first':
-        x = tf.transpose(x, [0, 2, 3, 1])
-
+def flaten_conv(x, k):
     return tf.reshape(x, (-1, tf.shape(x)[-1] // k))
 
 class OutConv(tf.keras.layers.Layer):
     def __init__(self, global_params, k, num_classes):
         super(OutConv, self).__init__()
 
-        self._k = k
-        self._num_classes = num_classes
+        self.k = k
+        self.num_classes = num_classes
 
-        self._data_format = global_params.data_format
+        self.data_format = global_params.data_format
 
         self._build()
 
     def _build(self):
-        self._c1 = tf.keras.layers.Conv2D(
-            filters=self._num_classes*self._k,
+        self.class_out = tf.keras.layers.Conv2D(
+            filters=self.num_classes*self.k,
             kernel_size=3,
             strides=1,
-            data_format=self._data_format,
+            data_format=self.data_format,
             kernel_initializer=conv_kernel_initializer,
             padding='same',
             use_bias=False)
 
-        self._c2 = tf.keras.layers.Conv2D(
-            filters=4*self._k,
+        self.loc_out = tf.keras.layers.Conv2D(
+            filters=4*self.k,
             kernel_size=3,
             strides=1,
-            data_format=self._data_format,
+            data_format=self.data_format,
             kernel_initializer=conv_kernel_initializer,
             padding='same',
             use_bias=False)
 
     def call(self, inputs, training=True):
-        return [flatten_conv(global_params, self._c1(inputs), self.k), flatten_conv(global_params, self._c2(inputs), self.k)]
+        return self.loc_out(inputs), self.class_out(inputs)
 
 class SSD_Head(tf.keras.models.Model):
     def __init__(self, global_params, k, num_classes):
         super(SSD_Head, self).__init__()
 
-        self._k = k
-        self._num_classes = num_classes
+        self.k = k
+        self.num_classes = num_classes
 
-        self._relu_fn = global_params.relu_fn or tf.nn.swish
+        self.global_params = global_params
+        self.relu_fn = global_params.relu_fn or tf.nn.swish
 
         self._build()
 
     def _build(self):
-        self._dropout = tf.keras.layers.Dropout(0.25)
-        self._sc0 = StdConv(global_params, 256, strides=1)
-        self._sc2 = StdConv(global_params, 256)
-        self._out = OutConv(global_params, self._k, self._num_classes)
+        self.dropout = tf.keras.layers.Dropout(0.25)
+        self.sc0 = StdConv(self.global_params, 256, strides=1)
+        self.sc1 = StdConv(self.global_params, 256)
+        self.out = OutConv(self.global_params, self.k, self.num_classes)
 
     def call(self, inputs, training=True):
-        x = self._relu_fn(inputs)
-        x = self._dropout(x)
-        x = self._sc0(x)
-        x = self._sc2(x)
-        x = self._out(x)
+        x = self.relu_fn(inputs)
+        x = self.dropout(x)
+        x = self.sc0(x)
+        x = self.sc1(x)
+        x = self.out(x)
 
         return x
+
+class SSD(tf.keras.models.Model):
+    def __init__(self, global_params, endpoints, k, num_classes):
+        super(SSD, self).__init__()
+
+        self.global_params = global_params
+        self.k = k
+        self.num_classes = num_classes
+
+        self.endpoints = None
+        self.input_endpoints = endpoints
+
+        self._build()
+
+    def _build(self):
+        self.endpoints = []
+
+        for name, endpoint in self.input_endpoints:
+            with tf.name_scope('ssd_{}'.format(name)):
+                head = SSD_Head(self.global_params, self.k, self.num_classes)
+
+                self.endpoints.append((name, endpoint, head))
+
+    def call(self, base_model, inputs, training=True):
+        if self.global_params.data_format == 'channels_first':
+            inputs = tf.transpose(inputs, (0, 3, 1, 2))
+
+        x = base_model(inputs, training)
+
+        outputs = []
+        for name, endpoint, ssd_head in self.endpoints:
+            so = ssd_head(endpoint)
+            outputs.append(so)
+
+        return outputs
+
+class SSD_Loss(tf.keras.losses.Loss):
+    def __init__(self, reduction=tf.keras.losses.Reduction.NONE, name=None):
+        super(SSD_Loss, self).__init__(reduction, name)
+
+    def __call__(y_true, y_pred, sample_weight=None):
+        logger.info('true: {}, pred: {}'.format(y_true.shape, y_pred.shape))
