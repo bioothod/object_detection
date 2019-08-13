@@ -106,12 +106,14 @@ def train():
     image_size = efficientnet.efficientnet_params(FLAGS.model_name)[2]
 
     num_replicas = 1
-    #dstrategy = tf.distribute.MirroredStrategy()
-    #num_replicas = dstrategy.num_replicas_in_sync
-    #with dstrategy.scope():
-    if True:
-        initial_learning_rate = FLAGS.initial_learning_rate * num_replicas
+    dstrategy = tf.distribute.MirroredStrategy()
+    num_replicas = dstrategy.num_replicas_in_sync
+    with dstrategy.scope():
+    #if True:
+        FLAGS.initial_learning_rate *= num_replicas
         FLAGS.batch_size *= num_replicas
+
+        learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
 
         params = {
             'num_classes': None, # we are creaging a base model which only extract features and does not perform classification
@@ -255,17 +257,6 @@ def train():
         _ = model(base_model, tf.zeros((1, image_size, image_size, 3)), training=True)
 
 
-        opt = tf.keras.optimizers.Adam(learning_rate=initial_learning_rate)
-
-        callbacks_list = []
-
-        lr_callback = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_sparse_categorical_accuracy', factor=0.2, patience=10, min_lr=1e-5, mode='max', verbose=1, cooldown=2)
-        callbacks_list.append(lr_callback)
-
-        filepath = os.path.join(checkpoint_dir, "model.ckpt-{epoch:02d}-{val_sparse_categorical_accuracy:.4f}.hdf5")
-        checkpoint = tf.keras.callbacks.ModelCheckpoint(filepath, monitor='val_sparse_categorical_accuracy', verbose=1, save_best_only=True, mode='max')
-        callbacks_list.append(checkpoint)
-
         steps_per_epoch = calc_epoch_steps(train_num_images)
         if FLAGS.steps_per_epoch > 0:
             steps_per_epoch = FLAGS.steps_per_epoch
@@ -273,22 +264,201 @@ def train():
         if FLAGS.steps_per_eval > 0:
             steps_per_eval = FLAGS.steps_per_eval
 
-        logger.info('steps_per_epoch: {}/{}, steps_per_eval: {}/{}'.format(steps_per_epoch, calc_epoch_steps(train_num_images), steps_per_eval, calc_epoch_steps(eval_num_images)))
+        opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
-        model.compile(optimizer=opt,
-                      loss=ssd.SSD_Loss(),
-                      metrics=[tf.keras.metrics.SparseCategoricalAccuracy()])
+        checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model)
+        manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=5)
 
         if FLAGS.checkpoint:
-            model.fit(train_dataset, epochs=0, steps_per_epoch=1)
-            logger.info('loading weights from {}'.format(FLAGS.checkpoint))
-            model.load_weights(FLAGS.checkpoint)
+            status = checkpoint.restore(FLAGS.checkpoint)
+            status.expect_partial()
 
-        model.fit(train_dataset,
-                epochs=FLAGS.num_epochs, initial_epoch=FLAGS.epoch,
-                steps_per_epoch=steps_per_epoch,
-                callbacks=callbacks_list, verbose=1,
-                validation_data=eval_dataset, validation_steps=steps_per_eval)
+            logger.info("Restored from external checkpoint {}".format(manager.latest_checkpoint))
+
+        status = checkpoint.restore(manager.latest_checkpoint)
+        status.expect_partial()
+
+        if manager.latest_checkpoint:
+            logger.info("Restored from {}".format(manager.latest_checkpoint))
+        else:
+            logger.info("Initializing from scratch, no latest checkpoint")
+
+        reg_loss_metric = tf.keras.metrics.Mean(name='reg_train_loss')
+        ce_loss_metric = tf.keras.metrics.Mean(name='ce_train_loss')
+        loss_metric = tf.keras.metrics.Mean(name='train_loss')
+        accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='train_accuracy')
+
+        eval_ce_loss_metric = tf.keras.metrics.Mean(name='ce_eval_loss')
+        eval_loss_metric = tf.keras.metrics.Mean(name='eval_loss')
+        eval_accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='eval_accuracy')
+
+        def reset_metrics():
+            reg_loss_metric.reset_states()
+            ce_loss_metric.reset_states()
+            loss_metric.reset_states()
+            accuracy_metric.reset_states()
+
+            eval_loss_metric.reset_states()
+            eval_ce_loss_metric.reset_states()
+            eval_accuracy_metric.reset_states()
+
+
+        cross_entropy_loss_object = tf.keras.losses.CategoricalCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.NONE, label_smoothing=FLAGS.label_smoothing)
+
+        def calculate_metrics(logits, labels):
+            # Calculate loss, which includes softmax cross entropy and L2 regularization.
+            one_hot_labels = tf.one_hot(labels, num_classes)
+
+            ce_loss = cross_entropy_loss_object(y_pred=logits, y_true=one_hot_labels)
+            ce_loss = tf.nn.compute_average_loss(ce_loss, global_batch_size=FLAGS.batch_size)
+
+            reg_loss = 0
+            # Add weight decay to the loss for non-batch-normalization variables.
+            reg_loss = FLAGS.reg_weight_decay * tf.add_n([tf.nn.l2_loss(v) for v in model.trainable_variables if 'batch_normalization' not in v.name])
+            reg_loss = tf.nn.scale_regularization_loss(reg_loss)
+
+            total_loss = ce_loss + reg_loss
+
+            return reg_loss, ce_loss, total_loss
+
+        def eval_step(images, labels):
+            logits = model(images, training=False)
+            reg_loss, ce_loss, total_loss = calculate_metrics(logits, labels)
+
+            eval_loss_metric.update_state(total_loss)
+            eval_ce_loss_metric.update_state(ce_loss)
+            eval_accuracy_metric.update_state(labels, logits)
+
+            return reg_loss, ce_loss, total_loss
+
+        def train_step(images, labels):
+            with tf.GradientTape() as tape:
+                logits = model(images, training=True)
+                reg_loss, ce_loss, total_loss = calculate_metrics(logits, labels)
+
+            variables = model.trainable_variables
+            gradients = tape.gradient(total_loss, variables)
+            opt.apply_gradients(zip(gradients, variables))
+
+            loss_metric.update_state(total_loss)
+            reg_loss_metric.update_state(reg_loss)
+            ce_loss_metric.update_state(ce_loss)
+            accuracy_metric.update_state(labels, logits)
+
+            global_step.assign_add(1)
+
+            return reg_loss, ce_loss, total_loss
+
+        if has_moving_average_decay:
+            with tf.control_dependencies([train_op]):
+                train_op = ema.apply(ema_vars)
+
+            # Load moving average variables for eval.
+            #restore_vars_dict = ema.variables_to_restore(ema_vars)
+
+        steps_per_epoch = calc_epoch_steps(train_bg)
+        if FLAGS.steps_per_epoch > 0:
+            steps_per_epoch = FLAGS.steps_per_epoch
+        steps_per_eval = calc_epoch_steps(eval_bg)
+        if FLAGS.steps_per_eval > 0:
+            steps_per_eval = FLAGS.steps_per_eval
+
+        logger.info('steps_per_epoch: {}/{}, steps_per_eval: {}/{}'.format(steps_per_epoch, calc_epoch_steps(train_bg), steps_per_eval, calc_epoch_steps(eval_bg)))
+
+        @tf.function
+        def distributed_step(step_func, images, labels):
+            pr_reg_losses, pr_ce_losses, pr_total_losses = dstrategy.experimental_run_v2(step_func, args=(images, labels,))
+
+            #reg_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_reg_losses, axis=None)
+            #ce_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_ce_losses, axis=None)
+            #total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_total_losses, axis=None)
+
+        def run_epoch(bg, dataset, step_func, max_steps):
+            losses = []
+            accs = []
+
+            step = 0
+            for images, labels, filenames in dataset:
+                # In most cases, the default data format NCHW instead of NHWC should be
+                # used for a significant performance boost on GPU/TPU. NHWC should be used
+                # only if the network needs to be run on CPU since the pooling operations
+                # are only supported on NHWC.
+                if FLAGS.data_format == 'channels_first':
+                    images = tf.transpose(images, [0, 3, 1, 2])
+
+
+                #step_func(images, labels)
+                distributed_step(step_func, images, labels)
+
+                step += 1
+                if step >= max_steps:
+                    break
+
+            return step
+
+        min_metric = 0
+        num_epochs_without_improvement = 0
+
+        if manager.latest_checkpoint:
+            reset_metrics()
+            logger.info('there is a checkpoint {}, running initial validation'.format(manager.latest_checkpoint))
+
+            # we have to call training @tf.function distributed_step() first, since it is the only time when variables can be created,
+            # if distributed_step() with eval function is called first, then no training model weights will be created and subsequent training will fail
+            # maybe the right solution is to separate train functions (as steps already are) and call them with their own datasets
+            _ = run_epoch(train_bg, train_dataset, train_step, 0)
+            eval_steps = run_epoch(eval_bg, eval_dataset, eval_step, steps_per_eval)
+            min_metric = eval_accuracy_metric.result()
+            logger.info('initial validation metric: {}'.format(min_metric))
+
+        if min_metric < FLAGS.min_eval_metric:
+            logger.info('setting minimal evaluation metric {} -> {} from command line arguments'.format(min_metric, FLAGS.min_eval_metric))
+            min_metric = FLAGS.min_eval_metric
+
+        for epoch in range(FLAGS.epoch, FLAGS.num_epochs):
+            reset_metrics()
+
+            train_steps = run_epoch(train_bg, train_dataset, train_step, steps_per_epoch)
+            eval_steps = run_epoch(eval_bg, eval_dataset, eval_step, steps_per_eval)
+
+            logger.info('epoch: {}, train: steps: {}, reg_loss: {:.2e}, ce_loss: {:.2e}, total_loss: {:.2e}, accuracy: {:.5f}, eval: ce_loss: {:.2e}, total_loss: {:.2e}, accuracy: {:.5f}, lr: {:.2e}'.format(
+                epoch, global_step.numpy(),
+                reg_loss_metric.result(), ce_loss_metric.result(), loss_metric.result(), accuracy_metric.result(),
+                eval_ce_loss_metric.result(), eval_loss_metric.result(), eval_accuracy_metric.result(),
+                learning_rate.numpy()))
+
+            eval_acc = eval_accuracy_metric.result()
+            if eval_acc > min_metric:
+                save_path = manager.save()
+                logger.info("epoch: {}, saved checkpoint: {}, eval accuracy: {:.5f} -> {:.5f}".format(epoch, save_path, min_metric, eval_acc))
+                min_metric = eval_acc
+                num_epochs_without_improvement = 0
+            else:
+                num_epochs_without_improvement += 1
+
+            if num_epochs_without_improvement > 10:
+                want_reset = False
+
+                if learning_rate > FLAGS.min_learning_rate:
+                    new_lr = learning_rate.numpy() / 5.
+                    logger.info('epoch: {}, epochs without metric improvement: {}, best metric: {:.5f}, updating learning rate: {:.2e} -> {:.2e}'.format(
+                        epoch, num_epochs_without_improvement, min_metric, learning_rate.numpy(), new_lr))
+                    learning_rate.assign(new_lr)
+                    num_epochs_without_improvement = 0
+                    want_reset = True
+                elif num_epochs_without_improvement > 20:
+                    new_lr = FLAGS.initial_learning_rate
+                    logger.info('epoch: {}, epochs without metric improvement: {}, best metric: {:.5f}, resetting learning rate: {:.2e} -> {:.2e}'.format(
+                        epoch, num_epochs_without_improvement, min_metric, learning_rate.numpy(), new_lr))
+                    learning_rate.assign(new_lr)
+                    num_epochs_without_improvement = 0
+                    want_reset = True
+
+                if want_reset:
+                    logger.info('epoch: {}, best metric: {:.5f}, learning rate: {:.2e}, restoring best checkpoint: {}'.format(
+                        epoch, min_metric, learning_rate.numpy(), manager.latest_checkpoint))
+
+                    checkpoint.restore(manager.latest_checkpoint)
 
 def main():
     try:
