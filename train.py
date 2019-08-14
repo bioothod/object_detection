@@ -14,10 +14,8 @@ import preprocess
 import ssd
 
 from tensorflow.keras import Model
-import tensorflow.keras.layers as layers
 
 from PIL import Image
-
 
 logger = logging.getLogger('objdet')
 logger.propagate = False
@@ -179,7 +177,7 @@ def train():
             ema_vars = list(set(ema_vars))
 
         def create_dataset(name, ann_file, data_dir, is_training):
-            ds = coco.COCO(ann_file, data_dir)
+            ds = coco.COCO(ann_file, data_dir, logger)
             def gen():
                 for filename, image_id, anns in zip(*ds.get_images()):
                     orig_im = Image.open(filename)
