@@ -1,23 +1,22 @@
 import cv2
 import json
 import os
-import random
 import sys
 
 import numpy as np
 
 class Card:
-    def __init__(self, ann_path, image_path, target_height, target_width):
+    def __init__(self, ann_filename, image_filename, target_height, target_width):
         self.target_height = target_height
         self.target_width = target_width
-        self.image_path = image_path
+        self.image_filename = image_filename
 
         self.card_mask = None
         self.number_text = None
         self.exp_data_text = None
         self.text_mask = None
 
-        self.parse_single(ann_path)
+        self.parse_single(ann_filename)
 
     def float2abs(self, coord):
         return [coord[0] * self.target_width, coord[1] * self.target_height]
@@ -36,8 +35,8 @@ class Card:
         cv2.fillPoly(mask, polys, value)
         return mask
 
-    def parse_single(self, path):
-        js = json.load(open(path, 'r'))
+    def parse_single(self, filename):
+        js = json.load(open(filename, 'r'))
 
         card = js['card']
         card_poly = self.find_poly(card)
@@ -54,7 +53,7 @@ class Card:
         self.card_mask = self.apply_mask(self.card_mask, [number_poly, exp_date_poly], 2)
 
 class Polygons:
-    def __init__(self, ann_path, logger, target_height, target_width):
+    def __init__(self, ann_filename, logger, target_height, target_width):
         self.logger = logger
 
         self.target_height = target_height
@@ -64,19 +63,19 @@ class Polygons:
 
         self.cards = []
 
-        for fn in os.listdir(ann_path):
+        for fn in os.listdir(ann_filename):
             ext = os.path.splitext(fn)[1].lower()
             if ext not in good_exts:
                 continue
             
-            image_path = os.path.join(ann_path, fn)
-            json_path = os.path.join(ann_path, '{}.json'.format(fn))
+            image_filename = os.path.join(ann_filename, fn)
+            json_filename = os.path.join(ann_filename, '{}.json'.format(fn))
 
             try:
-                card = Card(json_path, image_path, self.target_height, self.target_height)
+                card = Card(json_filename, image_filename, self.target_height, self.target_height)
                 self.cards.append(card)
             except Exception as e:
-                self.logger.error('could not parse card data: ann_path: {}, image_path: {}, exception: {}'.format(json_path, image_path, e))
+                self.logger.error('could not parse card data: ann_filename: {}, image_filename: {}, exception: {}'.format(json_filename, image_filename, e))
 
                 exc_type, exc_value, exc_traceback = sys.exc_info()
 
@@ -97,3 +96,9 @@ class Polygons:
 
     def num_images(self):
         return len(self.cards)
+
+    def get_filenames(self):
+        return [card.image_filename for card in self.cards]
+
+    def get_masks(self):
+        return [card.card_mask for card in self.cards]
