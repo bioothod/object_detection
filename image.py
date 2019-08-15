@@ -5,6 +5,8 @@ from matplotlib import patches, patheffects
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 
+from pycocotools import mask as maskUtils
+
 def show_img(im, figsize=None, ax=None):
     if not ax:
         fig, ax = plt.subplots(figsize=figsize)
@@ -50,3 +52,29 @@ def draw_im(im, ann, dst, cat_names):
 def draw_filename(fn, ann, dst, cat_names):
     im = mpimg.imread(fn)
     draw_im(im, ann, dst, cat_names)
+
+def draw_im_segm(img, masks, dst):
+    ax = plt.gca()
+    ax.set_autoscale_on(True)
+
+    ax.imshow(img)
+
+    polygons = []
+    color = []
+
+    single_color = True
+
+    for m in masks:
+        img = np.ones((m.shape[0], m.shape[1], 3))
+        if single_color:
+            color_mask = np.array([2.0, 166.0, 101.0])/255
+        else:
+            color_mask = np.random.random((1, 3)).tolist()[0]
+
+        for i in range(3):
+            img[:, :, i] = color_mask[i]
+
+        ax.imshow(np.dstack((img, m.astype(float)*0.4)))
+
+    plt.savefig(dst)
+    plt.cla()
