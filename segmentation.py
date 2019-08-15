@@ -10,12 +10,7 @@ import tensorflow as tf
 import efficientnet
 import image as image_draw
 import polygon_dataset
-
-from tensorflow.keras import Model
-from tensorflow_examples.models.pix2pix import pix2pix
-
-from PIL import Image
-
+import preprocess
 
 logger = logging.getLogger('segmentation')
 logger.propagate = False
@@ -27,11 +22,11 @@ logger.addHandler(__handler)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--train_data_dir', type=str, required=True, help='Path to train image+annotation directory')
-parser.add_argument('--eval_data_dir', type=str, required=True, help='Path to eval image+annotation directory')
+parser.add_argument('--eval_data_dir', type=str, help='Path to eval image+annotation directory')
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch.')
 parser.add_argument('--num_epochs', type=int, default=100, help='Number of epochs to run.')
 parser.add_argument('--epoch', type=int, default=0, help='Initial epoch\'s number')
-parser.add_argument('--num_cpus', type=int, default=4, help='Number of parallel preprocessing jobs.')
+parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel preprocessing jobs.')
 parser.add_argument('--train_dir', type=str, required=True, help='Path to train directory, where graph will be stored.')
 parser.add_argument('--checkpoint', type=str, help='Load model weights from this file')
 parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='Model name')
@@ -59,26 +54,18 @@ def calc_epoch_steps(num_files):
 def local_swish(x):
     return x * tf.nn.sigmoid(x)
 
-def normalize(input_image, input_mask, dtype):
-    input_image = tf.cast(input_image, dtype)
-    vgg_means = tf.constant([91.4953, 103.8827, 131.0912])
-    input_image -= vgg_means
-    input_image /= 255.
-
-    input_mask = tf.cast(input_mask, dtype)
-    return input_image, input_mask
-
 @tf.function
-def basic_preprocess(filename, input_image, input_mask, dtype):
+def basic_preprocess(filename, mask, image_size, is_training, dtype):
+    image = tf.io.read_file(filename)
+    image = tf.image.decode_jpeg(image, channels=3)
+
+    image = preprocess.processing_function(image, image_size, image_size, is_training, dtype)
+
     if tf.random.uniform(()) > 0.5:
-        input_image = tf.image.flip_left_right(input_image)
-        input_mask = tf.image.flip_left_right(input_mask)
+        image = tf.image.flip_left_right(image)
+        mask = tf.image.flip_left_right(mask)
 
-    input_image, input_mask = normalize(input_image, input_mask, dtype)
-
-    logger.info('image: {}, mask: {}'.format(input_image, input_mask))
-
-    return filename, input_image, input_mask
+    return filename, image, mask
 
 def upsample(filters, size, norm_type='batchnorm', apply_dropout=False):
   """Upsamples an input.
@@ -107,7 +94,7 @@ def upsample(filters, size, norm_type='batchnorm', apply_dropout=False):
     result.add(InstanceNormalization())
 
   if apply_dropout:
-    result.add(tf.keras.layers.Dropout(0.5))
+    result.add(tf.keras.layers.Dropout(0.3))
 
   result.add(tf.keras.layers.ReLU())
 
@@ -123,15 +110,19 @@ class Unet(tf.keras.Model):
         self.final_endpoints = None
 
         for name, endpoint in self.base_model.endpoints.items():
-            logger.info('{}: {}'.format(name, endpoint))
+            if name != 'features':
+                m = re.match('reduction_([\d]+)$', name)
+                if not m:
+                    continue
 
-        self.layer_names = ['features', 'reduction_4', 'reduction_3', 'reduction_2', 'reduction_1']
-
-        for name in self.layer_names:
             endpoint = self.base_model.endpoints[name]
 
             c = endpoint.shape[3]
-            up = upsample(c*2, 3)
+            up = upsample(c*2, 3, apply_dropout=True)
+
+            if name == 'features':
+                self.up_stack = self.up_stack[:-1]
+
             self.up_stack.append((name, up))
             logger.info('{}: endpoint: {}, upsampled channels: {}'.format(name, endpoint, c*2))
 
@@ -209,13 +200,13 @@ def train():
 
         base_model = efficientnet.build_model(FLAGS.model_name, params)
         if dstrategy is not None:
-            dstrategy.experimental_run_v2(call_base_model, args=(base_model, tf.ones((FLAGS.batch_size, image_size, image_size, 3))))
+            dstrategy.experimental_run_v2(call_base_model, args=(base_model, tf.ones((1, image_size, image_size, 3))))
 
         model = Unet(3, base_model)
         if dstrategy is not None:
-            dstrategy.experimental_run_v2(call_model, args=(model, tf.ones((FLAGS.batch_size, image_size, image_size, 3))))
+            dstrategy.experimental_run_v2(call_model, args=(model, tf.ones((1, image_size, image_size, 3))))
         else:
-            dummy_init_unet(model, FLAGS.batch_size, image_size)
+            dummy_init_unet(model, 1, image_size)
 
         num_params_base = np.sum([np.prod(v.shape) for v in base_model.trainable_variables])
         num_params_unet = np.sum([np.prod(v.shape) for v in model.trainable_variables])
@@ -226,49 +217,27 @@ def train():
             len(model.trainable_variables), int(num_params_unet),
             dtype))
 
-        def create_dataset(name, ann_dir, is_training):
+        def create_dataset(ann_dir, is_training):
             cards = polygon_dataset.Polygons(ann_dir, logger, image_size, image_size)
-            def gen():
-                for card in cards.get_cards():
-                    orig_im = Image.open(card.image_path)
-                    orig_width = orig_im.width
-                    orig_height = orig_im.height
 
-                    if orig_im.mode != "RGB":
-                        orig_im = orig_im.convert("RGB")
+            dataset = tf.data.Dataset.from_tensor_slices((cards.get_filenames(), cards.get_masks()))
+            dataset = dataset.map(lambda filename, mask: basic_preprocess(filename, mask, image_size, is_training, dtype), num_parallel_calls=FLAGS.num_cpus)
 
-                    size = (image_size, image_size)
-                    im = orig_im.resize(size, resample=Image.BILINEAR)
-
-                    img = np.asarray(im)
-                    mask = card.card_mask
-
-                    #logger.info('{}: {} -> {}, type: {}, mask: {}, mask non-empty: {}, type: {}'.format(card.image_path, orig_im.size, img.shape, img.dtype, mask.shape, np.any(mask), mask.dtype))
-
-                    yield card.image_path, img, mask
-
-
-            dataset = tf.data.Dataset.from_generator(gen,
-                                                     output_types=(tf.string, tf.uint8, tf.int32),
-                                                     output_shapes=(
-                                                         tf.TensorShape([]),
-                                                         tf.TensorShape([image_size, image_size, 3]),
-                                                         tf.TensorShape([image_size, image_size, 1]),
-                                                     ))
-
-            dataset = dataset.map(lambda filename, image, mask: basic_preprocess(filename, image, mask, dtype), num_parallel_calls=FLAGS.num_cpus)
-            dataset = dataset.cache()
-            dataset = dataset.shuffle(FLAGS.batch_size * 2)
-            dataset = dataset.batch(FLAGS.batch_size)
-            dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
-            dataset = dataset.repeat()
-
-            logger.info('{}: dataset has been created, data dir: {}, images: {}'.format(name, ann_dir, cards.num_images()))
+            logger.info('dataset has been created, data dir: {}, images: {}'.format(ann_dir, cards.num_images()))
 
             return dataset, cards.num_images()
 
-        train_dataset, train_num_images = create_dataset('train', FLAGS.train_data_dir, is_training=True)
-        eval_dataset, eval_num_images = create_dataset('eval', FLAGS.eval_data_dir, is_training=False)
+        dataset, num_images = create_dataset(FLAGS.train_data_dir, is_training=True)
+
+        rate = 0.9
+        eval_num_images = int(num_images * (1. - rate))
+        train_num_images = num_images - eval_num_images
+
+        train_dataset = dataset.skip(eval_num_images).cache().shuffle(FLAGS.batch_size * 2).batch(FLAGS.batch_size).repeat().prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+        train_dataset = dstrategy.experimental_distribute_dataset(train_dataset)
+
+        eval_dataset = dataset.take(eval_num_images).cache().batch(FLAGS.batch_size).repeat().prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+        eval_dataset = dstrategy.experimental_distribute_dataset(eval_dataset)
 
         def generate_images(tmp_dir):
             data_dir = os.path.join(FLAGS.train_dir, tmp_dir)
