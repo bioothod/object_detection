@@ -113,7 +113,6 @@ def upsample(filters, size, norm_type='batchnorm', apply_dropout=False):
 
   return result
 
-
 class Unet(tf.keras.Model):
     def __init__(self, output_channels, base_model):
         super(Unet, self).__init__()
@@ -126,7 +125,7 @@ class Unet(tf.keras.Model):
         for name, endpoint in self.base_model.endpoints.items():
             logger.info('{}: {}'.format(name, endpoint))
 
-        self.layer_names = ['reduction_5', 'reduction_4', 'reduction_3', 'reduction_2', 'reduction_1']
+        self.layer_names = ['features', 'reduction_4', 'reduction_3', 'reduction_2', 'reduction_1']
 
         for name in self.layer_names:
             endpoint = self.base_model.endpoints[name]
@@ -139,15 +138,14 @@ class Unet(tf.keras.Model):
         self.last = tf.keras.layers.Conv2DTranspose(output_channels, 3, strides=1, padding='same', activation='softmax')
 
     def call(self, inputs, training=True):
-        logger.info('unet: inputs: {}'.format(inputs))
-
-        _ = self.base_model(inputs, training)
+        x = self.base_model(inputs, training)
 
         first = True
         for name, up in self.up_stack:
-            x = self.base_model.endpoints[name]
+            if not first:
+                x = self.base_model.endpoints[name]
+
             upsampled = up(x)
-            logger.info('{}: up: {}, x: {}'.format(name, upsampled, x))
 
             if first:
                 x = upsampled
@@ -157,7 +155,6 @@ class Unet(tf.keras.Model):
             first = True
 
         x = self.last(x)
-        logger.info('final call: {}'.format(x))
         return x
 
 @tf.function
@@ -220,10 +217,14 @@ def train():
         else:
             dummy_init_unet(model, FLAGS.batch_size, image_size)
 
-        num_params = np.sum([np.prod(v.shape) for v in model.trainable_variables])
+        num_params_base = np.sum([np.prod(v.shape) for v in base_model.trainable_variables])
+        num_params_unet = np.sum([np.prod(v.shape) for v in model.trainable_variables])
 
-        logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, base model trainable variables: {}, trainable params: {}, dtype: {}'.format(
-            num_replicas, checkpoint_dir, FLAGS.model_name, image_size, len(model.trainable_variables), int(num_params), dtype))
+        logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, base model trainable variables/params: {}/{}, unet model trainable variables/params: {}/{}, dtype: {}'.format(
+            num_replicas, checkpoint_dir, FLAGS.model_name, image_size,
+            len(base_model.trainable_variables), int(num_params_base),
+            len(model.trainable_variables), int(num_params_unet),
+            dtype))
 
         def create_dataset(name, ann_dir, is_training):
             cards = polygon_dataset.Polygons(ann_dir, logger, image_size, image_size)
@@ -335,7 +336,7 @@ def train():
                 logits = model(images, training=True)
                 total_loss = calculate_metrics(logits, labels)
 
-            variables = model.trainable_variables + base_model.variables
+            variables = model.trainable_variables + base_model.trainable_variables
             gradients = tape.gradient(total_loss, variables)
             opt.apply_gradients(zip(gradients, variables))
 
