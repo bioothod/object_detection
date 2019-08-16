@@ -54,27 +54,34 @@ def draw_filename(fn, ann, dst, cat_names):
     draw_im(im, ann, dst, cat_names)
 
 def draw_im_segm(img, masks, dst):
-    ax = plt.gca()
+    fig = plt.figure(figsize=(15, 15))
+    rows = 1
+    columns = 1 + len(masks)*2
+    ax = fig.add_subplot(rows, columns, 1)
     ax.set_autoscale_on(True)
-
     ax.imshow(img)
 
-    polygons = []
-    color = []
+    single_color = False
 
-    single_color = True
+    ax_idx = 2
+    for idx, m in enumerate(masks):
+        for i in range(2):
+            ax = fig.add_subplot(rows, columns, ax_idx + 2*idx+i)
+            ax.set_autoscale_on(True)
 
-    for m in masks:
-        img = np.ones((m.shape[0], m.shape[1], 3))
-        if single_color:
-            color_mask = np.array([2.0, 166.0, 101.0])/255
-        else:
-            color_mask = np.random.random((1, 3)).tolist()[0]
+            if i == 1:
+                ax.imshow(img)
 
-        for i in range(3):
-            img[:, :, i] = color_mask[i]
+            img = np.ones((m.shape[0], m.shape[1], 3))
+            if single_color:
+                color_mask = np.array([2.0, 166.0, 101.0])/255
+            else:
+                color_mask = np.random.random((1, 3)).tolist()[0]
 
-        ax.imshow(np.dstack((img, m.astype(float)*0.4)))
+            for i in range(3):
+                img[:, :, i] = color_mask[i]
+
+            ax.imshow(np.dstack((img, m.astype(float)*0.8)))
 
     plt.savefig(dst)
-    plt.cla()
+    plt.close(fig)

@@ -11,6 +11,7 @@ import efficientnet
 import image as image_draw
 import polygon_dataset
 import preprocess
+import unet
 
 logger = logging.getLogger('segmentation')
 logger.propagate = False
@@ -44,6 +45,7 @@ parser.add_argument('--steps_per_eval', default=-1, type=int, help='Number of st
 parser.add_argument('--steps_per_epoch', default=-1, type=int, help='Number of steps per training run')
 parser.add_argument('--min_eval_metric', default=0.75, type=float, help='Minimal evaluation metric to start saving models')
 parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16 training/inference')
+parser.add_argument('--min_learning_rate', default=1e-6, type=float, help='Minimal learning rate')
 autoaugment_name_choice = ['v0']
 parser.add_argument('--autoaugment_name', type=str, choices=autoaugment_name_choice, help='Autoaugment name, choices: {}'.format(autoaugment_name_choice))
 FLAGS = parser.parse_args()
@@ -67,86 +69,6 @@ def basic_preprocess(filename, mask, image_size, is_training, dtype):
 
     return filename, image, mask
 
-def upsample(filters, size, norm_type='batchnorm', apply_dropout=False):
-  """Upsamples an input.
-  Conv2DTranspose => Batchnorm => Dropout => Relu
-  Args:
-    filters: number of filters
-    size: filter size
-    norm_type: Normalization type; either 'batchnorm' or 'instancenorm'.
-    apply_dropout: If True, adds the dropout layer
-  Returns:
-    Upsample Sequential Model
-  """
-
-  initializer = tf.random_normal_initializer(0., 0.02)
-
-  result = tf.keras.Sequential()
-  result.add(
-      tf.keras.layers.Conv2DTranspose(filters, size, strides=2,
-                                      padding='same',
-                                      kernel_initializer=initializer,
-                                      use_bias=False))
-
-  if norm_type.lower() == 'batchnorm':
-    result.add(tf.keras.layers.BatchNormalization())
-  elif norm_type.lower() == 'instancenorm':
-    result.add(InstanceNormalization())
-
-  if apply_dropout:
-    result.add(tf.keras.layers.Dropout(0.3))
-
-  result.add(tf.keras.layers.ReLU())
-
-  return result
-
-class Unet(tf.keras.Model):
-    def __init__(self, output_channels, base_model):
-        super(Unet, self).__init__()
-
-        self.base_model = base_model
-
-        self.up_stack = []
-        self.final_endpoints = None
-
-        for name, endpoint in self.base_model.endpoints.items():
-            if name != 'features':
-                m = re.match('reduction_([\d]+)$', name)
-                if not m:
-                    continue
-
-            endpoint = self.base_model.endpoints[name]
-
-            c = endpoint.shape[3]
-            up = upsample(c*2, 3, apply_dropout=True)
-
-            if name == 'features':
-                self.up_stack = self.up_stack[:-1]
-
-            self.up_stack.append((name, up))
-            logger.info('{}: endpoint: {}, upsampled channels: {}'.format(name, endpoint, c*2))
-
-        self.last = tf.keras.layers.Conv2DTranspose(output_channels, 3, strides=1, padding='same', activation='softmax')
-
-    def call(self, inputs, training=True):
-        x = self.base_model(inputs, training)
-
-        first = True
-        for name, up in self.up_stack:
-            if not first:
-                x = self.base_model.endpoints[name]
-
-            upsampled = up(x)
-
-            if first:
-                x = upsampled
-            else:
-                x = tf.concat([upsampled, endpoint], axis=-1)
-
-            first = True
-
-        x = self.last(x)
-        return x
 
 @tf.function
 def call_base_model(model, inputs):
@@ -202,7 +124,7 @@ def train():
         if dstrategy is not None:
             dstrategy.experimental_run_v2(call_base_model, args=(base_model, tf.ones((1, image_size, image_size, 3))))
 
-        model = Unet(3, base_model)
+        model = unet.Unet(3, base_model)
         if dstrategy is not None:
             dstrategy.experimental_run_v2(call_model, args=(model, tf.ones((1, image_size, image_size, 3))))
         else:
@@ -239,17 +161,6 @@ def train():
         eval_dataset = dataset.take(eval_num_images).cache().batch(FLAGS.batch_size).repeat().prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
         eval_dataset = dstrategy.experimental_distribute_dataset(eval_dataset)
 
-        def generate_images(tmp_dir):
-            data_dir = os.path.join(FLAGS.train_dir, tmp_dir)
-            os.makedirs(data_dir, exist_ok=True)
-
-            for filename, image, mask in train_dataset.take(1).unbatch():
-                filename = os.path.basename(str(filename))
-                image_id = os.path.splitext(filename)[0]
-
-                dst = '{}/{}.png'.format(data_dir, image_id)
-                image_draw.draw_im_segm(image.numpy(), [mask.numpy()], dst)
-
         opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
         checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model)
@@ -259,7 +170,7 @@ def train():
             status = checkpoint.restore(FLAGS.checkpoint)
             status.expect_partial()
 
-            logger.info("Restored from external checkpoint {}".format(manager.latest_checkpoint))
+            logger.info("Restored from external checkpoint {}".format(FLAGS.checkpoint))
 
         status = checkpoint.restore(manager.latest_checkpoint)
 

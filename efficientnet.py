@@ -266,7 +266,7 @@ class MBConvBlock(tf.keras.layers.Layer):
                 if drop_connect_rate:
                     x = drop_connect(x, training, drop_connect_rate)
                 x = tf.add(x, inputs)
-        tf.compat.v1.logging.info('Project: %s shape: %s, trainable variables: %d' % (x.name, x.shape, len(self.trainable_variables)))
+        #tf.compat.v1.logging.debug('Project: %s shape: %s, trainable variables: %d' % (x.name, x.shape, len(self.trainable_variables)))
         return x
 
 
