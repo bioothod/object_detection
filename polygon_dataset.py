@@ -72,7 +72,7 @@ class Polygons:
             json_filename = os.path.join(ann_filename, '{}.json'.format(fn))
 
             try:
-                card = Card(json_filename, image_filename, self.target_height, self.target_height)
+                card = Card(json_filename, image_filename, self.target_height, self.target_width)
                 self.cards.append(card)
             except Exception as e:
                 self.logger.error('could not parse card data: ann_filename: {}, image_filename: {}, exception: {}'.format(json_filename, image_filename, e))

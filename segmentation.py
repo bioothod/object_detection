@@ -4,13 +4,16 @@ import os
 import re
 import sys
 
+import albumentations as A
 import numpy as np
 import tensorflow as tf
 
-import efficientnet
+from PIL import Image
+
+import efficientnet.tfkeras as efn
+
 import image as image_draw
 import polygon_dataset
-import preprocess
 import unet
 
 logger = logging.getLogger('segmentation')
@@ -50,33 +53,179 @@ autoaugment_name_choice = ['v0']
 parser.add_argument('--autoaugment_name', type=str, choices=autoaugment_name_choice, help='Autoaugment name, choices: {}'.format(autoaugment_name_choice))
 FLAGS = parser.parse_args()
 
+model_map = {
+    'efficientnet-b0': efn.EfficientNetB0,
+    'efficientnet-b1': efn.EfficientNetB1,
+    'efficientnet-b2': efn.EfficientNetB2,
+    'efficientnet-b3': efn.EfficientNetB3,
+    'efficientnet-b4': efn.EfficientNetB4,
+    'efficientnet-b5': efn.EfficientNetB5,
+    'efficientnet-b6': efn.EfficientNetB6,
+    'efficientnet-b7': efn.EfficientNetB7,
+}
+
 def calc_epoch_steps(num_files):
     return (num_files + FLAGS.batch_size - 1) // FLAGS.batch_size
 
 def local_swish(x):
     return x * tf.nn.sigmoid(x)
 
-@tf.function
-def basic_preprocess(filename, mask, image_size, is_training, dtype):
-    image = tf.io.read_file(filename)
-    image = tf.image.decode_jpeg(image, channels=3)
+def round_clip_0_1(x, **kwargs):
+    return x.round().clip(0, 1)
 
-    image = preprocess.processing_function(image, image_size, image_size, is_training, dtype)
+def get_training_augmentation():
+    train_transform = [
 
-    if tf.random.uniform(()) > 0.5:
-        image = tf.image.flip_left_right(image)
-        mask = tf.image.flip_left_right(mask)
+        A.HorizontalFlip(p=0.5),
 
-    return filename, image, mask
+        A.ShiftScaleRotate(scale_limit=0.5, rotate_limit=0, shift_limit=0.1, p=1, border_mode=0),
+
+        A.PadIfNeeded(min_height=320, min_width=320, always_apply=True, border_mode=0),
+        A.RandomCrop(height=320, width=320, always_apply=True),
+
+        A.IAAAdditiveGaussianNoise(p=0.2),
+        A.IAAPerspective(p=0.5),
+
+        A.OneOf(
+            [
+                A.CLAHE(p=1),
+                A.RandomBrightness(p=1),
+                A.RandomGamma(p=1),
+            ],
+            p=0.9,
+        ),
+
+        A.OneOf(
+            [
+                A.IAASharpen(p=1),
+                A.Blur(blur_limit=3, p=1),
+                A.MotionBlur(blur_limit=3, p=1),
+            ],
+            p=0.9,
+        ),
+
+        A.OneOf(
+            [
+                A.RandomContrast(p=1),
+                A.HueSaturationValue(p=1),
+            ],
+            p=0.9,
+        ),
+        A.Lambda(mask=round_clip_0_1)
+    ]
+    return A.Compose(train_transform)
 
 
-@tf.function
-def call_base_model(model, inputs):
-    return model(inputs, training=True, features_only=True)
+def get_validation_augmentation():
+    """Add paddings to make image shape divisible by 32"""
+    test_transform = [
+        A.PadIfNeeded(384, 480)
+    ]
+    return A.Compose(test_transform)
 
-@tf.function
-def call_model(model, inputs):
-    return model(inputs, training=True)
+def get_preprocessing(preprocessing_fn):
+    """Construct preprocessing transform
+    
+    Args:
+        preprocessing_fn (callbale): data normalization function 
+            (can be specific for each pretrained neural network)
+    Return:
+        transform: albumentations.Compose
+    
+    """
+    
+    _transform = [
+        A.Lambda(image=preprocessing_fn),
+    ]
+    return A.Compose(_transform)
+
+class Dataset:
+    def __init__(self, data_dir,
+                 augmentation=None, 
+                 preprocessing=None
+                ):
+        good_exts = ['.png', '.jpg', '.jpeg']
+
+        self.image_filenames = []
+        self.json_filenames = []
+
+        self.augmentation = augmentation
+        self.preprocessing = preprocessing
+
+        for fn in os.listdir(data_dir):
+            ext = os.path.splitext(fn)[1].lower()
+            if ext not in good_exts:
+                continue
+            
+            image_filename = os.path.join(data_dir, fn)
+            json_filename = os.path.join(data_dir, '{}.json'.format(fn))
+
+            self.image_filenames.append(image_filename)
+            self.json_filenames.append(json_filename)
+
+    def __len__(self):
+        return len(self.image_filenames)
+
+    def __getitem__(self, i):
+        img_fn = self.image_filenames[i]
+        js_fn = self.json_filenames[i]
+
+        image = cv2.imread(img_fn)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        #card = polygon_dataset.Card(js_fn, img_fn, image.shape(0), image.shape(1))
+
+        return image, card.card_mask
+
+class Dataloder(tf.keras.utils.Sequence):
+    def __init__(self, dataset, batch_size=1, shuffle=False):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.indexes = np.arange(len(dataset))
+
+        self.on_epoch_end()
+
+    def __getitem__(self, i):
+        # collect batch data
+        start = i * self.batch_size
+        stop = (i + 1) * self.batch_size
+        data = []
+        for j in range(start, stop):
+            data.append(self.dataset[j])
+        
+        # transpose list of lists
+        batch = [np.stack(samples, axis=0) for samples in zip(*data)]
+        
+        return batch
+    
+    def __len__(self):
+        """Denotes the number of batches per epoch"""
+        return len(self.indexes) // self.batch_size
+    
+    def on_epoch_end(self):
+        """Callback function to shuffle indexes each epoch"""
+        if self.shuffle:
+            self.indexes = np.random.permutation(self.indexes)
+
+def preprocess_input(filename, image_size):
+    orig_im = Image.open(filename)
+    orig_width = orig_im.width
+    orig_height = orig_im.height
+
+    if orig_im.mode != "RGB":
+        orig_im = orig_im.convert("RGB")
+
+    size = (image_size, image_size)
+    im = orig_im.resize(size, resample=Image.BILINEAR)
+
+    img = np.asarray(im).astype(np.float32)
+
+    vgg_means = np.array([91.4953, 103.8827, 131.0912], dtype=np.float32)
+    img -= vgg_means
+    img /= 255.
+
+    return filename, img
 
 def train():
     checkpoint_dir = os.path.join(FLAGS.train_dir, 'checkpoints')
@@ -85,8 +234,6 @@ def train():
     handler = logging.FileHandler(os.path.join(checkpoint_dir, 'train.log'), 'a')
     handler.setFormatter(__fmt)
     logger.addHandler(handler)
-
-    image_size = efficientnet.efficientnet_params(FLAGS.model_name)[2]
 
     num_replicas = 1
     #dstrategy = None
@@ -120,15 +267,10 @@ def train():
         global_step = tf.Variable(1, dtype=tf.int64, name='global_step', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
         learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
 
-        base_model = efficientnet.build_model(FLAGS.model_name, params)
-        if dstrategy is not None:
-            dstrategy.experimental_run_v2(call_base_model, args=(base_model, tf.ones((1, image_size, image_size, 3))))
-
+        base_model = model_map[FLAGS.model_name](include_top=False)
         model = unet.Unet(3, base_model)
-        if dstrategy is not None:
-            dstrategy.experimental_run_v2(call_model, args=(model, tf.ones((1, image_size, image_size, 3))))
-        else:
-            dummy_init_unet(model, 1, image_size)
+
+        image_size = base_model.input_shape[1]
 
         num_params_base = np.sum([np.prod(v.shape) for v in base_model.trainable_variables])
         num_params_unet = np.sum([np.prod(v.shape) for v in model.trainable_variables])
@@ -139,93 +281,14 @@ def train():
             len(model.trainable_variables), int(num_params_unet),
             dtype))
 
-        def create_dataset(ann_dir, is_training):
-            cards = polygon_dataset.Polygons(ann_dir, logger, image_size, image_size)
 
-            dataset = tf.data.Dataset.from_tensor_slices((cards.get_filenames(), cards.get_masks()))
-            dataset = dataset.map(lambda filename, mask: basic_preprocess(filename, mask, image_size, is_training, dtype), num_parallel_calls=FLAGS.num_cpus)
-
-            logger.info('dataset has been created, data dir: {}, images: {}'.format(ann_dir, cards.num_images()))
-
-            return dataset, cards.num_images()
-
-        dataset, num_images = create_dataset(FLAGS.train_data_dir, is_training=True)
-
-        rate = 0.9
-        eval_num_images = int(num_images * (1. - rate))
-        train_num_images = num_images - eval_num_images
-
-        train_dataset = dataset.skip(eval_num_images).cache().shuffle(FLAGS.batch_size * 2).batch(FLAGS.batch_size).repeat().prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
-        train_dataset = dstrategy.experimental_distribute_dataset(train_dataset)
-
-        eval_dataset = dataset.take(eval_num_images).cache().batch(FLAGS.batch_size).repeat().prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
-        eval_dataset = dstrategy.experimental_distribute_dataset(eval_dataset)
-
-        opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
-
-        checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model)
-        manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=5)
-
-        if FLAGS.checkpoint:
-            status = checkpoint.restore(FLAGS.checkpoint)
-            status.expect_partial()
-
-            logger.info("Restored from external checkpoint {}".format(FLAGS.checkpoint))
-
-        status = checkpoint.restore(manager.latest_checkpoint)
-
-        if manager.latest_checkpoint:
-            logger.info("Restored from {}".format(manager.latest_checkpoint))
-        else:
-            logger.info("Initializing from scratch, no latest checkpoint")
+        dataset = Dataset(FLAGS.train_data_dir, augmentation=get_training_augmentation(), preprocessing=get_preprocessing(preprocess_input))
 
         loss_metric = tf.keras.metrics.Mean(name='train_loss')
         accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='train_accuracy')
 
         eval_loss_metric = tf.keras.metrics.Mean(name='eval_loss')
         eval_accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='eval_accuracy')
-
-        def reset_metrics():
-            loss_metric.reset_states()
-            accuracy_metric.reset_states()
-
-            eval_loss_metric.reset_states()
-            eval_accuracy_metric.reset_states()
-
-
-        cross_entropy_loss_object = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False, reduction=tf.keras.losses.Reduction.NONE)
-
-        def calculate_metrics(logits, labels):
-            ce_loss = cross_entropy_loss_object(y_pred=logits, y_true=labels)
-            ce_loss = tf.nn.compute_average_loss(ce_loss, global_batch_size=FLAGS.batch_size)
-
-            total_loss = ce_loss
-            return total_loss
-
-        def eval_step(images, labels):
-            logits = model(images, training=False)
-            total_loss = calculate_metrics(logits, labels)
-
-            eval_loss_metric.update_state(total_loss)
-            eval_accuracy_metric.update_state(labels, logits)
-
-            return total_loss
-
-        def train_step(images, labels):
-            with tf.GradientTape() as tape:
-                logits = model(images, training=True)
-                total_loss = calculate_metrics(logits, labels)
-
-            variables = model.trainable_variables + base_model.trainable_variables
-            gradients = tape.gradient(total_loss, variables)
-            opt.apply_gradients(zip(gradients, variables))
-
-            loss_metric.update_state(total_loss)
-            accuracy_metric.update_state(labels, logits)
-
-            global_step.assign_add(1)
-
-            return total_loss
 
         steps_per_epoch = calc_epoch_steps(train_num_images)
         if FLAGS.steps_per_epoch > 0:
@@ -236,97 +299,6 @@ def train():
 
         logger.info('steps_per_epoch: {}/{}, steps_per_eval: {}/{}'.format(steps_per_epoch, calc_epoch_steps(train_num_images), steps_per_eval, calc_epoch_steps(eval_num_images)))
 
-        @tf.function
-        def distributed_step(step_func, images, labels):
-            pr_total_losses = dstrategy.experimental_run_v2(step_func, args=(images, labels))
-
-            #total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_total_losses, axis=None)
-
-        def run_epoch(dataset, step_func, max_steps):
-            losses = []
-            accs = []
-
-            step = 0
-            for filenames, images, masks in dataset:
-                # In most cases, the default data format NCHW instead of NHWC should be
-                # used for a significant performance boost on GPU/TPU. NHWC should be used
-                # only if the network needs to be run on CPU since the pooling operations
-                # are only supported on NHWC.
-                if FLAGS.data_format == 'channels_first':
-                    images = tf.transpose(images, [0, 3, 1, 2])
-
-
-                distributed_step(step_func, images, masks)
-
-                step += 1
-                if step >= max_steps:
-                    break
-
-            return step
-
-        min_metric = 0
-        num_epochs_without_improvement = 0
-
-        if manager.latest_checkpoint:
-            reset_metrics()
-            logger.info('there is a checkpoint {}, running initial validation'.format(manager.latest_checkpoint))
-
-            # we have to call training @tf.function distributed_step() first, since it is the only time when variables can be created,
-            # if distributed_step() with eval function is called first, then no training model weights will be created and subsequent training will fail
-            # maybe the right solution is to separate train functions (as steps already are) and call them with their own datasets
-            _ = run_epoch(train_dataset, train_step, 0)
-            eval_steps = run_epoch(eval_dataset, eval_step, steps_per_eval)
-            min_metric = eval_accuracy_metric.result()
-            logger.info('initial validation metric: {}'.format(min_metric))
-
-        if min_metric < FLAGS.min_eval_metric:
-            logger.info('setting minimal evaluation metric {} -> {} from command line arguments'.format(min_metric, FLAGS.min_eval_metric))
-            min_metric = FLAGS.min_eval_metric
-
-        for epoch in range(FLAGS.epoch, FLAGS.num_epochs):
-            reset_metrics()
-
-            train_steps = run_epoch(train_dataset, train_step, steps_per_epoch)
-            eval_steps = run_epoch(eval_dataset, eval_step, steps_per_eval)
-
-            logger.info('epoch: {}, train: steps: {}, loss: {:.2e}, accuracy: {:.5f}, eval: loss: {:.2e}, accuracy: {:.5f}, lr: {:.2e}'.format(
-                epoch, global_step.numpy(),
-                loss_metric.result(), accuracy_metric.result(),
-                eval_loss_metric.result(), eval_accuracy_metric.result(),
-                learning_rate.numpy()))
-
-            eval_acc = eval_accuracy_metric.result()
-            if eval_acc > min_metric:
-                save_path = manager.save()
-                logger.info("epoch: {}, saved checkpoint: {}, eval accuracy: {:.5f} -> {:.5f}".format(epoch, save_path, min_metric, eval_acc))
-                min_metric = eval_acc
-                num_epochs_without_improvement = 0
-            else:
-                num_epochs_without_improvement += 1
-
-            if num_epochs_without_improvement > 10:
-                want_reset = False
-
-                if learning_rate > FLAGS.min_learning_rate:
-                    new_lr = learning_rate.numpy() / 5.
-                    logger.info('epoch: {}, epochs without metric improvement: {}, best metric: {:.5f}, updating learning rate: {:.2e} -> {:.2e}'.format(
-                        epoch, num_epochs_without_improvement, min_metric, learning_rate.numpy(), new_lr))
-                    learning_rate.assign(new_lr)
-                    num_epochs_without_improvement = 0
-                    want_reset = True
-                elif num_epochs_without_improvement > 20:
-                    new_lr = FLAGS.initial_learning_rate
-                    logger.info('epoch: {}, epochs without metric improvement: {}, best metric: {:.5f}, resetting learning rate: {:.2e} -> {:.2e}'.format(
-                        epoch, num_epochs_without_improvement, min_metric, learning_rate.numpy(), new_lr))
-                    learning_rate.assign(new_lr)
-                    num_epochs_without_improvement = 0
-                    want_reset = True
-
-                if want_reset:
-                    logger.info('epoch: {}, best metric: {:.5f}, learning rate: {:.2e}, restoring best checkpoint: {}'.format(
-                        epoch, min_metric, learning_rate.numpy(), manager.latest_checkpoint))
-
-                    checkpoint.restore(manager.latest_checkpoint)
 
 
 if __name__ == '__main__':

@@ -45,26 +45,20 @@ class Unet(tf.keras.Model):
         self.base_model = base_model
 
         self.up_stack = []
-        self.final_endpoints = None
 
-        for name, endpoint in self.base_model.endpoints.items():
+        layers = ('top_activation', 'block6a_expand_activation', 'block4a_expand_activation', 'block3a_expand_activation', 'block2a_expand_activation')
 
-        for name, endpoint in self.base_model.endpoints.items():
-            if name != 'features':
-                m = re.match('reduction_([\d]+)$', name)
-                if not m:
-                    continue
+        for l in self.base_model.layers:
+            if not l.name in layers:
+                continue
 
-            endpoint = self.base_model.endpoints[name]
 
-            c = endpoint.shape[3]
-            up = upsample(c*2, 3, apply_dropout=True)
+            shape = l.output_shape
 
-            if name == 'features':
-                self.up_stack = self.up_stack[:-1]
+            up = upsample(shape[-1]*2, 3, apply_dropout=True)
 
-            self.up_stack.append((name, up))
-            logger.info('{}: endpoint: {}, upsampled channels: {}'.format(name, endpoint.shape, c*2))
+            self.up_stack.append((l.name, up))
+            logger.info('{}: endpoint: {}, upsampled channels: {}'.format(l.name, shape, shape[-1]*2))
 
         self.last = tf.keras.layers.Conv2DTranspose(output_channels, 3, strides=1, padding='same', activation='softmax')
 
@@ -74,14 +68,14 @@ class Unet(tf.keras.Model):
         first = True
         for name, up in self.up_stack:
             if not first:
-                x = self.base_model.endpoints[name]
+                x = self.base_model.get_layer(name).output
 
             upsampled = up(x)
 
             if first:
                 x = upsampled
             else:
-                x = tf.concat([upsampled, endpoint], axis=-1)
+                x = tf.concat([upsampled, self.base_model.get_layer(name).output], axis=-1)
 
             first = True
 
