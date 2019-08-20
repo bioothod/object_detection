@@ -8,7 +8,6 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_datasets as tfds
 
-
 import efficientnet
 import image as image_draw
 import loss
@@ -300,13 +299,14 @@ def train():
 
         num_classes = 3
         #cross_entropy_loss_object = tf.keras.losses.BinaryCrossentropy(reduction=tf.keras.losses.Reduction.NONE, label_smoothing=FLAGS.label_smoothing)
-        cross_entropy_loss_object = loss.FocalLoss(reduction=tf.keras.losses.Reduction.NONE)
+        cross_entropy_loss_object = loss.CategoricalLoss(reduction=tf.keras.losses.Reduction.NONE)
+        class_weights = np.tile(np.array([1, 1, 5], dtype=np.float32), [FLAGS.batch_size / num_replicas, image_size, image_size, 1])
 
         def calculate_metrics(logits, labels):
             one_hot_labels = tf.one_hot(labels, num_classes, axis=3)
             one_hot_labels = tf.squeeze(one_hot_labels, axis=4)
 
-            ce_loss = cross_entropy_loss_object(y_pred=logits, y_true=one_hot_labels)
+            ce_loss = cross_entropy_loss_object(y_pred=logits, y_true=one_hot_labels, class_weights=class_weights)
             ce_loss = tf.nn.compute_average_loss(ce_loss, global_batch_size=FLAGS.batch_size)
 
             total_loss = ce_loss
