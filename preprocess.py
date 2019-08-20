@@ -35,8 +35,8 @@ def try_resize(image, output_height, output_width):
     image = tf.cond(tf.logical_and(tf.equal(shape[0], output_height),
                                    tf.equal(shape[1], output_width)),
                     lambda: image,
-                    lambda: pad_resize_image(image, [output_height, output_width]))
-                    #lambda: simple_resize_image(image, [output_height, output_width]))
+                    #lambda: pad_resize_image(image, [output_height, output_width]))
+                    lambda: simple_resize_image(image, [output_height, output_width]))
     return image
 
 def normalize(image, dtype):

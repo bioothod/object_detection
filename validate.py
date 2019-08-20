@@ -99,11 +99,16 @@ if __name__ == '__main__':
     parser.add_argument('--data_format', type=str, default='channels_last', choices=['channels_first', 'channels_last'], help='Data format: [channels_first, channels_last]')
     FLAGS = parser.parse_args()
 
-
-    image_size = efficientnet.efficientnet_params(FLAGS.model_name)[2]
-    logger.info('starting with model: {}, image_size: {}'.format(FLAGS.model_name, image_size))
-
     dtype = tf.float32
+
+    params = {
+        'num_classes': None, # we are creaging a base model which only extract features and does not perform classification
+        'data_format': FLAGS.data_format,
+        'relu_fn': tf.nn.swish
+    }
+
+    num_classes = 3
+    base_model, model, image_size = unet.create_model(params, dtype, FLAGS.model_name, num_classes)
 
     if FLAGS.dataset == 'card_images':
         filenames = [os.path.join(FLAGS.data_dir, fn) for fn in os.listdir(FLAGS.data_dir) if os.path.splitext(fn.lower())[-1] in ['.png', '.jpg', '.jpeg']]
@@ -119,52 +124,6 @@ if __name__ == '__main__':
         dataset = dataset['test'].map(lambda datapoint: load_image(datapoint, image_size, False, dtype), num_parallel_calls=tf.data.experimental.AUTOTUNE)
         dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).batch(FLAGS.batch_size)
 
-    params = {
-        'num_classes': None, # we are creaging a base model which only extract features and does not perform classification
-        'data_format': FLAGS.data_format,
-        'relu_fn': tf.nn.swish
-    }
-
-    base_model = tf.keras.applications.MobileNetV2(input_shape=[image_size, image_size, 3], include_top=False)
-    base_model.trainable = False
-
-    layer_names = [
-        'block_1_expand_relu',   # 64x64
-        'block_3_expand_relu',   # 32x32
-        'block_6_expand_relu',   # 16x16
-        'block_13_expand_relu',  # 8x8
-        'block_16_project',      # 4x4
-    ]
-
-    layers = [base_model.get_layer(name).output for name in layer_names]
-    down_stack = tf.keras.Model(inputs=base_model.input, outputs=layers)
-
-    up_stack = [
-        unet.upsample(512, 3),  # 4x4 -> 8x8
-        unet.upsample(256, 3),  # 8x8 -> 16x16
-        unet.upsample(128, 3),  # 16x16 -> 32x32
-        unet.upsample(64, 3),   # 32x32 -> 64x64
-    ]
-
-    output_channels = 3
-    last = tf.keras.layers.Conv2DTranspose(output_channels, 3, strides=2, padding='same', activation='softmax')
-
-    inputs = tf.keras.layers.Input(shape=[128, 128, 3])
-    x = inputs
-
-    skips = down_stack(x)
-    x = skips[-1]
-    skips = reversed(skips[:-1])
-
-    for up, skip in zip(up_stack, skips):
-        upsampled = up(x)
-        logger.info('x: {}, up: {}, skip: {}'.format(x.shape, upsampled.shape, skip.shape))
-
-        concat = tf.keras.layers.Concatenate()
-        x = concat([upsampled, skip])
-
-    ret = last(x)
-    model = tf.keras.Model(inputs=inputs, outputs=ret)
 
     checkpoint = tf.train.Checkpoint(model=model)
     status = checkpoint.restore(FLAGS.checkpoint)

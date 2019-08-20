@@ -3,6 +3,8 @@ import re
 
 import tensorflow as tf
 
+import efficientnet.tfkeras as efn
+
 logger = logging.getLogger('segmentation')
 
 def upsample(filters, size, norm_type='batchnorm', apply_dropout=True):
@@ -75,3 +77,51 @@ class Unet(tf.keras.Model):
 
         ret = self.last(x)
         return ret
+
+def create_model(params, dtype, model_name, num_classes):
+    model_map = {
+        'efficientnet-b0': efn.EfficientNetB0,
+        'efficientnet-b1': efn.EfficientNetB1,
+        'efficientnet-b2': efn.EfficientNetB2,
+        'efficientnet-b3': efn.EfficientNetB3,
+        'efficientnet-b4': efn.EfficientNetB4,
+        'efficientnet-b5': efn.EfficientNetB5,
+        'efficientnet-b6': efn.EfficientNetB6,
+        'efficientnet-b7': efn.EfficientNetB7,
+    }
+
+    image_size = 224
+
+    base_model = model_map[model_name](include_top=False)
+    base_model.trainable = False
+
+    layers = ('top_activation', 'block6a_expand_activation', 'block4a_expand_activation', 'block3a_expand_activation', 'block2a_expand_activation')
+    layers = [base_model.get_layer(name).output for name in layers]
+    down_stack = tf.keras.Model(inputs=base_model.input, outputs=layers)
+    down_stack.trainable = False
+
+    up_stack = []
+    decoder_filters=(512, 256, 128, 64, 32, 16)
+    for l, f in zip(layers, decoder_filters):
+        up = upsample(f, 3, apply_dropout=True)
+        up_stack.append(up)
+
+    last = tf.keras.layers.Conv2DTranspose(num_classes, 3, strides=2, padding='same', activation='softmax')
+
+    inputs = tf.keras.layers.Input(shape=(image_size, image_size, 3))
+    x = inputs
+    skips = down_stack(inputs)
+    x = skips[0]
+    skips = (skips[1:])
+
+    for up, skip in zip(up_stack, skips):
+        upsampled = up(x)
+
+        logger.info('inputs: {}, x: {}, upsampled: {}, skip: {}'.format(inputs.shape, x.shape, upsampled.shape, skip.shape))
+        x = tf.concat([upsampled, skip], axis=-1)
+
+    ret = last(x)
+    model = tf.keras.Model(inputs=inputs, outputs=ret)
+
+    return base_model, model, image_size
+

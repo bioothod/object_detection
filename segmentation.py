@@ -11,8 +11,6 @@ import tensorflow_datasets as tfds
 
 from PIL import Image
 
-import efficientnet.tfkeras as efn
-
 import image as image_draw
 import loss
 import polygon_dataset
@@ -57,17 +55,6 @@ autoaugment_name_choice = ['v0']
 parser.add_argument('--autoaugment_name', type=str, choices=autoaugment_name_choice, help='Autoaugment name, choices: {}'.format(autoaugment_name_choice))
 parser.add_argument('--dataset', type=str, choices=['card_images', 'oxford_pets'], default='card_images', help='Dataset type')
 FLAGS = parser.parse_args()
-
-model_map = {
-    'efficientnet-b0': efn.EfficientNetB0,
-    'efficientnet-b1': efn.EfficientNetB1,
-    'efficientnet-b2': efn.EfficientNetB2,
-    'efficientnet-b3': efn.EfficientNetB3,
-    'efficientnet-b4': efn.EfficientNetB4,
-    'efficientnet-b5': efn.EfficientNetB5,
-    'efficientnet-b6': efn.EfficientNetB6,
-    'efficientnet-b7': efn.EfficientNetB7,
-}
 
 def calc_epoch_steps(num_files):
     return (num_files + FLAGS.batch_size - 1) // FLAGS.batch_size
@@ -290,40 +277,10 @@ def train():
         global_step = tf.Variable(1, dtype=tf.int64, name='global_step', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
         learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
 
-        image_size = 224
         num_classes = 3
+        base_model, model, image_size = unet.create_model(params, dtype, FLAGS.model_name, num_classes)
 
         dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
-        base_model = model_map[FLAGS.model_name](include_top=False)
-
-        layers = ('top_activation', 'block6a_expand_activation', 'block4a_expand_activation', 'block3a_expand_activation', 'block2a_expand_activation')
-        layers = [base_model.get_layer(name).output for name in layers]
-        down_stack = tf.keras.Model(inputs=base_model.input, outputs=layers)
-
-        up_stack = []
-        decoder_filters=(512, 256, 128, 64, 32, 16)
-        for l, f in zip(layers, decoder_filters):
-            up = unet.upsample(f, 3, apply_dropout=True)
-            up_stack.append(up)
-
-        last = tf.keras.layers.Conv2DTranspose(num_classes, 3, strides=2, padding='same', activation='softmax')
-
-        inputs = tf.keras.layers.Input(shape=(image_size, image_size, 3))
-        x = inputs
-        skips = down_stack(inputs)
-        x = skips[0]
-        skips = (skips[1:])
-
-        for up, skip in zip(up_stack, skips):
-            upsampled = up(x)
-
-            logger.info('inputs: {}, x: {}, upsampled: {}, skip: {}'.format(inputs.shape, x.shape, upsampled.shape, skip.shape))
-            x = tf.concat([upsampled, skip], axis=-1)
-
-        ret = last(x)
-        model = tf.keras.Model(inputs=inputs, outputs=ret)
-
-        #model = unet.Unet(3, base_model)
         dstrategy.experimental_run_v2(call_base_model, args=(base_model, dummy_input))
         dstrategy.experimental_run_v2(call_model, args=(model, dummy_input))
 
