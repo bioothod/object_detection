@@ -40,7 +40,7 @@ class Card:
 
         card = js['card']
         card_poly = self.find_poly(card)
-        self.card_mask = self.apply_mask(None, [card_poly], 1)
+        #self.card_mask = self.apply_mask(None, [card_poly], 1)
 
         number = js['number']
         self.number_text = number['text']
@@ -50,7 +50,8 @@ class Card:
         self.exp_date_text = exp_date['text']
         exp_date_poly = self.find_poly(exp_date)
 
-        self.card_mask = self.apply_mask(self.card_mask, [number_poly, exp_date_poly], 2)
+        #self.card_mask = self.apply_mask(self.card_mask, [number_poly, exp_date_poly], 2)
+        self.card_mask = self.apply_mask(self.card_mask, [number_poly, exp_date_poly], 1)
 
 class Polygons:
     def __init__(self, ann_filename, logger, target_height, target_width):
@@ -72,7 +73,7 @@ class Polygons:
             json_filename = os.path.join(ann_filename, '{}.json'.format(fn))
 
             try:
-                card = Card(json_filename, image_filename, self.target_height, self.target_height)
+                card = Card(json_filename, image_filename, self.target_height, self.target_width)
                 self.cards.append(card)
             except Exception as e:
                 self.logger.error('could not parse card data: ann_filename: {}, image_filename: {}, exception: {}'.format(json_filename, image_filename, e))

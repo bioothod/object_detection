@@ -5,7 +5,7 @@ import tensorflow as tf
 
 logger = logging.getLogger('segmentation')
 
-def upsample(filters, size, norm_type='batchnorm', apply_dropout=False):
+def upsample(filters, size, norm_type='batchnorm', apply_dropout=True):
   """Upsamples an input.
   Conv2DTranspose => Batchnorm => Dropout => Relu
   Args:
@@ -32,58 +32,38 @@ def upsample(filters, size, norm_type='batchnorm', apply_dropout=False):
     result.add(InstanceNormalization())
 
   if apply_dropout:
-    result.add(tf.keras.layers.Dropout(0.5))
+    result.add(tf.keras.layers.Dropout(0.3))
 
   result.add(tf.keras.layers.ReLU())
 
   return result
 
 class Unet(tf.keras.Model):
-    def __init__(self, output_channels, base_model):
+    def __init__(self, output_channels, down_stack):
         super(Unet, self).__init__()
 
-        self.base_model = base_model
+        self.down_stack = down_stack
+        self.up_stack = [
+            upsample(512, 3),  # 4x4 -> 8x8
+            upsample(256, 3),  # 8x8 -> 16x16
+            upsample(128, 3),  # 16x16 -> 32x32
+            upsample(64, 3),   # 32x32 -> 64x64
+        ]
 
-        self.up_stack = []
-        self.final_endpoints = None
-
-        for name, endpoint in self.base_model.endpoints.items():
-
-        for name, endpoint in self.base_model.endpoints.items():
-            if name != 'features':
-                m = re.match('reduction_([\d]+)$', name)
-                if not m:
-                    continue
-
-            endpoint = self.base_model.endpoints[name]
-
-            c = endpoint.shape[3]
-            up = upsample(c*2, 3, apply_dropout=True)
-
-            if name == 'features':
-                self.up_stack = self.up_stack[:-1]
-
-            self.up_stack.append((name, up))
-            logger.info('{}: endpoint: {}, upsampled channels: {}'.format(name, endpoint.shape, c*2))
-
-        self.last = tf.keras.layers.Conv2DTranspose(output_channels, 3, strides=1, padding='same', activation='softmax')
+        self.last = tf.keras.layers.Conv2DTranspose(output_channels, 3, strides=2, padding='same', activation='softmax')
 
     def call(self, inputs, training=True):
-        x = self.base_model(inputs, training)
+        skips = self.down_stack(inputs, training)
 
-        first = True
-        for name, up in self.up_stack:
-            if not first:
-                x = self.base_model.endpoints[name]
+        x = skips[-1]
+        skips = reversed(skips[:-1])
 
+        for up, skip in zip(self.up_stack, skips):
             upsampled = up(x)
+            logger.info('x: {}, up: {}, skip: {}'.format(x.shape, upsampled.shape, skip.shape))
 
-            if first:
-                x = upsampled
-            else:
-                x = tf.concat([upsampled, endpoint], axis=-1)
+            x = tf.concat([upsampled, skip], axis=-1)
 
-            first = True
-
-        x = self.last(x)
-        return x
+        ret = self.last(x)
+        logger.info('output: x: {}, ret: {}'.format(x.shape, ret.shape))
+        return ret
