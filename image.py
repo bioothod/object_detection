@@ -54,7 +54,7 @@ def draw_filename(fn, ann, dst, cat_names):
     draw_im(im, ann, dst, cat_names)
 
 def draw_im_segm(img, masks, dst):
-    fig = plt.figure(figsize=(15, 15))
+    fig = plt.figure(figsize=(8, 3))
     rows = 1
     columns = 1 + len(masks)*2
     ax = fig.add_subplot(rows, columns, 1)
@@ -65,11 +65,12 @@ def draw_im_segm(img, masks, dst):
 
     ax_idx = 2
     for idx, m in enumerate(masks):
-        for i in range(2):
-            ax = fig.add_subplot(rows, columns, ax_idx + 2*idx+i)
+        n = 2
+        for i in range(n):
+            ax = fig.add_subplot(rows, columns, ax_idx + n*idx+i)
             ax.set_autoscale_on(True)
 
-            if i == 1:
+            if i == 0:
                 ax.imshow(img)
 
             img = np.ones((m.shape[0], m.shape[1], 3))
@@ -78,8 +79,8 @@ def draw_im_segm(img, masks, dst):
             else:
                 color_mask = np.random.random((1, 3)).tolist()[0]
 
-            for i in range(3):
-                img[:, :, i] = color_mask[i]
+            for ch in range(3):
+                img[:, :, ch] = color_mask[ch]
 
             ax.imshow(np.dstack((img, m.astype(float)*0.8)))
 

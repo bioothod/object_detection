@@ -21,12 +21,13 @@ def generate_images(filenames, images, masks, data_dir):
     vgg_means = np.array([91.4953, 103.8827, 131.0912], dtype=np.float32)
 
     for filename, image, mask in zip(filenames, images, masks):
-        filename = os.path.basename(str(filename))
+        filename = str(filename)
+        filename = os.path.basename(filename)
         image_id = os.path.splitext(filename)[0]
 
-        image = image.numpy() * 255. + vgg_means
+        image = image.numpy() * 128. + 128
         image = image.astype(np.uint8)
-        logger.info('{}: min: {}, max: {}'.format(str(filename), np.min(image), np.max(image)))
+        logger.info('{}: min: {}, max: {}'.format(filename, np.min(image), np.max(image)))
 
         dst = '{}/{}.png'.format(data_dir, image_id)
         image_draw.draw_im_segm(image, [mask.numpy()], dst)
@@ -44,9 +45,10 @@ def preprocess_image(filename, image_size):
 
     img = np.asarray(im).astype(np.float32)
 
-    vgg_means = np.array([91.4953, 103.8827, 131.0912], dtype=np.float32)
-    img -= vgg_means
-    img /= 255.
+    #vgg_means = np.array([91.4953, 103.8827, 131.0912], dtype=np.float32)
+    #img -= vgg_means
+    img -= 128.
+    img /= 128.
 
     return filename, img
 
@@ -64,6 +66,21 @@ def basic_preprocess(filename, image_size, dtype):
 
     return filename, image
 
+@tf.function
+def load_image(datapoint, image_size, is_training, dtype):
+    image = datapoint['image']
+    mask = datapoint['segmentation_mask']
+    filename = datapoint['file_name']
+
+    image = preprocess.processing_function(image, image_size, image_size, is_training, dtype)
+    mask = preprocess.try_resize(mask, image_size, image_size) - 1
+
+    if tf.random.uniform(()) > 0.5 and is_training:
+        image = tf.image.flip_left_right(image)
+        mask = tf.image.flip_left_right(mask)
+
+    return filename, image, mask
+
 if __name__ == '__main__':
     logger.setLevel(logging.INFO)
     __fmt = logging.Formatter(fmt='%(asctime)s.%(msecs)03d: %(message)s', datefmt='%d/%m/%y %H:%M:%S')
@@ -74,6 +91,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', type=str, required=True, help='Image directory')
     parser.add_argument('--dst_dir', type=str, required=True, help='Directory where to store masked images')
+    parser.add_argument('--dataset', type=str, choices=['card_images', 'oxford_pets'], default='images', help='Dataset type')
     parser.add_argument('--num_cpus', type=int, default=32, help='Number of preprocessing processes')
     parser.add_argument('--checkpoint', type=str, required=True, help='Load model weights from this file')
     parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch.')
@@ -85,30 +103,72 @@ if __name__ == '__main__':
     image_size = efficientnet.efficientnet_params(FLAGS.model_name)[2]
     logger.info('starting with model: {}, image_size: {}'.format(FLAGS.model_name, image_size))
 
-    filenames = [os.path.join(FLAGS.data_dir, fn) for fn in os.listdir(FLAGS.data_dir) if os.path.splitext(fn.lower())[-1] in ['.png', '.jpg', '.jpeg']]
     dtype = tf.float32
 
-    dataset = tf.data.Dataset.from_tensor_slices((filenames))
-    dataset = dataset.map(lambda filename: basic_preprocess(filename, image_size, dtype), num_parallel_calls=FLAGS.num_cpus)
-    dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).batch(FLAGS.batch_size)
+    if FLAGS.dataset == 'card_images':
+        filenames = [os.path.join(FLAGS.data_dir, fn) for fn in os.listdir(FLAGS.data_dir) if os.path.splitext(fn.lower())[-1] in ['.png', '.jpg', '.jpeg']]
 
+        dataset = tf.data.Dataset.from_tensor_slices((filenames))
+        dataset = dataset.map(lambda filename: basic_preprocess(filename, image_size, dtype), num_parallel_calls=FLAGS.num_cpus)
+        dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).batch(FLAGS.batch_size)
+    elif FLAGS.dataset == 'oxford_pets':
+        import tensorflow_datasets as tfds
+
+        dataset, info = tfds.load('oxford_iiit_pet:3.0.0', with_info=True, data_dir=FLAGS.data_dir)
+
+        dataset = dataset['test'].map(lambda datapoint: load_image(datapoint, image_size, False, dtype), num_parallel_calls=tf.data.experimental.AUTOTUNE)
+        dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).batch(FLAGS.batch_size)
 
     params = {
         'num_classes': None, # we are creaging a base model which only extract features and does not perform classification
         'data_format': FLAGS.data_format,
         'relu_fn': tf.nn.swish
     }
-    base_model = efficientnet.build_model(FLAGS.model_name, params)
-    dummy_img = tf.zeros((FLAGS.batch_size, image_size, image_size, 3))
 
-    @tf.function
-    def dummy_call():
-        base_model(dummy_img, training=False)
-    dummy_call()
-    model = unet.Unet(3, base_model)
+    base_model = tf.keras.applications.MobileNetV2(input_shape=[image_size, image_size, 3], include_top=False)
+    base_model.trainable = False
+
+    layer_names = [
+        'block_1_expand_relu',   # 64x64
+        'block_3_expand_relu',   # 32x32
+        'block_6_expand_relu',   # 16x16
+        'block_13_expand_relu',  # 8x8
+        'block_16_project',      # 4x4
+    ]
+
+    layers = [base_model.get_layer(name).output for name in layer_names]
+    down_stack = tf.keras.Model(inputs=base_model.input, outputs=layers)
+
+    up_stack = [
+        unet.upsample(512, 3),  # 4x4 -> 8x8
+        unet.upsample(256, 3),  # 8x8 -> 16x16
+        unet.upsample(128, 3),  # 16x16 -> 32x32
+        unet.upsample(64, 3),   # 32x32 -> 64x64
+    ]
+
+    output_channels = 3
+    last = tf.keras.layers.Conv2DTranspose(output_channels, 3, strides=2, padding='same', activation='softmax')
+
+    inputs = tf.keras.layers.Input(shape=[128, 128, 3])
+    x = inputs
+
+    skips = down_stack(x)
+    x = skips[-1]
+    skips = reversed(skips[:-1])
+
+    for up, skip in zip(up_stack, skips):
+        upsampled = up(x)
+        logger.info('x: {}, up: {}, skip: {}'.format(x.shape, upsampled.shape, skip.shape))
+
+        concat = tf.keras.layers.Concatenate()
+        x = concat([upsampled, skip])
+
+    ret = last(x)
+    model = tf.keras.Model(inputs=inputs, outputs=ret)
 
     checkpoint = tf.train.Checkpoint(model=model)
     status = checkpoint.restore(FLAGS.checkpoint)
+    status.expect_partial()
     logger.info("Restored from external checkpoint {}".format(FLAGS.checkpoint))
 
     @tf.function
@@ -121,7 +181,10 @@ if __name__ == '__main__':
 
     start_time = time.time()
     total_images = 0
-    for filenames, images in dataset:
+    for t in dataset:
+        filenames = t[0]
+        images = t[1]
+
         masks = eval_step(images)
         total_images += len(filenames)
 

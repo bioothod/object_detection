@@ -5,7 +5,7 @@ import tensorflow as tf
 
 logger = logging.getLogger('segmentation')
 
-def upsample(filters, size, norm_type='batchnorm', apply_dropout=False):
+def upsample(filters, size, norm_type='batchnorm', apply_dropout=True):
   """Upsamples an input.
   Conv2DTranspose => Batchnorm => Dropout => Relu
   Args:
@@ -32,7 +32,7 @@ def upsample(filters, size, norm_type='batchnorm', apply_dropout=False):
     result.add(InstanceNormalization())
 
   if apply_dropout:
-    result.add(tf.keras.layers.Dropout(0.5))
+    result.add(tf.keras.layers.Dropout(0.3))
 
   result.add(tf.keras.layers.ReLU())
 
@@ -42,42 +42,36 @@ class Unet(tf.keras.Model):
     def __init__(self, output_channels, base_model):
         super(Unet, self).__init__()
 
-        self.base_model = base_model
-
         self.up_stack = []
 
         layers = ('top_activation', 'block6a_expand_activation', 'block4a_expand_activation', 'block3a_expand_activation', 'block2a_expand_activation')
+        layers = [base_model.get_layer(name).output for name in layers]
 
-        for l in self.base_model.layers:
-            if not l.name in layers:
-                continue
+        self.down_stack = tf.keras.Model(inputs=base_model.input, outputs=layers)
 
+        decoder_filters=(512, 256, 128, 64, 32, 16)
+        for l, f in zip(layers, decoder_filters):
+            up = upsample(f, 3, apply_dropout=True)
+            self.up_stack.append(up)
 
-            shape = l.output_shape
-
-            up = upsample(shape[-1]*2, 3, apply_dropout=True)
-
-            self.up_stack.append((l.name, up))
-            logger.info('{}: endpoint: {}, upsampled channels: {}'.format(l.name, shape, shape[-1]*2))
-
-        self.last = tf.keras.layers.Conv2DTranspose(output_channels, 3, strides=1, padding='same', activation='softmax')
+        self.last = tf.keras.layers.Conv2DTranspose(output_channels, 3, strides=2, padding='same', activation='softmax')
 
     def call(self, inputs, training=True):
-        x = self.base_model(inputs, training)
+        skips = self.down_stack(inputs, training)
 
-        first = True
-        for name, up in self.up_stack:
-            if not first:
-                x = self.base_model.get_layer(name).output
+        for s in skips:
+            logger.info('skips: {}: {}'.format(s.name, s.shape))
 
+        logger.info('down_stack: trainable vars: {}'.format(len(self.down_stack.trainable_variables)))
+
+        x = skips[0]
+        skips = (skips[1:])
+
+        for up, skip in zip(self.up_stack, skips):
             upsampled = up(x)
 
-            if first:
-                x = upsampled
-            else:
-                x = tf.concat([upsampled, self.base_model.get_layer(name).output], axis=-1)
+            logger.info('inputs: {}, x: {}, upsampled: {}, skip: {}'.format(inputs.shape, x.shape, upsampled.shape, skip.shape))
+            x = tf.concat([upsampled, skip], axis=-1)
 
-            first = True
-
-        x = self.last(x)
-        return x
+        ret = self.last(x)
+        return ret

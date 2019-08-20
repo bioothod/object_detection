@@ -6,7 +6,9 @@ import autoaugment
 
 logger = logging.getLogger('vggface_emotions')
 
-def pad_resize_image(image, dims):
+def pad_resize_image(image, dims, fill_constant=0):
+    orig_dtype = image.dtype
+
     image = tf.image.resize(image, dims, preserve_aspect_ratio=True)
 
     shape = tf.shape(image)
@@ -18,8 +20,8 @@ def pad_resize_image(image, dims):
     sy = tf.cast(syd / 2, dtype=tf.int32)
 
     paddings = tf.convert_to_tensor([[sy, syd - sy], [sx, sxd - sx], [0, 0]])
-    image = tf.pad(image, paddings, mode='CONSTANT', constant_values=128)
-    image = tf.cast(image, dtype=tf.uint8)
+    image = tf.pad(image, paddings, mode='CONSTANT', constant_values=fill_constant)
+    image = tf.cast(image, dtype=orig_dtype)
     return image
 
 # do not use padded resize, since bbox scaling does not yet support this
@@ -33,15 +35,16 @@ def try_resize(image, output_height, output_width):
     image = tf.cond(tf.logical_and(tf.equal(shape[0], output_height),
                                    tf.equal(shape[1], output_width)),
                     lambda: image,
-                    #lambda: pad_resize_image(image, [output_height, output_width]))
-                    lambda: simple_resize_image(image, [output_height, output_width]))
+                    lambda: pad_resize_image(image, [output_height, output_width]))
+                    #lambda: simple_resize_image(image, [output_height, output_width]))
     return image
 
 def normalize(image, dtype):
     image = tf.cast(image, dtype)
-    vgg_means = tf.constant([91.4953, 103.8827, 131.0912])
-    image -= vgg_means
-    image /= 255.
+    #vgg_means = tf.constant([91.4953, 103.8827, 131.0912])
+    #image -= vgg_means
+    image -= 128.
+    image /= 128.
 
     return image
 
