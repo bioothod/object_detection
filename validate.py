@@ -4,10 +4,7 @@ import os
 import time
 
 import numpy as np
-import multiprocessing as mp
 import tensorflow as tf
-
-from PIL import Image
 
 import efficientnet
 import image as image_draw
@@ -31,31 +28,6 @@ def generate_images(filenames, images, masks, data_dir):
 
         dst = '{}/{}.png'.format(data_dir, image_id)
         image_draw.draw_im_segm(image, [mask.numpy()], dst)
-
-def preprocess_image(filename, image_size):
-    orig_im = Image.open(filename)
-    orig_width = orig_im.width
-    orig_height = orig_im.height
-
-    if orig_im.mode != "RGB":
-        orig_im = orig_im.convert("RGB")
-
-    size = (image_size, image_size)
-    im = orig_im.resize(size, resample=Image.BILINEAR)
-
-    img = np.asarray(im).astype(np.float32)
-
-    #vgg_means = np.array([91.4953, 103.8827, 131.0912], dtype=np.float32)
-    #img -= vgg_means
-    img -= 128.
-    img /= 128.
-
-    return filename, img
-
-def run_queue(num_processes, data_source, do_work):
-    with mp.Pool(num_processes) as pool:
-        for res in pool.imap(func=do_work, iterable=data_source, chunksize=32):
-            yield res
 
 @tf.function
 def basic_preprocess(filename, image_size, dtype):

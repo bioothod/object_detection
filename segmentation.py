@@ -4,16 +4,12 @@ import os
 import re
 import sys
 
-import albumentations as A
 import numpy as np
 import tensorflow as tf
 import tensorflow_datasets as tfds
 
-from PIL import Image
-
 import image as image_draw
 import loss
-import polygon_dataset
 import preprocess
 import validate
 import unet
@@ -62,144 +58,6 @@ def calc_epoch_steps(num_files):
 def local_swish(x):
     return x * tf.nn.sigmoid(x)
 
-def round_clip_0_1(x, **kwargs):
-    return x.round().clip(0, 1)
-
-def get_training_augmentation():
-    train_transform = [
-
-        A.HorizontalFlip(p=0.5),
-
-        A.ShiftScaleRotate(scale_limit=0.5, rotate_limit=0, shift_limit=0.1, p=1, border_mode=0),
-
-        A.PadIfNeeded(min_height=320, min_width=320, always_apply=True, border_mode=0),
-        A.RandomCrop(height=320, width=320, always_apply=True),
-
-        A.IAAAdditiveGaussianNoise(p=0.2),
-        A.IAAPerspective(p=0.5),
-
-        A.OneOf(
-            [
-                A.CLAHE(p=1),
-                A.RandomBrightness(p=1),
-                A.RandomGamma(p=1),
-            ],
-            p=0.9,
-        ),
-
-        A.OneOf(
-            [
-                A.IAASharpen(p=1),
-                A.Blur(blur_limit=3, p=1),
-                A.MotionBlur(blur_limit=3, p=1),
-            ],
-            p=0.9,
-        ),
-
-        A.OneOf(
-            [
-                A.RandomContrast(p=1),
-                A.HueSaturationValue(p=1),
-            ],
-            p=0.9,
-        ),
-        A.Lambda(mask=round_clip_0_1)
-    ]
-    return A.Compose(train_transform)
-
-
-def get_validation_augmentation():
-    """Add paddings to make image shape divisible by 32"""
-    test_transform = [
-        A.PadIfNeeded(384, 480)
-    ]
-    return A.Compose(test_transform)
-
-def get_preprocessing(preprocessing_fn):
-    """Construct preprocessing transform
-    
-    Args:
-        preprocessing_fn (callbale): data normalization function 
-            (can be specific for each pretrained neural network)
-    Return:
-        transform: albumentations.Compose
-    
-    """
-    
-    _transform = [
-        A.Lambda(image=preprocessing_fn),
-    ]
-    return A.Compose(_transform)
-
-class Dataset:
-    def __init__(self, data_dir,
-                 augmentation=None, 
-                 preprocessing=None
-                ):
-        good_exts = ['.png', '.jpg', '.jpeg']
-
-        self.image_filenames = []
-        self.json_filenames = []
-
-        self.augmentation = augmentation
-        self.preprocessing = preprocessing
-
-        for fn in os.listdir(data_dir):
-            ext = os.path.splitext(fn)[1].lower()
-            if ext not in good_exts:
-                continue
-            
-            image_filename = os.path.join(data_dir, fn)
-            json_filename = os.path.join(data_dir, '{}.json'.format(fn))
-
-            self.image_filenames.append(image_filename)
-            self.json_filenames.append(json_filename)
-
-    def __len__(self):
-        return len(self.image_filenames)
-
-    def __getitem__(self, i):
-        img_fn = self.image_filenames[i]
-        js_fn = self.json_filenames[i]
-
-        image = cv2.imread(img_fn)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        #card = polygon_dataset.Card(js_fn, img_fn, image.shape(0), image.shape(1))
-
-        return image, card.card_mask
-
-class Dataloder(tf.keras.utils.Sequence):
-    def __init__(self, dataset, batch_size=1, shuffle=False):
-        self.dataset = dataset
-        self.batch_size = batch_size
-        self.shuffle = shuffle
-        self.indexes = np.arange(len(dataset))
-
-        self.on_epoch_end()
-
-    def __getitem__(self, i):
-        # collect batch data
-        start = i * self.batch_size
-        stop = (i + 1) * self.batch_size
-        data = []
-        for j in range(start, stop):
-            data.append(self.dataset[j])
-        
-        # transpose list of lists
-        batch = [np.stack(samples, axis=0) for samples in zip(*data)]
-        
-        return batch
-    
-    def __len__(self):
-        """Denotes the number of batches per epoch"""
-        return len(self.indexes) // self.batch_size
-    
-    def on_epoch_end(self):
-        """Callback function to shuffle indexes each epoch"""
-        if self.shuffle:
-            self.indexes = np.random.permutation(self.indexes)
-
 @tf.function
 def basic_preprocess(filename, mask, image_size, is_training, dtype):
     image = tf.io.read_file(filename)
@@ -236,6 +94,70 @@ def load_image(datapoint, image_size, is_training, dtype):
         mask = tf.image.flip_left_right(mask)
 
     return filename, image, mask
+
+from tensorflow.python.framework import tensor_shape
+from tensorflow.python.util import nest
+
+def py_func(func,
+            args=(),
+            kwargs={},
+            output_types=None,
+            output_shapes=None,
+            name=None):
+    if not isinstance(args, (list, tuple)):
+        raise TypeError('args must be list and not {}. args: {}'.format(type(args), args))
+
+    if not isinstance(kwargs, dict):
+        raise TypeError('kwargs must be dict and not {}. args: {}'.format(type(kwargs), kwargs))
+
+
+    # For dynamic type inference use callable output_types and output_shapes
+    if callable(output_types):
+        # If callable, assume same signature and call with tensors and get the types
+        output_types = output_types(*args, **kwargs)
+    if callable(output_shapes):
+        # If callable, assume same signature and call with tensors and get the shapes
+        output_shapes = output_shapes(*args, **kwargs)
+
+    flat_output_types = nest.flatten(output_types)
+    args = (args, kwargs)
+    flat_args = nest.flatten(args)
+
+    
+    def python_function_wrapper(*py_args):
+        py_args, py_kwargs = nest.pack_sequence_as(args, py_args)
+
+        ret = func(*py_args, **py_kwargs)
+        # ToDo: Catch Exceptions and improve msg, because tensorflow ist not able
+        # to preserve the traceback, i.e. the Exceptions does not contain any
+        # information where the Exception was raised.
+        nest.assert_shallow_structure(output_types, ret)
+        return nest.flatten(ret)
+
+    flat_values = tf.py_function(python_function_wrapper, flat_args, flat_output_types, name=name)
+
+    if output_shapes is not None:
+        # I am not sure if this is nessesary
+        output_shapes = nest.map_structure_up_to(output_types, tensor_shape.as_shape, output_shapes)
+
+    flattened_shapes = nest.flatten(output_shapes)
+    for ret_t, shape in zip(flat_values, flattened_shapes):
+        ret_t.set_shape(shape)
+
+    return nest.pack_sequence_as(output_types, flat_values)
+
+def from_indexable(iterator, output_types, output_shapes, num_parallel_calls=None, name=None):
+    ds = tf.data.Dataset.range(len(iterator))
+
+    def index_to_entry(index):
+        return py_func(
+                func=iterator.__getitem__,
+                args=(index,),
+                output_types=output_types,
+                output_shapes=output_shapes,
+                name=name)
+
+    return ds.map(index_to_entry, num_parallel_calls=num_parallel_calls)
 
 def train():
     checkpoint_dir = os.path.join(FLAGS.train_dir, 'checkpoints')
@@ -301,14 +223,22 @@ def train():
             dtype))
 
         def create_dataset(ann_dir, is_training):
-            cards = polygon_dataset.Polygons(ann_dir, logger, image_size, image_size)
+            import dataset as ds_impl
 
-            dataset = tf.data.Dataset.from_tensor_slices((cards.get_filenames(), cards.get_masks()))
-            dataset = dataset.map(lambda filename, mask: basic_preprocess(filename, mask, image_size, is_training, dtype), num_parallel_calls=FLAGS.num_cpus)
+            ds = ds_impl.run_queue(FLAGS.num_cpus, FLAGS.train_data_dir, image_size)
 
-            logger.info('dataset has been created, data dir: {}, images: {}'.format(ann_dir, cards.num_images()))
+            dataset = from_indexable(ds,
+                    num_parallel_calls=FLAGS.num_cpus,
+                    output_types=(tf.string, tf.float32, tf.uint8),
+                    output_shapes=(
+                        tf.TensorShape([]),
+                        tf.TensorShape([image_size, image_size, 3]),
+                        tf.TensorShape([image_size, image_size, num_classes]),
+                    ))
 
-            return dataset, cards.num_images()
+            logger.info('dataset has been created, data dir: {}, images: {}'.format(ann_dir, len(ds)))
+
+            return dataset, len(ds)
 
         if FLAGS.dataset == 'card_images':
             dataset, num_images = create_dataset(FLAGS.train_data_dir, is_training=True)
@@ -317,7 +247,7 @@ def train():
             eval_num_images = int(num_images * (1. - rate))
             train_num_images = num_images - eval_num_images
 
-            train_dataset = dataset.skip(eval_num_images).cache().shuffle(FLAGS.batch_size * 2).batch(FLAGS.batch_size).repeat().prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+            train_dataset = dataset.skip(eval_num_images).cache().batch(FLAGS.batch_size).repeat().prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
             train_dataset = dstrategy.experimental_distribute_dataset(train_dataset)
 
             eval_dataset = dataset.take(eval_num_images).cache().batch(FLAGS.batch_size).repeat().prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
@@ -381,10 +311,10 @@ def train():
             logger.info("Initializing from scratch, no latest checkpoint")
 
         loss_metric = tf.keras.metrics.Mean(name='train_loss')
-        accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='train_accuracy')
+        accuracy_metric = loss.IOUScore(threshold=0.5, name='train_accuracy')
 
         eval_loss_metric = tf.keras.metrics.Mean(name='eval_loss')
-        eval_accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='eval_accuracy')
+        eval_accuracy_metric = loss.IOUScore(threshold=0.5, name='eval_accuracy')
 
         def reset_metrics():
             loss_metric.reset_states()
@@ -393,18 +323,27 @@ def train():
             eval_loss_metric.reset_states()
             eval_accuracy_metric.reset_states()
 
-        cross_entropy_loss_object = tf.keras.losses.BinaryCrossentropy(reduction=tf.keras.losses.Reduction.NONE, label_smoothing=FLAGS.label_smoothing)
-        #class_weights = np.tile(np.array([1, 1, 5], dtype=np.float32), [int(FLAGS.batch_size / num_replicas), image_size, image_size, 1])
-        #cross_entropy_loss_object = loss.CategoricalLoss(reduction=tf.keras.losses.Reduction.NONE, class_weights=class_weights)
+        #cross_entropy_loss_object = tf.keras.losses.BinaryCrossentropy(reduction=tf.keras.losses.Reduction.NONE, label_smoothing=FLAGS.label_smoothing)
+        class_weights = np.tile(np.array([1, 2, 5], dtype=np.float32), [int(FLAGS.batch_size / num_replicas), image_size, image_size, 1])
+        cross_entropy_loss_object = loss.CategoricalFocalLoss(reduction=tf.keras.losses.Reduction.NONE)
+        dice_loss = loss.DiceLoss(reduction=tf.keras.losses.Reduction.NONE, class_weights=class_weights)
 
         def calculate_metrics(logits, labels):
-            one_hot_labels = tf.one_hot(labels, num_classes, axis=3)
-            one_hot_labels = tf.squeeze(one_hot_labels, axis=4)
+            #one_hot_labels = tf.one_hot(labels, num_classes, axis=3)
+            #one_hot_labels = tf.squeeze(one_hot_labels, axis=4)
 
-            ce_loss = cross_entropy_loss_object(y_pred=logits, y_true=one_hot_labels)
+            #ce_loss = cross_entropy_loss_object(y_pred=logits, y_true=one_hot_labels)
+            ce_loss = cross_entropy_loss_object(y_pred=logits, y_true=labels)
             ce_loss = tf.nn.compute_average_loss(ce_loss, global_batch_size=FLAGS.batch_size)
 
             total_loss = ce_loss
+
+            if True:
+                de_loss = dice_loss(y_pred=logits, y_true=labels)
+                de_loss = tf.nn.compute_average_loss(de_loss, global_batch_size=FLAGS.batch_size)
+                de_loss = 1. - de_loss
+                total_loss += de_loss
+
             return total_loss
 
         def eval_step(filenames, images, labels):
@@ -418,10 +357,6 @@ def train():
             with tf.GradientTape() as tape:
                 logits = model(images, training=True)
                 total_loss = calculate_metrics(logits, labels)
-
-            #logger.info('logits_nan: {}'.format(tf.math.is_nan(logits)))
-            #logger.info('labels_nan: {}'.format(tf.math.is_nan(labels).numpy()))
-            #logger.info('total_loss_nan: {}'.format(tf.math.is_nan(total_loss)))
 
             #variables = model.trainable_variables + base_model.trainable_variables
             variables = model.trainable_variables

@@ -548,8 +548,7 @@ def _apply_func_with_prob(func, image, args, prob):
     prob = 1.0
 
   # Apply the function with probability `prob`.
-  should_apply_op = tf.cast(
-      tf.floor(tf.random.uniform([], dtype=tf.float32) + prob), tf.bool)
+  should_apply_op = tf.cast(tf.floor(tf.random.uniform([], dtype=tf.float32) + prob), tf.bool)
   augmented_image = tf.cond(
       should_apply_op,
       lambda: func(image, *args),
@@ -569,8 +568,7 @@ def select_and_apply_random_policy(policies, image):
   return image
 
 
-def build_and_apply_nas_policy(policies, image,
-                               augmentation_hparams):
+def build_and_apply_nas_policy(policies, image, augmentation_hparams):
   """Build a policy from the given policies passed in and apply to image.
   Args:
     policies: list of lists of tuples in the form `(func, prob, level)`, `func`
@@ -605,14 +603,12 @@ def build_and_apply_nas_policy(policies, image,
     def make_final_policy(tf_policy_):
       def final_policy(image_):
         for func, prob, args in tf_policy_:
-          image_ = _apply_func_with_prob(
-              func, image_, args, prob)
+          image_ = _apply_func_with_prob(func, image_, args, prob)
         return image_
       return final_policy
     tf_policies.append(make_final_policy(tf_policy))
 
-  augmented_image = select_and_apply_random_policy(
-      tf_policies, image)
+  augmented_image = select_and_apply_random_policy(tf_policies, image)
   return augmented_image
 
 
