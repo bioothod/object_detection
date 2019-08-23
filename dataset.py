@@ -19,15 +19,15 @@ def get_training_augmentation(image_size):
 
         A.HorizontalFlip(p=0.5),
 
-        A.ShiftScaleRotate(scale_limit=0.5, rotate_limit=0, shift_limit=0.1, p=1, border_mode=0),
+        A.ShiftScaleRotate(scale_limit=0.3, rotate_limit=0, shift_limit=0.05, p=0.5, border_mode=0),
 
         A.PadIfNeeded(min_height=image_size, min_width=image_size, always_apply=True, border_mode=0),
         A.Resize(height=int(image_size*1.4), width=int(image_size*1.4), interpolation=cv2.INTER_CUBIC, always_apply=True),
 
         A.RandomCrop(height=image_size, width=image_size, always_apply=True),
 
-        A.IAAAdditiveGaussianNoise(p=0.2),
-        A.IAAPerspective(p=0.5),
+        A.IAAAdditiveGaussianNoise(p=0.1),
+        A.IAAPerspective(p=0.3),
 
         A.OneOf(
             [
