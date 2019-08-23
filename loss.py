@@ -108,7 +108,7 @@ class CategoricalFocalLoss(tf.keras.losses.Loss):
     def __init__(self, from_logits=False, reduction=tf.keras.losses.Reduction.NONE):
         super(CategoricalFocalLoss, self).__init__()
         self.alpha = 0.25
-        self.gamma = 2
+        self.gamma = 1
         self.reduction = reduction
         self.from_logits = from_logits
         self.data_format = 'channels_last'
