@@ -22,7 +22,7 @@ def get_training_augmentation(image_size):
         A.ShiftScaleRotate(scale_limit=0.5, rotate_limit=0, shift_limit=0.1, p=1, border_mode=0),
 
         A.PadIfNeeded(min_height=image_size, min_width=image_size, always_apply=True, border_mode=0),
-        #A.Resize(height=image_size*2, width=image_size*2, interpolation=cv2.INTER_CUBIC, always_apply=True),
+        A.Resize(height=int(image_size*1.4), width=int(image_size*1.4), interpolation=cv2.INTER_CUBIC, always_apply=True),
 
         A.RandomCrop(height=image_size, width=image_size, always_apply=True),
 
@@ -132,6 +132,9 @@ class Dataset:
         background = 1. - np.where(mask.sum(axis=-1, keepdims=True) > 0, 1, 0)
         mask = np.concatenate([background, mask], axis=-1)
 
+        # this hack is needed, since augmentation heavily messes with the last channel of the mask, this needs more investigation
+        mask = np.concatenate([mask, np.zeros_like(background)], axis=-1)
+
         mask = mask.astype(np.uint8)
 
         si_shape = image.shape
@@ -146,6 +149,9 @@ class Dataset:
         if self.preprocessing:
             sample = self.preprocessing(image=image, mask=mask)
             image, mask = sample['image'], sample['mask']
+
+        # cut back the last channel of the mask, it was added as placeholder for bad data put there by augmentation
+        mask = mask[:, :, :-1]
 
         logger.debug('{}: {}: img: {}/{} -> {}/{}, mask: {}/{} -> {}/{}, time: {:.1f} ms'.format(
             os.getpid(), img_fn,
@@ -168,9 +174,56 @@ def preprocess_input(img, **kwargs):
 
     return img
 
-def run_queue(num_processes, data_dir, image_size):
-    dataset = Dataset(data_dir, augmentation=get_training_augmentation(image_size), preprocessing=get_preprocessing(preprocess_input))
+def create_dataset_from_dir(data_dir, image_size, is_training):
+    if is_training:
+        augment_fn = get_training_augmentation(image_size)
+    else:
+        augment_fn = get_validation_augmentation(image_size)
+
+    dataset = Dataset(data_dir, augmentation=augment_fn, preprocessing=get_preprocessing(preprocess_input))
     return dataset
 
-def empty_callable(x):
-    return x
+class Augment:
+    def __init__(self, image_size, num_classes, augmentation=None, preprocessing=None):
+        self.augmentation = augmentation
+        self.preprocessing = preprocessing
+
+        self.mask_shape = (image_size, image_size, num_classes)
+
+    def __call__(self, filename, image, mask):
+        start_time = time.time()
+
+        si_shape = image.shape
+        si_dtype = image.dtype
+        sm_shape = mask.shape
+        sm_dtype = mask.dtype
+
+        logger.info('{}: {}: start img: {}/{}/{}, mask: {}/{}/{}'.format(
+            os.getpid(), filename,
+            si_shape, si_dtype, image,
+            sm_shape, sm_dtype, mask))
+
+        if self.augmentation:
+            sample = self.augmentation(image=image, mask=mask)
+            image, mask = sample['image'], sample['mask']
+
+        if self.preprocessing:
+            sample = self.preprocessing(image=image, mask=mask)
+            image, mask = sample['image'], sample['mask']
+
+        logger.debug('{}: {}: img: {}/{} -> {}/{}, mask: {}/{} -> {}/{}, time: {:.1f} ms'.format(
+            os.getpid(), filename,
+            si_shape, si_dtype, image.shape, image.dtype,
+            sm_shape, sm_dtype, mask.shape, mask.dtype,
+            (time.time() - start_time) * 1000))
+
+        return filename, image, mask
+
+def create_augment(image_size, num_classes, is_training):
+    if is_training:
+        augment_fn = get_training_augmentation(image_size)
+    else:
+        augment_fn = get_validation_augmentation(image_size)
+
+    aug = Augment(image_size, num_classes, augmentation=augment_fn, preprocessing=get_preprocessing(preprocess_input))
+    return aug

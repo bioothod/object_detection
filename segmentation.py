@@ -9,8 +9,8 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 
 import image as image_draw
+import dataset as ds_impl
 import loss
-import preprocess
 import validate
 import unet
 
@@ -59,19 +59,6 @@ def local_swish(x):
     return x * tf.nn.sigmoid(x)
 
 @tf.function
-def basic_preprocess(filename, mask, image_size, is_training, dtype):
-    image = tf.io.read_file(filename)
-    image = tf.image.decode_jpeg(image, channels=3)
-
-    image = preprocess.processing_function(image, image_size, image_size, is_training, dtype)
-
-    if tf.random.uniform(()) > 0.5:
-        image = tf.image.flip_left_right(image)
-        mask = tf.image.flip_left_right(mask)
-
-    return filename, image, mask
-
-@tf.function
 def call_base_model(model, inputs):
     #return model(inputs, training=True, features_only=True)
     return model(inputs, training=True)
@@ -81,17 +68,29 @@ def call_model(model, inputs):
     return model(inputs, training=True)
 
 @tf.function
-def load_image(datapoint, image_size, is_training, dtype):
+def load_image(datapoint, aug):
     image = datapoint['image']
-    mask = datapoint['segmentation_mask']
+    mask = datapoint['segmentation_mask'] - 1
     filename = datapoint['file_name']
 
-    image = preprocess.processing_function(image, image_size, image_size, is_training, dtype)
-    mask = preprocess.try_resize(mask, image_size, image_size) - 1
+    zeros = tf.zeros_like(mask)
+    ones = tf.ones_like(mask)
 
-    if tf.random.uniform(()) > 0.5 and is_training:
-        image = tf.image.flip_left_right(image)
-        mask = tf.image.flip_left_right(mask)
+    split_masks = []
+    for i in range(aug.mask_shape[-1]):
+        m = tf.where(mask == i, ones, zeros)
+        split_masks.append(m)
+
+    mask = tf.concat(split_masks, axis=-1)
+
+    image = tf.cast(image, tf.uint8)
+    mask = tf.cast(mask, tf.uint8)
+
+    filename, image, mask = tf.py_function(
+            func=aug.__call__,
+            inp=(filename, image, mask),
+            Tout=(tf.string, tf.float32, tf.uint8)
+    )
 
     return filename, image, mask
 
@@ -158,6 +157,28 @@ def from_indexable(iterator, output_types, output_shapes, num_parallel_calls=Non
                 name=name)
 
     return ds.map(index_to_entry, num_parallel_calls=num_parallel_calls)
+
+def run_eval(model, eval_dataset, eval_num_images, train_dir, global_step):
+    @tf.function
+    def eval_step_mask(images):
+        logits = model(images, training=False)
+        return logits
+
+    dst_dir = os.path.join(train_dir, 'eval', str(global_step))
+    os.makedirs(dst_dir, exist_ok=True)
+
+    num_files = 0
+    for filenames, images, true_masks in eval_dataset:
+        masks = eval_step_mask(images)
+        num_files += len(filenames)
+
+        validate.generate_images(filenames, images, masks, dst_dir)
+        logger.info('saved {}/{} images'.format(len(filenames), num_files))
+
+        if num_files >= eval_num_images:
+            break
+
+    logger.info('global_step: {}, evaluated {} images -> {}'.format(global_step, num_files, dst_dir))
 
 def train():
     checkpoint_dir = os.path.join(FLAGS.train_dir, 'checkpoints')
@@ -226,48 +247,59 @@ def train():
             num_vars_unet, int(num_params_unet),
             dtype))
 
-        def create_dataset(ann_dir, is_training):
-            import dataset as ds_impl
+        def create_dataset(ann_dir, rate):
+            ds_train = ds_impl.create_dataset_from_dir(FLAGS.train_data_dir, image_size, True)
+            ds_eval = ds_impl.create_dataset_from_dir(FLAGS.train_data_dir, image_size, False)
 
-            ds = ds_impl.run_queue(FLAGS.num_cpus, FLAGS.train_data_dir, image_size)
+            def create(ds):
+                return from_indexable(ds,
+                        num_parallel_calls=FLAGS.num_cpus,
+                        output_types=(tf.string, tf.float32, tf.uint8),
+                        output_shapes=(
+                            tf.TensorShape([]),
+                            tf.TensorShape([image_size, image_size, 3]),
+                            tf.TensorShape([image_size, image_size, num_classes]),
+                        ))
 
-            dataset = from_indexable(ds,
-                    num_parallel_calls=FLAGS.num_cpus,
-                    output_types=(tf.string, tf.float32, tf.uint8),
-                    output_shapes=(
-                        tf.TensorShape([]),
-                        tf.TensorShape([image_size, image_size, 3]),
-                        tf.TensorShape([image_size, image_size, num_classes]),
-                    ))
-
-            logger.info('dataset has been created, data dir: {}, images: {}'.format(ann_dir, len(ds)))
-
-            return dataset, len(ds)
-
-        if FLAGS.dataset == 'card_images':
-            dataset, num_images = create_dataset(FLAGS.train_data_dir, is_training=True)
-
-            rate = 0.9
+            num_images = len(ds_train)
             eval_num_images = int(num_images * (1. - rate))
             train_num_images = num_images - eval_num_images
 
-            train_dataset = dataset.skip(eval_num_images).cache().shuffle(2*FLAGS.batch_size).batch(FLAGS.batch_size).repeat().prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+            train_ds = create(ds_train).skip(eval_num_images)
+            eval_ds = create(ds_eval).take(eval_num_images)
+
+            logger.info('dataset has been created, data dir: {}, images: {}, train/eval: {}/{}'.format(ann_dir, num_images, train_num_images, eval_num_images))
+
+            return train_ds, train_num_images, eval_ds, eval_num_images, num_images
+
+        if FLAGS.dataset == 'card_images':
+            rate = 0.9
+            train_dataset, train_num_images, eval_dataset, eval_num_images, num_images = create_dataset(FLAGS.train_data_dir, rate)
+
+            train_dataset = train_dataset.cache().shuffle(2*FLAGS.batch_size).batch(FLAGS.batch_size).repeat().prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
             train_dataset = dstrategy.experimental_distribute_dataset(train_dataset)
 
-            eval_dataset = dataset.take(eval_num_images).cache().batch(FLAGS.batch_size).repeat().prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+            eval_dataset = eval_dataset.take(eval_num_images).cache().batch(FLAGS.batch_size).repeat().prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
             eval_dataset = dstrategy.experimental_distribute_dataset(eval_dataset)
+
+            class_weights = np.tile(np.array([1, 2, 5, 2, 5], dtype=np.float32), [int(FLAGS.batch_size / num_replicas), image_size, image_size, 1])
         elif FLAGS.dataset == 'oxford_pets':
             dataset, info = tfds.load('oxford_iiit_pet:3.0.0', with_info=True, data_dir=FLAGS.train_data_dir)
 
-            train_dataset = dataset['train'].map(lambda datapoint: load_image(datapoint, image_size, True, dtype), num_parallel_calls=tf.data.experimental.AUTOTUNE)
+            aug_train = ds_impl.create_augment(image_size, num_classes, True)
+            aug_eval = ds_impl.create_augment(image_size, num_classes, False)
+
+            train_dataset = dataset['train'].map(lambda datapoint: load_image(datapoint, aug_train), num_parallel_calls=tf.data.experimental.AUTOTUNE)
             train_dataset = train_dataset.shuffle(FLAGS.batch_size * 2).batch(FLAGS.batch_size).repeat().prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
             #train_dataset = dstrategy.experimental_distribute_dataset(train_dataset)
             train_num_images = info.splits['train'].num_examples
 
-            eval_dataset = dataset['test'].map(lambda datapoint: load_image(datapoint, image_size, False, dtype), num_parallel_calls=tf.data.experimental.AUTOTUNE)
+            eval_dataset = dataset['test'].map(lambda datapoint: load_image(datapoint, aug_eval), num_parallel_calls=tf.data.experimental.AUTOTUNE)
             eval_dataset = eval_dataset.batch(FLAGS.batch_size).prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
             #eval_dataset = dstrategy.experimental_distribute_dataset(eval_dataset)
             eval_num_images = info.splits['test'].num_examples
+
+            class_weights = np.tile(np.array([1, 2, 5], dtype=np.float32), [int(FLAGS.batch_size / num_replicas), image_size, image_size, 1])
 
         steps_per_epoch = calc_epoch_steps(train_num_images)
         if FLAGS.steps_per_epoch > 0:
@@ -310,7 +342,9 @@ def train():
         status = checkpoint.restore(manager.latest_checkpoint)
 
         if manager.latest_checkpoint:
-            logger.info("Restored from {}".format(manager.latest_checkpoint))
+            logger.info("Restored from {}, global step: {}".format(manager.latest_checkpoint, global_step.numpy()))
+            #run_eval(model, eval_dataset, eval_num_images, FLAGS.train_dir, global_step.numpy())
+            #exit(0)
         else:
             logger.info("Initializing from scratch, no latest checkpoint")
 
@@ -328,7 +362,6 @@ def train():
             eval_accuracy_metric.reset_states()
 
         #cross_entropy_loss_object = tf.keras.losses.BinaryCrossentropy(reduction=tf.keras.losses.Reduction.NONE, label_smoothing=FLAGS.label_smoothing)
-        class_weights = np.tile(np.array([1, 2, 5], dtype=np.float32), [int(FLAGS.batch_size / num_replicas), image_size, image_size, 1])
         cross_entropy_loss_object = loss.CategoricalFocalLoss(reduction=tf.keras.losses.Reduction.NONE)
         dice_loss = loss.DiceLoss(reduction=tf.keras.losses.Reduction.NONE, class_weights=class_weights)
 
@@ -452,25 +485,7 @@ def train():
                 learning_rate_multiplier = initial_learning_rate_multiplier
 
                 if False:
-                    @tf.function
-                    def eval_step_mask(images):
-                        logits = model(images, training=False)
-                        masks = tf.argmax(logits, axis=-1)
-                        return masks
-
-                    dst_dir = os.path.join(FLAGS.train_dir, 'eval', str(epoch))
-                    os.makedirs(dst_dir, exist_ok=True)
-
-                    num_files = 0
-                    for filenames, images, true_masks in eval_dataset:
-                        masks = eval_step_mask(images)
-                        num_files += len(filenames)
-
-                        generate_images(filenames, images, masks, dst_dir)
-                        logger.info('saved {}/{} images'.format(len(filenames), total_images))
-
-                        if num_files >= eval_num_images:
-                            break
+                    run_eval(model, eval_dataset, eval_num_images, FLAGS.train_dir, global_step.numpy())
             else:
                 num_epochs_without_improvement += 1
 
@@ -483,7 +498,9 @@ def train():
                         epoch, num_epochs_without_improvement, min_metric, learning_rate.numpy(), new_lr))
                     learning_rate.assign(new_lr)
                     num_epochs_without_improvement = 0
-                    learning_rate_multiplier /= 2
+                    if learning_rate_multiplier > 0.1:
+                        learning_rate_multiplier /= 2
+
                     want_reset = True
                 elif num_epochs_without_improvement >= 10:
                     new_lr = FLAGS.initial_learning_rate

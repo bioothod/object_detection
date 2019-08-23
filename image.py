@@ -5,8 +5,6 @@ from matplotlib import patches, patheffects
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 
-from pycocotools import mask as maskUtils
-
 def show_img(im, figsize=None, ax=None):
     if not ax:
         fig, ax = plt.subplots(figsize=figsize)
@@ -54,35 +52,41 @@ def draw_filename(fn, ann, dst, cat_names):
     draw_im(im, ann, dst, cat_names)
 
 def draw_im_segm(img, masks, dst):
-    fig = plt.figure(figsize=(8, 3))
     rows = 1
-    columns = 1 + len(masks)*2
+    columns = 1 + 1 + len(masks)*masks[0].shape[2]
+
+    fig = plt.figure(figsize=(3 * columns, 3 * rows))
+
     ax = fig.add_subplot(rows, columns, 1)
     ax.set_autoscale_on(True)
     ax.imshow(img)
 
-    single_color = False
+    ax_img_mask = fig.add_subplot(rows, columns, 2)
+    ax_img_mask.set_autoscale_on(True)
+    ax_img_mask.imshow(img)
 
-    ax_idx = 2
+    single_color = False
+    ax_idx = 3
     for idx, m in enumerate(masks):
-        n = 2
-        for i in range(n):
-            ax = fig.add_subplot(rows, columns, ax_idx + n*idx+i)
+        mask_max = np.max(m, axis=-1)
+        for mchannel in range(m.shape[2]):
+            ax = fig.add_subplot(rows, columns, ax_idx + idx*m.shape[2] + mchannel)
             ax.set_autoscale_on(True)
 
-            if i == 0:
-                ax.imshow(img)
+            mask = m[:, :, mchannel]
+            #mask = np.where(mask > 0, 1, 0).astype(float)
 
-            img = np.ones((m.shape[0], m.shape[1], 3))
+            mask_img = np.ones((mask.shape[0], mask.shape[1], 3), dtype=np.float32)
             if single_color:
-                color_mask = np.array([2.0, 166.0, 101.0])/255
+                color_mask = np.array([2.0, 166.0, 101.0])/255.
             else:
                 color_mask = np.random.random((1, 3)).tolist()[0]
 
             for ch in range(3):
-                img[:, :, ch] = color_mask[ch]
+                mask_img[:, :, ch] = color_mask[ch]
 
-            ax.imshow(np.dstack((img, m.astype(float)*0.8)))
+            ax.imshow(np.dstack((mask_img, mask)))
+            ax_img_mask.imshow(np.dstack((mask_img, mask * 0.4)))
 
     plt.savefig(dst)
     plt.close(fig)

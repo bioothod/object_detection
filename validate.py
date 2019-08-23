@@ -24,7 +24,6 @@ def generate_images(filenames, images, masks, data_dir):
 
         image = image.numpy() * 128. + 128
         image = image.astype(np.uint8)
-        logger.info('{}: min: {}, max: {}'.format(filename, np.min(image), np.max(image)))
 
         dst = '{}/{}.png'.format(data_dir, image_id)
         image_draw.draw_im_segm(image, [mask.numpy()], dst)
@@ -79,7 +78,11 @@ if __name__ == '__main__':
         'relu_fn': tf.nn.swish
     }
 
-    num_classes = 3
+    if FLAGS.dataset == 'card_images':
+        num_classes = 5
+    elif FLAGS.dataset == 'oxford_pets':
+        num_classes = 3
+
     base_model, model, image_size = unet.create_model(params, dtype, FLAGS.model_name, num_classes)
 
     if FLAGS.dataset == 'card_images':
@@ -105,7 +108,7 @@ if __name__ == '__main__':
     @tf.function
     def eval_step(images):
         logits = model(images, training=False)
-        masks = tf.argmax(logits, axis=-1)
+        masks = tf.nn.softmax(logits, axis=-1)
         return masks
 
     os.makedirs(FLAGS.dst_dir, exist_ok=True)
