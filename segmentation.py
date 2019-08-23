@@ -199,7 +199,11 @@ def train():
         global_step = tf.Variable(1, dtype=tf.int64, name='global_step', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
         learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
 
-        num_classes = 3
+        if FLAGS.dataset == 'card_images':
+            num_classes = 5
+        elif FLAGS.dataset == 'oxford_pets':
+            num_classes = 3
+
         base_model, model, image_size = unet.create_model(params, dtype, FLAGS.model_name, num_classes)
 
         dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)

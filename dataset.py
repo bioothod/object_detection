@@ -127,7 +127,7 @@ class Dataset:
         else:
             card = self.cards[i]
 
-        mask = np.concatenate([card.card_mask, card.text_mask], axis=-1)
+        mask = np.concatenate([card.card_mask, card.text_mask, card.boundary_mask, card.corners_mask], axis=-1)
 
         background = 1. - np.where(mask.sum(axis=-1, keepdims=True) > 0, 1, 0)
         mask = np.concatenate([background, mask], axis=-1)

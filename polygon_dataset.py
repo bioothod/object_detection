@@ -29,7 +29,7 @@ class Card:
 
     def apply_mask(self, mask, polys, value):
         if mask is None:
-            mask = np.zeros((self.target_height, self.target_width, 1), dtype=np.int32)
+            mask = np.zeros((self.target_height, self.target_width, 1), dtype=np.uint8)
 
         polys = np.array(polys, dtype=np.int32)
         cv2.fillPoly(mask, polys, value)
@@ -41,6 +41,15 @@ class Card:
         card = js['card']
         card_poly = self.find_poly(card)
         self.card_mask = self.apply_mask(None, [card_poly], 1)
+
+        self.corners_mask = np.zeros((self.target_height, self.target_width, 1), dtype=np.uint8)
+        self.boundary_mask = np.zeros((self.target_height, self.target_width, 1), dtype=np.uint8)
+
+        polys = np.array(card_poly, dtype=np.int32)
+        cv2.polylines(self.boundary_mask, [polys], True, 1)
+
+        for i in range(polys.shape[0]):
+            cv2.circle(self.corners_mask, tuple(polys[i]), 2, 1, 2)
 
         number = js['number']
         self.number_text = number['text']
