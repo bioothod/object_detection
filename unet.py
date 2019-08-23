@@ -7,23 +7,14 @@ import efficientnet.tfkeras as efn
 
 logger = logging.getLogger('segmentation')
 
-def upsample(filters, size, norm_type='batchnorm', apply_dropout=True):
-  """Upsamples an input.
-  Conv2DTranspose => Batchnorm => Dropout => Relu
-  Args:
-    filters: number of filters
-    size: filter size
-    norm_type: Normalization type; either 'batchnorm' or 'instancenorm'.
-    apply_dropout: If True, adds the dropout layer
-  Returns:
-    Upsample Sequential Model
-  """
-
+def upsample(filters, kernel_size, norm_type='batchnorm', apply_dropout=True):
   initializer = tf.random_normal_initializer(0., 0.02)
 
   result = tf.keras.Sequential()
   result.add(
-      tf.keras.layers.Conv2DTranspose(filters, size, strides=2,
+      tf.keras.layers.Conv2DTranspose(filters,
+                                      kernel_size=kernel_size,
+                                      strides=2, # 2x upsampling of width and height
                                       padding='same',
                                       kernel_initializer=initializer,
                                       use_bias=False))
@@ -80,19 +71,18 @@ class Unet(tf.keras.Model):
 
 def create_model(params, dtype, model_name, num_classes):
     model_map = {
-        'efficientnet-b0': efn.EfficientNetB0,
-        'efficientnet-b1': efn.EfficientNetB1,
-        'efficientnet-b2': efn.EfficientNetB2,
-        'efficientnet-b3': efn.EfficientNetB3,
-        'efficientnet-b4': efn.EfficientNetB4,
-        'efficientnet-b5': efn.EfficientNetB5,
-        'efficientnet-b6': efn.EfficientNetB6,
-        'efficientnet-b7': efn.EfficientNetB7,
+        'efficientnet-b0': (efn.EfficientNetB0, 224),
+        'efficientnet-b1': (efn.EfficientNetB1, 240),
+        'efficientnet-b2': (efn.EfficientNetB2, 260),
+        'efficientnet-b3': (efn.EfficientNetB3, 300),
+        'efficientnet-b4': (efn.EfficientNetB4, 380),
+        'efficientnet-b5': (efn.EfficientNetB5, 456),
+        'efficientnet-b6': (efn.EfficientNetB6, 528),
+        'efficientnet-b7': (efn.EfficientNetB7, 600),
     }
 
-    image_size = 224
-
-    base_model = model_map[model_name](include_top=False)
+    base_model, image_size = model_map[model_name]
+    base_model = base_model(include_top=False)
     base_model.trainable = False
 
     layers = ('top_activation', 'block6a_expand_activation', 'block4a_expand_activation', 'block3a_expand_activation', 'block2a_expand_activation')
@@ -100,8 +90,10 @@ def create_model(params, dtype, model_name, num_classes):
     down_stack = tf.keras.Model(inputs=base_model.input, outputs=layers)
     down_stack.trainable = False
 
+    crop_0101 = tf.keras.layers.Cropping2D(((0, 1), (0, 1)))
+
     up_stack = []
-    decoder_filters=(512, 256, 128, 64, 32, 16)
+    decoder_filters=(512, 256, 128, 64, 32, 16)[:len(layers)]
     for l, f in zip(layers, decoder_filters):
         up = upsample(f, 3, apply_dropout=True)
         up_stack.append(up)
@@ -117,10 +109,23 @@ def create_model(params, dtype, model_name, num_classes):
     for up, skip in zip(up_stack, skips):
         upsampled = up(x)
 
-        logger.info('inputs: {}, x: {}, upsampled: {}, skip: {}'.format(inputs.shape, x.shape, upsampled.shape, skip.shape))
+        diff = upsampled.shape[1] - skip.shape[1]
+
+        logger.info('inputs before padding: {}, x: {}, upsampled: {}, skip: {}, diff: {}'.format(inputs.shape, x.shape, upsampled.shape, skip.shape, diff))
+        if diff == 1:
+            upsampled = crop_0101(upsampled)
+
+        logger.info('inputs after padding: {}, x: {}, upsampled: {}, skip: {}'.format(inputs.shape, x.shape, upsampled.shape, skip.shape))
         x = tf.concat([upsampled, skip], axis=-1)
 
     ret = last(x)
+    diff = ret.shape[1] - image_size
+    if diff != 0:
+        crop = tf.keras.layers.Cropping2D(int(diff/2))(ret)
+
+        logger.info('final shape adjustment: {} -> {}'.format(ret.shape, crop.shape))
+        ret = crop
+
     model = tf.keras.Model(inputs=inputs, outputs=ret)
 
     return base_model, model, image_size
