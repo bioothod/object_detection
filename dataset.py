@@ -22,7 +22,7 @@ def get_training_augmentation(image_size):
         A.ShiftScaleRotate(scale_limit=0.5, rotate_limit=0, shift_limit=0.1, p=1, border_mode=0),
 
         A.PadIfNeeded(min_height=image_size, min_width=image_size, always_apply=True, border_mode=0),
-        A.Resize(height=image_size*2, width=image_size*2, interpolation=cv2.INTER_CUBIC, always_apply=True),
+        #A.Resize(height=image_size*2, width=image_size*2, interpolation=cv2.INTER_CUBIC, always_apply=True),
 
         A.RandomCrop(height=image_size, width=image_size, always_apply=True),
 
