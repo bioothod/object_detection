@@ -247,7 +247,7 @@ def train():
             eval_num_images = int(num_images * (1. - rate))
             train_num_images = num_images - eval_num_images
 
-            train_dataset = dataset.skip(eval_num_images).cache().batch(FLAGS.batch_size).repeat().prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+            train_dataset = dataset.skip(eval_num_images).cache().shuffle(2*FLAGS.batch_size).batch(FLAGS.batch_size).repeat().prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
             train_dataset = dstrategy.experimental_distribute_dataset(train_dataset)
 
             eval_dataset = dataset.take(eval_num_images).cache().batch(FLAGS.batch_size).repeat().prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
@@ -412,6 +412,8 @@ def train():
 
         min_metric = 0
         num_epochs_without_improvement = 0
+        initial_learning_rate_multiplier = 0.2
+        learning_rate_multiplier = initial_learning_rate_multiplier
 
         if manager.latest_checkpoint:
             reset_metrics()
@@ -443,6 +445,7 @@ def train():
                 logger.info("epoch: {}, saved checkpoint: {}, eval accuracy: {:.5f} -> {:.5f}".format(epoch, save_path, min_metric, eval_acc))
                 min_metric = eval_acc
                 num_epochs_without_improvement = 0
+                learning_rate_multiplier = initial_learning_rate_multiplier
 
                 if False:
                     @tf.function
@@ -467,23 +470,25 @@ def train():
             else:
                 num_epochs_without_improvement += 1
 
-            if num_epochs_without_improvement > 10:
+            if num_epochs_without_improvement >= 10:
                 want_reset = False
 
                 if learning_rate > FLAGS.min_learning_rate:
-                    new_lr = learning_rate.numpy() / 5.
+                    new_lr = learning_rate.numpy() * learning_rate_multiplier
                     logger.info('epoch: {}, epochs without metric improvement: {}, best metric: {:.5f}, updating learning rate: {:.2e} -> {:.2e}'.format(
                         epoch, num_epochs_without_improvement, min_metric, learning_rate.numpy(), new_lr))
                     learning_rate.assign(new_lr)
                     num_epochs_without_improvement = 0
+                    learning_rate_multiplier /= 2
                     want_reset = True
-                elif num_epochs_without_improvement > 20:
+                elif num_epochs_without_improvement >= 10:
                     new_lr = FLAGS.initial_learning_rate
                     logger.info('epoch: {}, epochs without metric improvement: {}, best metric: {:.5f}, resetting learning rate: {:.2e} -> {:.2e}'.format(
                         epoch, num_epochs_without_improvement, min_metric, learning_rate.numpy(), new_lr))
                     learning_rate.assign(new_lr)
                     num_epochs_without_improvement = 0
                     want_reset = True
+                    learning_rate_multiplier = initial_learning_rate_multiplier
 
                 if want_reset:
                     logger.info('epoch: {}, best metric: {:.5f}, learning rate: {:.2e}, restoring best checkpoint: {}'.format(
