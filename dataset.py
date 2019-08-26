@@ -4,7 +4,6 @@ import os
 import time
 
 import albumentations as A
-import multiprocessing as mp
 import numpy as np
 
 import polygon_dataset
