@@ -1,3 +1,4 @@
+import cv2
 import json
 import os
 import random
@@ -10,6 +11,8 @@ from matplotlib.collections import PatchCollection
 from matplotlib.patches import Polygon
 
 from pycocotools import mask as maskUtils
+
+import albumentations as A
 
 class COCO:
     def __init__(self, ann_path, data_dir, logger):
@@ -139,14 +142,193 @@ class COCO:
 
         random.shuffle(tuples)
 
-        filenames = []
-        ids = []
-        annotations = []
-        for t in tuples:
-            filename, image_id, anns = t
+        return tuples
 
-            filenames.append(filename)
-            ids.append(image_id)
-            annotations.append(np.array(anns))
+def round_clip_0_1(x, **kwargs):
+    return x.round().clip(0, 1)
 
-        return filenames, ids, annotations
+def get_training_augmentation(image_size, bbox_params):
+    train_transform = [
+        A.HorizontalFlip(p=0.5),
+        A.PadIfNeeded(min_height=image_size, min_width=image_size, always_apply=True, border_mode=0),
+
+        A.OneOf([
+            A.Compose([
+                A.ShiftScaleRotate(scale_limit=0.1, rotate_limit=0, shift_limit=0.1, p=0.5, border_mode=0),
+
+                A.Resize(height=int(image_size*1.4), width=int(image_size*1.4), interpolation=cv2.INTER_CUBIC, always_apply=True),
+                A.RandomCrop(height=image_size, width=image_size, always_apply=True),
+
+                A.IAAAdditiveGaussianNoise(p=0.1),
+                A.IAAPerspective(p=0.1),
+
+                A.OneOf(
+                    [
+                        A.CLAHE(p=1),
+                        A.RandomBrightness(p=1),
+                        A.RandomGamma(p=1),
+                    ],
+                    p=0.5,
+                ),
+
+                A.OneOf(
+                    [
+                        A.IAASharpen(p=1),
+                        A.Blur(blur_limit=3, p=1),
+                        A.MotionBlur(blur_limit=3, p=1),
+                    ],
+                    p=0.5,
+                ),
+
+                A.OneOf(
+                    [
+                        A.RandomContrast(p=1),
+                        A.HueSaturationValue(p=1),
+                    ],
+                    p=0.5,
+                ),
+                A.Lambda(mask=round_clip_0_1),
+            ]),
+            A.Compose([
+                A.Resize(height=int(image_size*1.2), width=int(image_size*1.2), interpolation=cv2.INTER_CUBIC, always_apply=True),
+                A.RandomCrop(height=image_size, width=image_size, always_apply=True),
+            ]),
+            A.Compose([
+                A.Resize(height=int(image_size*1.1), width=int(image_size*1.1), interpolation=cv2.INTER_CUBIC, always_apply=True),
+                A.RandomCrop(height=image_size, width=image_size, always_apply=True),
+            ]),
+        ], p=1.),
+    ]
+
+    return A.Compose(train_transform, bbox_params)
+
+
+def get_validation_augmentation(image_size, bbox_params):
+    test_transform = [
+        A.PadIfNeeded(image_size, image_size),
+        A.Resize(height=image_size, width=image_size, interpolation=cv2.INTER_CUBIC, always_apply=True),
+    ]
+    return A.Compose(test_transform)
+
+def preprocess_input(img, **kwargs):
+    #logger.info('preprocess: img: {}/{}, kwargs: {}'.format(img.shape, img.dtype, kwargs))
+
+    img = img.astype(np.float32)
+
+    #vgg_means = np.array([91.4953, 103.8827, 131.0912], dtype=np.float32)
+    #img -= vgg_means
+    #img /= 255.
+    img -= 128.
+    img /= 128.
+
+    return img
+
+def get_preprocessing(preprocessing_fn, bbox_params):
+    transform = [
+        A.Lambda(image=preprocessing_fn),
+    ]
+    return A.Compose(transform, bbox_params)
+
+class COCO_Iterable:
+    def __init__(self, ann_path, data_dir, logger, anchor_boxes_for_layers, augmentation=None, preprocessing=None):
+        self.logger = logger
+
+        self.anchor_boxes_for_layers = anchor_boxes_for_layers
+
+        self.augmentation = augmentation
+        self.preprocessing = preprocessing
+
+        self.coco = COCO(ann_path, data_dir, logger)
+        self.image_tuples = self.coco.get_images()
+
+        self.cats = {}
+        self.cats[-1] = len(self.cats)
+        self.background_id = self.cats[-1]
+
+        for cat_id in self.coco.cats.keys():
+            self.cats[cat_id] = len(self.cats)
+
+    def num_classes(self):
+        return self.coco.num_classes()
+
+    def cat_names(self):
+        return self.coco.cat_names()
+
+    def __len__(self):
+        return len(self.image_tuples)
+
+    def __getitem__(self, i):
+        filename, image_id, anns = self.image_tuples[i]
+
+        image = cv2.imread(filename)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = image.astype(np.uint8)
+
+        bboxes = []
+        category_ids = []
+        for bb, cat_id in anns:
+            bboxes.append(bb)
+            category_ids.append(cat_id)
+
+            #x0, x1, y0, y1 = [bb[0], bb[0]+bb[2], bb[1], bb[1]+bb[3]]
+
+        annotations = {
+            'image': image,
+            'bboxes': bboxes,
+            'category_id': category_ids,
+        }
+
+        if self.augmentation:
+            anns = self.augmentation(**annotations)
+
+        if self.preprocessing:
+            anns = self.preprocessing(**anns)
+
+        image = anns['image']
+        bboxes = anns['bboxes']
+        cat_ids = anns['category_id']
+
+        converted_bboxes = []
+        for bb, cat_id in zip(bboxes, cat_ids):
+            x0, x1, y0, y1 = [bb[0], bb[0]+bb[2], bb[1], bb[1]+bb[3]]
+
+            converted_bboxes.append([x0, y0, x1, y1])
+
+        true_bboxes = []
+        true_labels = []
+        for layer_shape, layer_anchors in self.anchor_boxes_for_layers:
+            for anchor in layer_anchors:
+                iou = anchor.process_ext_bboxes(np.array(converted_bboxes), cat_ids)
+                idx = np.argmax(iou, axis=0)
+                max_iou = iou[idx]
+
+                if max_iou > 0.5:
+                    orig_cat_id = cat_ids[idx]
+                    converted_cat_id = self.cats[orig_cat_id]
+                    true_bboxes.append(converted_bboxes[idx])
+                    true_labels.append(cat_ids[idx])
+                else:
+                    true_bboxes.append(anchor.bbox)
+                    true_labels.append(self.background_id)
+
+        true_bboxes = np.array(true_bboxes, np.float32)
+        true_labels = np.array(true_labels, np.int32)
+
+        self.logger.info('{}: image: {}, bboxes: {}, labels: {}'.format(filename, image.shape, true_bboxes.shape, true_labels.shape))
+        return filename, image, true_bboxes, true_labels
+
+def create_coco_iterable(image_size, ann_path, data_dir, logger, is_training, anchor_boxes_for_layers, min_area=0., min_visibility=0.25):
+    bbox_params = A.BboxParams(
+            format='coco',
+            min_area=min_area,
+            min_visibility=min_visibility,
+            label_fields=['category_id'])
+
+    if is_training:
+        augmentation = get_training_augmentation(image_size, bbox_params)
+    else:
+        augmentation = get_validation_augmentation(image_size, bbox_params)
+
+    preprocessing = get_preprocessing(preprocess_input, bbox_params)
+
+    return COCO_Iterable(ann_path, data_dir, logger, anchor_boxes_for_layers, augmentation, preprocessing)

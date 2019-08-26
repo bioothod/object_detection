@@ -1,12 +1,25 @@
+import collections
 import logging
 
 import numpy as np
 import tensorflow as tf
 
-from efficientnet import conv_kernel_initializer
+import efficientnet.tfkeras as efn
 
 logger = logging.getLogger('objdet')
 logger.setLevel(logging.INFO)
+
+GlobalParams = collections.namedtuple('GlobalParams', [
+    'batch_norm_momentum', 'batch_norm_epsilon', 'dropout_rate', 'data_format',
+    'num_classes',
+])
+GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
+
+def conv_kernel_initializer(shape, dtype=None, partition_info=None):
+    del partition_info
+    kernel_height, kernel_width, _, out_filters = shape
+    fan_out = int(kernel_height * kernel_width * out_filters)
+    return tf.random_normal(shape, mean=0.0, stddev=np.sqrt(2.0 / fan_out), dtype=dtype)
 
 class StdConv(tf.keras.layers.Layer):
     def __init__(self, global_params, num_filters, strides=2, dropout_rate=0.1):
@@ -111,44 +124,61 @@ class SSD_Head(tf.keras.models.Model):
 
         return x
 
-class SSD(tf.keras.models.Model):
-    def __init__(self, global_params, endpoints, k, num_classes):
-        super(SSD, self).__init__()
-
-        self.global_params = global_params
-        self.k = k
-        self.num_classes = num_classes
-
-        self.endpoints = None
-        self.input_endpoints = endpoints
-
-        self._build()
-
-    def _build(self):
-        self.endpoints = []
-
-        for name, endpoint in self.input_endpoints:
-            with tf.name_scope('ssd_{}'.format(name)):
-                head = SSD_Head(self.global_params, self.k, self.num_classes)
-
-                self.endpoints.append((name, endpoint, head))
-
-    def call(self, base_model, inputs, training=True):
-        if self.global_params.data_format == 'channels_first':
-            inputs = tf.transpose(inputs, (0, 3, 1, 2))
-
-        x = base_model(inputs, training)
-
-        outputs = []
-        for name, endpoint, ssd_head in self.endpoints:
-            so = ssd_head(endpoint)
-            outputs.append(so)
-
-        return outputs
-
 class SSD_Loss(tf.keras.losses.Loss):
     def __init__(self, reduction=tf.keras.losses.Reduction.NONE, name=None):
         super(SSD_Loss, self).__init__(reduction, name)
 
     def __call__(y_true, y_pred, sample_weight=None):
         logger.info('true: {}, pred: {}'.format(y_true.shape, y_pred.shape))
+
+def create_base_model(dtype, model_name):
+    model_map = {
+        'efficientnet-b0': (efn.EfficientNetB0, 224),
+        'efficientnet-b1': (efn.EfficientNetB1, 240),
+        'efficientnet-b2': (efn.EfficientNetB2, 260),
+        'efficientnet-b3': (efn.EfficientNetB3, 300),
+        'efficientnet-b4': (efn.EfficientNetB4, 380),
+        'efficientnet-b5': (efn.EfficientNetB5, 456),
+        'efficientnet-b6': (efn.EfficientNetB6, 528),
+        'efficientnet-b7': (efn.EfficientNetB7, 600),
+    }
+
+    global_params = GlobalParams({
+        'data_format': 'channels_last',
+        'batch_norm_momentum': 0.99,
+        'batch_norm_epsilon': 1e-8,
+        'relu_fn': tf.nn.swish
+    })
+
+    base_model, image_size = model_map[model_name]
+    base_model = base_model(include_top=False)
+    base_model.trainable = False
+
+    layers = ('top_activation', 'block6a_expand_activation', 'block4a_expand_activation', 'block3a_expand_activation', 'block2a_expand_activation')
+    layers = [base_model.get_layer(name).output for name in layers]
+    down_stack = tf.keras.Model(inputs=base_model.input, outputs=layers)
+    down_stack.trainable = False
+
+    inputs = tf.keras.layers.Input(shape=(image_size, image_size, 3))
+    features = down_stack(inputs)
+
+    feature_shapes = []
+    for l in features:
+        logger.info('base model: {}, feature layer: {}, shape: {}'.format(model_name, l.name, l.shape))
+        feature_shapes.append(l.shape)
+
+    return down_stack, image_size, list(reversed(feature_shapes))
+
+def create_model(down_stack, image_size, num_classes, num_anchors):
+    inputs = tf.keras.layers.Input(shape=(image_size, image_size, 3))
+    features = down_stack(inputs)
+
+    ssd_stack = []
+    for ft in features:
+        ssd_head = SSD_Head(global_params, num_anchors, num_classes)
+        ssd_stack.append(ssd_head(ft))
+
+    output = tf.concat(ssd_stack, axis=-1)
+
+    model = tf.keras.Model(inputs=inputs, outputs=output)
+    return base_model, model, image_size
