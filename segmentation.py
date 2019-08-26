@@ -48,8 +48,6 @@ parser.add_argument('--steps_per_epoch', default=-1, type=int, help='Number of s
 parser.add_argument('--min_eval_metric', default=0.75, type=float, help='Minimal evaluation metric to start saving models')
 parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16 training/inference')
 parser.add_argument('--min_learning_rate', default=1e-6, type=float, help='Minimal learning rate')
-autoaugment_name_choice = ['v0']
-parser.add_argument('--autoaugment_name', type=str, choices=autoaugment_name_choice, help='Autoaugment name, choices: {}'.format(autoaugment_name_choice))
 parser.add_argument('--dataset', type=str, choices=['card_images', 'oxford_pets'], default='card_images', help='Dataset type')
 FLAGS = parser.parse_args()
 
