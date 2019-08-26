@@ -16,46 +16,57 @@ def round_clip_0_1(x, **kwargs):
 
 def get_training_augmentation(image_size):
     train_transform = [
-
         A.HorizontalFlip(p=0.5),
-
-        A.ShiftScaleRotate(scale_limit=0.1, rotate_limit=0, shift_limit=0.05, p=0.5, border_mode=0),
-
         A.PadIfNeeded(min_height=image_size, min_width=image_size, always_apply=True, border_mode=0),
-        A.Resize(height=int(image_size*1.6), width=int(image_size*1.6), interpolation=cv2.INTER_CUBIC, always_apply=True),
 
-        A.RandomCrop(height=image_size, width=image_size, always_apply=True),
+        A.OneOf([
+            A.Compose([
+                A.ShiftScaleRotate(scale_limit=0.1, rotate_limit=0, shift_limit=0.1, p=0.5, border_mode=0),
 
-        A.IAAAdditiveGaussianNoise(p=0.05),
-        A.IAAPerspective(p=0.1),
+                A.Resize(height=int(image_size*1.4), width=int(image_size*1.4), interpolation=cv2.INTER_CUBIC, always_apply=True),
+                A.RandomCrop(height=image_size, width=image_size, always_apply=True),
 
-        A.OneOf(
-            [
-                A.CLAHE(p=1),
-                A.RandomBrightness(p=1),
-                A.RandomGamma(p=1),
-            ],
-            p=0.5,
-        ),
+                A.IAAAdditiveGaussianNoise(p=0.1),
+                A.IAAPerspective(p=0.1),
 
-        A.OneOf(
-            [
-                A.IAASharpen(p=1),
-                A.Blur(blur_limit=1, p=1),
-                A.MotionBlur(blur_limit=1, p=1),
-            ],
-            p=0.5,
-        ),
+                A.OneOf(
+                    [
+                        A.CLAHE(p=1),
+                        A.RandomBrightness(p=1),
+                        A.RandomGamma(p=1),
+                    ],
+                    p=0.5,
+                ),
 
-        A.OneOf(
-            [
-                A.RandomContrast(p=1),
-                A.HueSaturationValue(p=1),
-            ],
-            p=0.5,
-        ),
-        A.Lambda(mask=round_clip_0_1),
+                A.OneOf(
+                    [
+                        A.IAASharpen(p=1),
+                        A.Blur(blur_limit=3, p=1),
+                        A.MotionBlur(blur_limit=3, p=1),
+                    ],
+                    p=0.5,
+                ),
+
+                A.OneOf(
+                    [
+                        A.RandomContrast(p=1),
+                        A.HueSaturationValue(p=1),
+                    ],
+                    p=0.5,
+                ),
+                A.Lambda(mask=round_clip_0_1),
+            ]),
+            A.Compose([
+                A.Resize(height=int(image_size*1.2), width=int(image_size*1.2), interpolation=cv2.INTER_CUBIC, always_apply=True),
+                A.RandomCrop(height=image_size, width=image_size, always_apply=True),
+            ]),
+            A.Compose([
+                A.Resize(height=int(image_size*1.1), width=int(image_size*1.1), interpolation=cv2.INTER_CUBIC, always_apply=True),
+                A.RandomCrop(height=image_size, width=image_size, always_apply=True),
+            ]),
+        ], p=1.),
     ]
+
     return A.Compose(train_transform)
 
 
