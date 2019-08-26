@@ -1,3 +1,5 @@
+import tensorflow as tf
+
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.util import nest
 
