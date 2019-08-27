@@ -297,10 +297,32 @@ class COCO_Iterable:
 
         #self.logger.info('{}: image_id: {}, image: {}: after preprocessing: bboxes: {}, categories: {}'.format(filename, image_id, image.shape, bboxes, cat_ids))
 
+        max_ious = np.zeros((self.np_anchor_boxes.shape[0]), dtype=np.float32)
+
         true_bboxes = self.np_anchor_boxes.copy()
         true_labels = np.zeros((self.np_anchor_boxes.shape[0]))
         true_orig_labels = np.zeros((self.np_anchor_boxes.shape[0]))
-        
+        num_positive = 0
+
+        def update_true_arrays(iou, cat_id, max_iou_threshold):
+            converted_cat_id = self.cats[cat_id]
+
+            idx = iou > max_iou_threshold
+            update_idx = idx & (iou > max_ious)
+
+            true_bboxes[update_idx] = box
+            true_labels[update_idx] = converted_cat_id
+            true_orig_labels[update_idx] = cat_id
+            num_p = update_idx.sum()
+
+            self.logger.debug('{}: image_id: {}, image: {}, bbox: {}, threshold: {}, positive: {}, update: {}, max_iou: {}, max_saved_iou: {}'.format(
+                filename, image_id, image.shape, box, max_iou_threshold,
+                idx.sum(), update_idx.sum(),
+                np.max(iou), np.max(max_ious)))
+
+            max_ious[update_idx] = iou[update_idx]
+            return num_p
+
         for bb, cat_id in zip(bboxes, cat_ids):
             x0, y0, x1, y1 = [bb[0], bb[1], bb[0]+bb[2], bb[1]+bb[3]]
 
@@ -308,21 +330,20 @@ class COCO_Iterable:
             box_area = (x1 - x0 + 1) * (y1 - y0 + 1)
             iou = anchor.calc_iou(box, box_area, self.np_anchor_boxes, self.np_anchor_areas)
 
-            converted_cat_id = self.cats[orig_cat_id]
+            assert iou.shape == max_ious.shape
 
-            idx = iou > 0.5
-            true_bboxes[idx] = box
-            true_labels[idx] = converted_cat_id
-            true_orig_labels[idx] = cat_id
+            num_p = update_true_arrays(iou, cat_id, 0.5)
+            if num_p == 0:
+                max_iou = np.max(iou)
+                num_p = update_true_arrays(iou, cat_id, max_iou * 0.8)
 
-            num_positive = idx.sum()
+            num_positive += num_p
 
-        self.logger.info('{}: image_id: {}, image: {}, bboxes: {}, labels: {}, aug bboxes: {} -> {}, num_positive: {}, time: {:.1f} ms'.format(
+        self.logger.debug('{}: image_id: {}, image: {}, bboxes: {}, labels: {}, aug bboxes: {} -> {}, num_positive: {}, time: {:.1f} ms'.format(
             filename, image_id, image.shape, true_bboxes.shape, true_labels.shape, len(anns), len(bboxes), num_positive, (time.time() - start_time) * 1000.))
-        #return filename, image_id, image, true_bboxes, true_labels, true_orig_labels
-        return filename, image_id, image
+        return filename, image_id, image, true_bboxes, true_labels, true_orig_labels
 
-def create_coco_iterable(image_size, ann_path, data_dir, logger, is_training, anchor_boxes_for_layers, min_area=0., min_visibility=0.15):
+def create_coco_iterable(image_size, ann_path, data_dir, logger, is_training, np_anchor_boxes, np_anchor_areas, min_area=0., min_visibility=0.15):
     bbox_params = A.BboxParams(
             format='coco',
             min_area=min_area,
@@ -336,4 +357,4 @@ def create_coco_iterable(image_size, ann_path, data_dir, logger, is_training, an
 
     preprocessing = get_preprocessing(preprocess_input, bbox_params)
 
-    return COCO_Iterable(ann_path, data_dir, logger, anchor_boxes_for_layers, augmentation, preprocessing)
+    return COCO_Iterable(ann_path, data_dir, logger, np_anchor_boxes, np_anchor_areas, augmentation, preprocessing)

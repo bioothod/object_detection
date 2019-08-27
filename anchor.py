@@ -41,22 +41,19 @@ class Anchor:
         x1 *= scale
         y1 *= scale
 
-        return x0, y0, x1, y1
-
-    def process_ext_bboxes(self, bboxes, area, cat_ids):
-        iou = calc_iou(self.bbox, self.bbox_area, bboxes, area)
-        return iou
+        return [x0, y0, x1, y1]
 
 def create_anchors_for_layer(image_size, layer_size, cells_to_side):
-    anchors = []
+    anchor_boxes, anchor_areas = [], []
+
     for x in range(layer_size):
         for y in range(layer_size):
             for shift in cells_to_side:
                 x0 = x - shift
-                x1 = x + shift
+                x1 = x + shift + 1
 
                 y0 = y - shift
-                y1 = y + shift
+                y1 = y + shift + 1
 
                 if x0 < 0:
                     x0 = 0
@@ -69,18 +66,17 @@ def create_anchors_for_layer(image_size, layer_size, cells_to_side):
                     y1 = layer_size
 
                 a = Anchor((x0, y0), (x1, y1), image_size, layer_size)
-                anchors.append(a)
 
-            anchors.append(a)
+                anchor_boxes.append(a.bbox)
+                anchor_areas.append(a.bbox_area)
 
-    return anchors
+    return anchor_boxes, anchor_areas
 
 def create_anchors(image_size, feature_shapes):
     anchors = []
-    #cells_to_side = [0., 0.5, math.sqrt(2), 2.5]
-    cells_to_side = [0.]
+    cells_to_side = [0., 0.5, math.sqrt(2), 2.5]
+    #cells_to_side = [0.]
 
-    anchors = []
     anchor_layers = []
     num_anchors = 0
 
@@ -90,17 +86,14 @@ def create_anchors(image_size, feature_shapes):
     for shape in feature_shapes:
         layer_size = shape[1]
 
-        layer_anchors = create_anchors_for_layer(image_size, layer_size, cells_to_side)
-        for a in layer_anchors:
-            anchor_boxes.append(a.bbox)
-            anchor_areas.append(a.bbbox_area)
+        anchor_boxes_for_layer, anchor_areas_for_layer = create_anchors_for_layer(image_size, layer_size, cells_to_side)
+        anchor_boxes += anchor_boxes_for_layer
+        anchor_areas += anchor_areas_for_layer
 
-        anchor_layers.append(len(layer_anchors))
-        num_anchors += len(layer_anchors)
-
-        anchors.append((shape, layer_anchors))
+        anchor_layers.append(len(anchor_boxes_for_layer))
+        num_anchors += len(anchor_boxes_for_layer)
 
     np_anchors_boxes = np.array(anchor_boxes)
     np_anchors_areas = np.array(anchor_areas)
 
-    return anchors, np_anchors_boxes, np_anchors_areas
+    return np_anchors_boxes, np_anchors_areas

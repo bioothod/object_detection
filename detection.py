@@ -104,15 +104,12 @@ def train():
 
         base_model, image_size, feature_shapes = ssd.create_base_model(dtype, FLAGS.model_name)
 
-        anchor_boxes_for_layers = anchor.create_anchors(image_size, feature_shapes)
-        num_anchors = 0
-        for shape, anchors in anchor_boxes_for_layers:
-            logger.info('layer: {}, anchors: {}'.format(shape, len(anchors)))
-            num_anchors += len(anchors)
+        np_anchor_boxes, np_anchor_areas = anchor.create_anchors(image_size, feature_shapes)
+        num_anchors = np_anchor_boxes.shape[0]
         logger.info('base model: {}, num_anchors: {}'.format(FLAGS.model_name, num_anchors))
 
         def create_dataset(name, ann_file, data_dir, is_training):
-            coco_iterable = coco.create_coco_iterable(image_size, ann_file, data_dir, logger, is_training, anchor_boxes_for_layers)
+            coco_iterable = coco.create_coco_iterable(image_size, ann_file, data_dir, logger, is_training, np_anchor_boxes, np_anchor_areas)
 
             num_images = len(coco_iterable)
             num_classes = coco_iterable.num_classes()
@@ -120,15 +117,14 @@ def train():
 
             ds = map_iter.from_indexable(coco_iterable,
                     num_parallel_calls=FLAGS.num_cpus,
-                    #output_types=(tf.string, tf.int64, tf.float32, tf.float32, tf.int32, tf.int32),
-                    output_types=(tf.string, tf.int64, tf.float32),
+                    output_types=(tf.string, tf.int64, tf.float32, tf.float32, tf.int32, tf.int32),
                     output_shapes=(
                         tf.TensorShape([]),
                         tf.TensorShape([]),
                         tf.TensorShape([image_size, image_size, 3]),
-                        #tf.TensorShape([num_anchors, 4]),
-                        #tf.TensorShape([num_anchors]),
-                        #tf.TensorShape([num_anchors]),
+                        tf.TensorShape([num_anchors, 4]),
+                        tf.TensorShape([num_anchors]),
+                        tf.TensorShape([num_anchors]),
                     ))
 
             #if is_training:
@@ -143,8 +139,6 @@ def train():
             return ds, num_images, num_classes, cat_names
 
         train_dataset, train_num_images, train_num_classes, train_cat_names = create_dataset('train', FLAGS.train_coco_annotations, FLAGS.train_coco_data_dir, is_training=True)
-        for _ in train_dataset:
-            continue
 
         if False:
             data_dir = os.path.join(FLAGS.train_dir, 'tmp')
@@ -424,7 +418,7 @@ def train():
 
 
 if __name__ == '__main__':
-    #np.set_printoptions(formatter={'float': '{:0.4f}'.format, 'int': '{:4d}'.format}, linewidth=250, suppress=True)
+    np.set_printoptions(formatter={'float': '{:0.4f}'.format, 'int': '{:4d}'.format}, linewidth=250, suppress=True, threshold=np.inf)
 
     try:
         train()
