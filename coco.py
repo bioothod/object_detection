@@ -1,3 +1,4 @@
+import anchor
 import cv2
 import json
 import os
@@ -227,10 +228,11 @@ def get_preprocessing(preprocessing_fn, bbox_params):
     return A.Compose(transform, bbox_params)
 
 class COCO_Iterable:
-    def __init__(self, ann_path, data_dir, logger, anchor_boxes_for_layers, augmentation=None, preprocessing=None):
+    def __init__(self, ann_path, data_dir, logger, np_anchor_boxes, np_anchor_areas, augmentation=None, preprocessing=None):
         self.logger = logger
 
-        self.anchor_boxes_for_layers = anchor_boxes_for_layers
+        self.np_anchor_boxes = np_anchor_boxes
+        self.np_anchor_areas = np_anchor_areas
 
         self.augmentation = augmentation
         self.preprocessing = preprocessing
@@ -295,54 +297,28 @@ class COCO_Iterable:
 
         #self.logger.info('{}: image_id: {}, image: {}: after preprocessing: bboxes: {}, categories: {}'.format(filename, image_id, image.shape, bboxes, cat_ids))
 
-        converted_bboxes = []
+        true_bboxes = self.np_anchor_boxes.copy()
+        true_labels = np.zeros((self.np_anchor_boxes.shape[0]))
+        true_orig_labels = np.zeros((self.np_anchor_boxes.shape[0]))
+        
         for bb, cat_id in zip(bboxes, cat_ids):
             x0, y0, x1, y1 = [bb[0], bb[1], bb[0]+bb[2], bb[1]+bb[3]]
 
-            converted_bboxes.append([x0, y0, x1, y1])
+            box = np.array([x0, y0, x1, y1])
+            box_area = (x1 - x0 + 1) * (y1 - y0 + 1)
+            iou = anchor.calc_iou(box, box_area, self.np_anchor_boxes, self.np_anchor_areas)
 
-        converted_bboxes = np.array(converted_bboxes)
-        if converted_bboxes.shape[0] != 0:
-            area = (converted_bboxes[:, 2] - converted_bboxes[:, 0] + 1) * (converted_bboxes[:, 3] - converted_bboxes[:, 1] + 1)
+            converted_cat_id = self.cats[orig_cat_id]
 
-        true_bboxes = []
-        true_labels = []
-        true_orig_labels = []
-        num_positive = 0
-        for layer_shape, layer_anchors in self.anchor_boxes_for_layers:
-            for anchor in layer_anchors:
-                if converted_bboxes.shape[0] != 0:
-                    iou = anchor.process_ext_bboxes(converted_bboxes, area, cat_ids)
-                    idx = np.argmax(iou, axis=0)
-                    max_iou = iou[idx]
-                else:
-                    self.logger.debug('{}: image_id: {}, anchor: {}, layer: {}: no converted bboxes'.format(
-                        filename, image_id,
-                        anchor.bbox, anchor.layer_size))
-                    max_iou = 0
+            idx = iou > 0.5
+            true_bboxes[idx] = box
+            true_labels[idx] = converted_cat_id
+            true_orig_labels[idx] = cat_id
 
-                if max_iou > 0.5:
-                    orig_cat_id = cat_ids[idx]
-                    converted_cat_id = self.cats[orig_cat_id]
-                    true_bboxes.append(converted_bboxes[idx])
-                    true_orig_labels.append(orig_cat_id)
-                    true_labels.append(converted_cat_id)
-                    self.logger.debug('{}: image_id: {}, anchor: {}, layer: {}, category: {}, bbox: {} -> {}, iou: {}'.format(
-                        filename, image_id,
-                        anchor.bbox, anchor.layer_size,
-                        orig_cat_id, bboxes[idx], converted_bboxes[idx], max_iou))
-                    num_positive += 1
-                else:
-                    true_bboxes.append(anchor.bbox)
-                    true_labels.append(self.background_id)
-                    true_orig_labels.append(-1)
+            num_positive = idx.sum()
 
-        #true_bboxes = np.array(true_bboxes, np.float32)
-        #true_labels = np.array(true_labels, np.int32)
-        #true_orig_labels = np.array(true_orig_labels, np.int32)
-
-        #self.logger.info('{}: image_id: {}, image: {}, bboxes: {}, labels: {}, aug bboxes: {} -> {}, num_positive: {}, time: {:.1f} ms'.format(
-        #    filename, image_id, image.shape, true_bboxes.shape, true_labels.shape, len(anns), len(bboxes), num_positive, (time.time() - start_time) * 1000.))
+        self.logger.info('{}: image_id: {}, image: {}, bboxes: {}, labels: {}, aug bboxes: {} -> {}, num_positive: {}, time: {:.1f} ms'.format(
+            filename, image_id, image.shape, true_bboxes.shape, true_labels.shape, len(anns), len(bboxes), num_positive, (time.time() - start_time) * 1000.))
         #return filename, image_id, image, true_bboxes, true_labels, true_orig_labels
         return filename, image_id, image
 

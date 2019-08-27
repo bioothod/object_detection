@@ -28,7 +28,7 @@ class Anchor:
 
         self.bbox = self.convert_to_bbox()
         x0, y0, x1, y1 = self.bbox
-        self.box_area = (x1 - x0 + 1) * (y1 - y0 + 1)
+        self.bbox_area = (x1 - x0 + 1) * (y1 - y0 + 1)
 
     def convert_to_bbox(self):
         scale = self.image_size / self.layer_size
@@ -44,7 +44,7 @@ class Anchor:
         return x0, y0, x1, y1
 
     def process_ext_bboxes(self, bboxes, area, cat_ids):
-        iou = calc_iou(self.bbox, self.box_area, bboxes, area)
+        iou = calc_iou(self.bbox, self.bbox_area, bboxes, area)
         return iou
 
 def create_anchors_for_layer(image_size, layer_size, cells_to_side):
@@ -81,12 +81,26 @@ def create_anchors(image_size, feature_shapes):
     cells_to_side = [0.]
 
     anchors = []
+    anchor_layers = []
+    num_anchors = 0
+
+    anchor_boxes = []
+    anchor_areas = []
 
     for shape in feature_shapes:
         layer_size = shape[1]
 
         layer_anchors = create_anchors_for_layer(image_size, layer_size, cells_to_side)
+        for a in layer_anchors:
+            anchor_boxes.append(a.bbox)
+            anchor_areas.append(a.bbbox_area)
+
+        anchor_layers.append(len(layer_anchors))
+        num_anchors += len(layer_anchors)
 
         anchors.append((shape, layer_anchors))
 
-    return anchors
+    np_anchors_boxes = np.array(anchor_boxes)
+    np_anchors_areas = np.array(anchor_areas)
+
+    return anchors, np_anchors_boxes, np_anchors_areas
