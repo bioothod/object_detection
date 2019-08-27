@@ -103,7 +103,13 @@ def train():
         learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
 
         base_model, image_size, feature_shapes = ssd.create_base_model(dtype, FLAGS.model_name)
+
         anchor_boxes_for_layers = anchor.create_anchors(image_size, feature_shapes)
+        num_anchors = 0
+        for shape, anchors in anchor_boxes_for_layers:
+            logger.info('layer: {}, anchors: {}'.format(shape, len(anchors)))
+            num_anchors += len(anchors)
+        logger.info('base model: {}, num_anchors: {}'.format(FLAGS.model_name, num_anchors))
 
         def create_dataset(name, ann_file, data_dir, is_training):
             coco_iterable = coco.create_coco_iterable(image_size, ann_file, data_dir, logger, is_training, anchor_boxes_for_layers)
@@ -111,10 +117,6 @@ def train():
             num_images = len(coco_iterable)
             num_classes = coco_iterable.num_classes()
             cat_names = coco_iterable.cat_names()
-            num_anchors = 0
-            for shape, anchors in anchor_boxes_for_layers:
-                logger.info('layer: {}, anchors: {}'.format(shape, len(anchors)))
-                num_anchors += len(anchors)
 
             ds = map_iter.from_indexable(coco_iterable,
                     num_parallel_calls=FLAGS.num_cpus,
@@ -168,10 +170,9 @@ def train():
             steps_per_epoch, calc_epoch_steps(train_num_images), train_num_images,
             steps_per_eval, calc_epoch_steps(eval_num_images), eval_num_images))
 
-        base_model, model, image_size, feature_shapes = ssd.create_model(params, dtype, FLAGS.model_name, train_num_classes)
+        model = ssd.create_model(base_model, image_size, train_num_classes, anchor_boxes_for_layers)
 
         dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
-        dstrategy.experimental_run_v2(call_base_model, args=(base_model, dummy_input))
         dstrategy.experimental_run_v2(call_model, args=(model, dummy_input))
 
         num_vars_base = 0
@@ -190,6 +191,7 @@ def train():
             num_vars_ssd, int(num_params_ssd),
             dtype))
 
+        exit(0)
         opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
         checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model)

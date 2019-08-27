@@ -11,7 +11,7 @@ logger.setLevel(logging.INFO)
 
 GlobalParams = collections.namedtuple('GlobalParams', [
     'batch_norm_momentum', 'batch_norm_epsilon', 'dropout_rate', 'data_format',
-    'num_classes',
+    'num_classes', 'relu_fn',
 ])
 GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
 
@@ -19,7 +19,7 @@ def conv_kernel_initializer(shape, dtype=None, partition_info=None):
     del partition_info
     kernel_height, kernel_width, _, out_filters = shape
     fan_out = int(kernel_height * kernel_width * out_filters)
-    return tf.random_normal(shape, mean=0.0, stddev=np.sqrt(2.0 / fan_out), dtype=dtype)
+    return tf.random.normal(shape, mean=0.0, stddev=np.sqrt(2.0 / fan_out), dtype=dtype)
 
 class StdConv(tf.keras.layers.Layer):
     def __init__(self, global_params, num_filters, strides=2, dropout_rate=0.1):
@@ -111,8 +111,8 @@ class SSD_Head(tf.keras.models.Model):
 
     def _build(self):
         self.dropout = tf.keras.layers.Dropout(0.25)
-        self.sc0 = StdConv(self.global_params, 256, strides=1)
-        self.sc1 = StdConv(self.global_params, 256)
+        self.sc0 = StdConv(self.global_params, 128, strides=1)
+        self.sc1 = StdConv(self.global_params, 128, strides=1)
         self.out = OutConv(self.global_params, self.k, self.num_classes)
 
     def call(self, inputs, training=True):
@@ -143,13 +143,6 @@ def create_base_model(dtype, model_name):
         'efficientnet-b7': (efn.EfficientNetB7, 600),
     }
 
-    global_params = GlobalParams({
-        'data_format': 'channels_last',
-        'batch_norm_momentum': 0.99,
-        'batch_norm_epsilon': 1e-8,
-        'relu_fn': tf.nn.swish
-    })
-
     base_model, image_size = model_map[model_name]
     base_model = base_model(include_top=False)
     base_model.trainable = False
@@ -170,16 +163,32 @@ def create_base_model(dtype, model_name):
 
     return down_stack, image_size, list(reversed(feature_shapes))
 
-def create_model(down_stack, image_size, num_classes, num_anchors):
+def create_model(down_stack, image_size, num_classes, anchor_boxes_for_layers):
     inputs = tf.keras.layers.Input(shape=(image_size, image_size, 3))
     features = down_stack(inputs)
 
+    global_params = GlobalParams(
+        data_format='channels_last',
+        batch_norm_momentum=0.99,
+        batch_norm_epsilon=1e-8,
+        relu_fn=tf.nn.swish,
+    )
+
     ssd_stack = []
-    for ft in features:
-        ssd_head = SSD_Head(global_params, num_anchors, num_classes)
+    for ft, (shape, anchors) in zip(features, reversed(anchor_boxes_for_layers)):
+        num_anchors = len(anchors)
+        num_anchors_per_output = int(num_anchors / (shape[1] * shape[1]))
+        ssd_head = SSD_Head(global_params, num_anchors_per_output, num_classes)
+        logger.info('{}: anchors: {}, num_anchors_per_output: {}, classes: {}'.format(ft, num_anchors, num_anchors_per_output, num_classes))
         ssd_stack.append(ssd_head(ft))
 
-    output = tf.concat(ssd_stack, axis=-1)
+    model = tf.keras.Model(inputs=inputs, outputs=ssd_stack)
 
-    model = tf.keras.Model(inputs=inputs, outputs=output)
-    return base_model, model, image_size
+    features = model(inputs)
+    for ft, (shape, anchors) in zip(features, reversed(anchor_boxes_for_layers)):
+        num_anchors = len(anchors)
+        num_anchors_per_output = int(num_anchors / (shape[1] * shape[1]))
+        logger.info('{}: anchors: {}, num_anchors_per_output: {}, classes: {}, anchor_expects_shape: {}'.format(
+            ft, num_anchors, num_anchors_per_output, num_classes, shape))
+
+    return model
