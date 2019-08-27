@@ -274,6 +274,10 @@ class COCO_Iterable:
         bboxes = []
         cat_ids = []
         for bb, cat_id in anns:
+            if bb[2] <= 1 or bb[3] <= 1:
+                #self.logger.error('{}: image_id: {}, image: {}: bad bbox: {}, bboxes: {}, categories: {}'.format(filename, image_id, image.shape, bb, bboxes, cat_ids))
+                continue
+
             bboxes.append(bb)
             cat_ids.append(cat_id)
 

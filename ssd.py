@@ -94,6 +94,9 @@ class OutConv(tf.keras.layers.Layer):
             padding='same',
             use_bias=False)
 
+    def call1(self, inputs, training=True):
+        return [flaten_conv(self.loc_out(inputs), self.k),
+                flaten_conv(self.class_out(inputs), self.k)]
     def call(self, inputs, training=True):
         return self.loc_out(inputs), self.class_out(inputs)
 
@@ -111,8 +114,8 @@ class SSD_Head(tf.keras.models.Model):
 
     def _build(self):
         self.dropout = tf.keras.layers.Dropout(0.25)
-        self.sc0 = StdConv(self.global_params, 128, strides=1)
-        self.sc1 = StdConv(self.global_params, 128, strides=1)
+        self.sc0 = StdConv(self.global_params, 256, strides=1)
+        self.sc1 = StdConv(self.global_params, 256, strides=1)
         self.out = OutConv(self.global_params, self.k, self.num_classes)
 
     def call(self, inputs, training=True):
@@ -156,7 +159,7 @@ def create_base_model(dtype, model_name):
 
     return down_stack, image_size, feature_shapes
 
-def create_model(down_stack, image_size, num_classes, anchor_boxes_for_layers):
+def create_model(down_stack, image_size, num_classes, anchor_layers, feature_shapes):
     inputs = tf.keras.layers.Input(shape=(image_size, image_size, 3))
     features = down_stack(inputs)
 
@@ -168,20 +171,21 @@ def create_model(down_stack, image_size, num_classes, anchor_boxes_for_layers):
     )
 
     ssd_stack = []
-    for ft, (shape, anchors) in zip(features, anchor_boxes_for_layers):
-        num_anchors = len(anchors)
-        num_anchors_per_output = int(num_anchors / (shape[1] * shape[1]))
+    for ft, num_anchor_boxes_for_layer, shape in zip(features, anchor_layers, feature_shapes):
+        num_anchors_per_output = int(num_anchor_boxes_for_layer / (shape[1] * shape[1]))
         ssd_head = SSD_Head(global_params, num_anchors_per_output, num_classes)
-        logger.info('{}: anchors: {}, num_anchors_per_output: {}, classes: {}'.format(ft, num_anchors, num_anchors_per_output, num_classes))
         ssd_stack.append(ssd_head(ft))
+
+    #logger.info('stack: {}'.format(ssd_stack))
+    #output = tf.concat(ssd_stack)
+    #logger.info('output: {}'.format(output))
 
     model = tf.keras.Model(inputs=inputs, outputs=ssd_stack)
 
     features = model(inputs)
-    for ft, (shape, anchors) in zip(features, anchor_boxes_for_layers):
-        num_anchors = len(anchors)
-        num_anchors_per_output = int(num_anchors / (shape[1] * shape[1]))
+    for ft, num_anchor_boxes_for_layer, shape in zip(features, anchor_layers, feature_shapes):
+        num_anchors_per_output = int(num_anchor_boxes_for_layer / (shape[1] * shape[1]))
         logger.info('{}: anchors: {}, num_anchors_per_output: {}, classes: {}, anchor_expects_shape: {}'.format(
-            ft, num_anchors, num_anchors_per_output, num_classes, shape))
+            ft, num_anchor_boxes_for_layer, num_anchors_per_output, num_classes, shape))
 
     return model

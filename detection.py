@@ -104,7 +104,7 @@ def train():
 
         base_model, image_size, feature_shapes = ssd.create_base_model(dtype, FLAGS.model_name)
 
-        np_anchor_boxes, np_anchor_areas = anchor.create_anchors(image_size, feature_shapes)
+        np_anchor_boxes, np_anchor_areas, anchor_layers = anchor.create_anchors(image_size, feature_shapes)
         num_anchors = np_anchor_boxes.shape[0]
         logger.info('base model: {}, num_anchors: {}'.format(FLAGS.model_name, num_anchors))
 
@@ -127,8 +127,8 @@ def train():
                         tf.TensorShape([num_anchors]),
                     ))
 
-            #if is_training:
-            #    ds = ds.shuffle(FLAGS.batch_size * 2)
+            if is_training:
+                ds = ds.shuffle(FLAGS.batch_size * 2)
 
             ds = ds.batch(FLAGS.batch_size)
             ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
@@ -172,7 +172,7 @@ def train():
             steps_per_epoch, calc_epoch_steps(train_num_images), train_num_images,
             steps_per_eval, calc_epoch_steps(eval_num_images), eval_num_images))
 
-        model = ssd.create_model(base_model, image_size, train_num_classes, anchor_boxes_for_layers)
+        model = ssd.create_model(base_model, image_size, train_num_classes, anchor_layers, feature_shapes)
 
         dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
         dstrategy.experimental_run_v2(call_model, args=(model, dummy_input))
@@ -240,22 +240,21 @@ def train():
             prev_anchors = 0
             total_mae_loss = None
             total_ce_loss = None
-            for (coords, classes), (shape, anchors) in zip(logits, anchor_boxes_for_layers):
-                num_anchors = len(anchors)
-                num_anchors_per_output = int(num_anchors / (shape[1] * shape[1]))
+            for (coords, classes), num_anchor_boxes_for_layer, shape in zip(logits, anchor_layers, feature_shapes):
+                num_anchors_per_output = int(num_anchor_boxes_for_layer / (shape[1] * shape[1]))
 
                 if coords.shape[1:3] != shape[1:3]:
-                    logger.error('layer: {}, anchors: {}, coords: {}, classes: {}'.format(shape, num_anchors, coords, classes))
+                    logger.error('layer: {}, anchors: {}, coords: {}, classes: {}'.format(shape, num_anchor_boxes_for_layer, coords, classes))
                     exit(-1)
 
                 orig_coords_shape = coords.shape
                 orig_classes_shape = classes.shape
 
-                coords = tf.reshape(coords, [-1, num_anchors, 4])
-                classes = tf.reshape(classes, [-1, num_anchors, train_num_classes])
+                coords = tf.reshape(coords, [-1, num_anchor_boxes_for_layer, 4])
+                classes = tf.reshape(classes, [-1, num_anchor_boxes_for_layer, train_num_classes])
 
-                bboxes_for_layer = bboxes[:, prev_anchors:prev_anchors + num_anchors, :]
-                true_labels_for_layer = true_labels[:, prev_anchors:prev_anchors + num_anchors]
+                bboxes_for_layer = bboxes[:, prev_anchors:prev_anchors + num_anchor_boxes_for_layer, :]
+                true_labels_for_layer = true_labels[:, prev_anchors:prev_anchors + num_anchor_boxes_for_layer]
 
                 ce_loss = ce_loss_object(y_true=true_labels_for_layer, y_pred=classes)
                 ce_loss = tf.nn.compute_average_loss(ce_loss, global_batch_size=FLAGS.batch_size)
@@ -273,14 +272,13 @@ def train():
                     total_ce_loss += ce_loss
                     total_mae_loss += mae_loss
 
-                prev_anchors += num_anchors
+                prev_anchors += num_anchor_boxes_for_layer
 
-                logger.info('base_layer: {}, anchors: {}, coords: {} -> {}, classes: {} -> {}, bboxes_for_layer: {}, true_labels_for_layer: {}, ce_loss: {:.2e}, mae_loss: {:.2e}'.format(
-                    shape, num_anchors,
+                logger.debug('base_layer: {}, anchors: {}, coords: {} -> {}, classes: {} -> {}, bboxes_for_layer: {}, true_labels_for_layer: {}'.format(
+                    shape, num_anchor_boxes_for_layer,
                     coords.shape, orig_coords_shape,
                     classes.shape, orig_classes_shape,
-                    bboxes_for_layer.shape, true_labels_for_layer.shape),
-                    tf.reduce_mean(ce_loss), tf.reduce_mean(mae_loss))
+                    bboxes_for_layer.shape, true_labels_for_layer.shape))
 
 
             total_loss = total_ce_loss + total_mae_loss

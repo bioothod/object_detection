@@ -91,9 +91,10 @@ def create_anchors(image_size, feature_shapes):
         anchor_areas += anchor_areas_for_layer
 
         anchor_layers.append(len(anchor_boxes_for_layer))
+
         num_anchors += len(anchor_boxes_for_layer)
 
     np_anchors_boxes = np.array(anchor_boxes)
     np_anchors_areas = np.array(anchor_areas)
 
-    return np_anchors_boxes, np_anchors_areas
+    return np_anchors_boxes, np_anchors_areas, anchor_layers
