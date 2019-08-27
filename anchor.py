@@ -36,7 +36,7 @@ class Anchor:
         scale = self.image_size / self.layer_size
 
         x0, y0 = self.c0
-        x1, y1 = self.c0
+        x1, y1 = self.c1
 
         x0 *= scale
         y0 *= scale
@@ -47,6 +47,7 @@ class Anchor:
 
     def process_ext_bboxes(self, bboxes, cat_ids):
         iou = calc_iou(self.bbox, np.array(bboxes))
+        return iou
 
 
 def create_anchors_for_layer(image_size, layer_size, cells_to_side):

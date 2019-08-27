@@ -154,7 +154,8 @@ def create_base_model(dtype, model_name):
     base_model = base_model(include_top=False)
     base_model.trainable = False
 
-    layers = ('top_activation', 'block6a_expand_activation', 'block4a_expand_activation', 'block3a_expand_activation', 'block2a_expand_activation')
+    #layers = ('top_activation', 'block6a_expand_activation', 'block4a_expand_activation', 'block3a_expand_activation', 'block2a_expand_activation')
+    layers = ('top_activation', 'block6a_expand_activation', 'block4a_expand_activation', 'block3a_expand_activation')
     layers = [base_model.get_layer(name).output for name in layers]
     down_stack = tf.keras.Model(inputs=base_model.input, outputs=layers)
     down_stack.trainable = False

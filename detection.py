@@ -118,14 +118,16 @@ def train():
 
             ds = map_iter.from_indexable(coco_iterable,
                     num_parallel_calls=FLAGS.num_cpus,
-                    output_types=(tf.string, tf.float32, tf.float32, tf.int32),
+                    output_types=(tf.string, tf.int64, tf.float32, tf.float32, tf.int32),
                     output_shapes=(
+                        tf.TensorShape([]),
                         tf.TensorShape([]),
                         tf.TensorShape([image_size, image_size, 3]),
                         tf.TensorShape([num_anchors, 4]),
                         tf.TensorShape([num_anchors]),
                     ))
 
+            ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
             logger.info('{} dataset has been created, data dir: {}, is_training: {}, images: {}, classes: {}, anchors: {}'.format(
                 name, ann_file, is_training, num_images, num_classes, num_anchors))
 
@@ -133,18 +135,20 @@ def train():
 
         train_dataset, train_num_images, train_num_classes, train_cat_names = create_dataset('train', FLAGS.train_coco_annotations, FLAGS.train_coco_data_dir, is_training=True)
 
-        if True:
+        if False:
             data_dir = os.path.join(FLAGS.train_dir, 'tmp')
             os.makedirs(data_dir, exist_ok=True)
 
-            for filename, image, true_bboxes, true_labels in train_dataset.take(10):
+            for filename, image_id, image, true_bboxes, true_labels in train_dataset.take(10):
                 filename = str(filename)
-                dst = '{}/{}.png'.format(data_dir, image_id)
+                dst = '{}/{}.png'.format(data_dir, image_id.numpy())
                 new_anns = []
                 for bb, cat_id in zip(true_bboxes, true_labels):
-                    new_anns.append(bb, cat_id)
+                    new_anns.append((bb.numpy(), cat_id.numpy()))
 
-                image_draw.draw_im(image.numpy(), new_anns, dst, cat_names)
+                image = image.numpy() * 128. + 128
+                image = image.astype(np.uint8)
+                image_draw.draw_im(image, new_anns, dst, train_cat_names)
 
             exit(0)
 
