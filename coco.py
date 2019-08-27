@@ -298,6 +298,7 @@ class COCO_Iterable:
 
         true_bboxes = []
         true_labels = []
+        true_orig_labels = []
         num_positive = 0
         for layer_shape, layer_anchors in self.anchor_boxes_for_layers:
             for anchor in layer_anchors:
@@ -315,6 +316,7 @@ class COCO_Iterable:
                     orig_cat_id = cat_ids[idx]
                     converted_cat_id = self.cats[orig_cat_id]
                     true_bboxes.append(converted_bboxes[idx])
+                    true_orig_labels.append(orig_cat_id)
                     true_labels.append(converted_cat_id)
                     self.logger.debug('{}: image_id: {}, anchor: {}, layer: {}, category: {}, bbox: {} -> {}, iou: {}'.format(
                         filename, image_id,
@@ -328,11 +330,11 @@ class COCO_Iterable:
         true_bboxes = np.array(true_bboxes, np.float32)
         true_labels = np.array(true_labels, np.int32)
 
-        self.logger.info('{}: image_id: {}, image: {}, bboxes: {}, labels: {}, orig_bboxes: {}, bboxes_before_augmentation: {}, num_positive: {}'.format(
-            filename, image_id, image.shape, true_bboxes.shape, true_labels.shape, len(bboxes), len(anns), num_positive))
-        return filename, image_id, image, true_bboxes, true_labels
+        self.logger.info('{}: image_id: {}, image: {}, bboxes: {}, labels: {}, orig_bboxes: {}, bboxes_after_augmentation: {}, num_positive: {}'.format(
+            filename, image_id, image.shape, true_bboxes.shape, true_labels.shape, len(anns), len(bboxes), num_positive))
+        return filename, image_id, image, true_bboxes, true_labels, true_orig_labels
 
-def create_coco_iterable(image_size, ann_path, data_dir, logger, is_training, anchor_boxes_for_layers, min_area=0., min_visibility=0.25):
+def create_coco_iterable(image_size, ann_path, data_dir, logger, is_training, anchor_boxes_for_layers, min_area=0., min_visibility=0.15):
     bbox_params = A.BboxParams(
             format='coco',
             min_area=min_area,

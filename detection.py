@@ -118,16 +118,17 @@ def train():
 
             ds = map_iter.from_indexable(coco_iterable,
                     num_parallel_calls=FLAGS.num_cpus,
-                    output_types=(tf.string, tf.int64, tf.float32, tf.float32, tf.int32),
+                    output_types=(tf.string, tf.int64, tf.float32, tf.float32, tf.int32, tf.int32),
                     output_shapes=(
                         tf.TensorShape([]),
                         tf.TensorShape([]),
                         tf.TensorShape([image_size, image_size, 3]),
                         tf.TensorShape([num_anchors, 4]),
                         tf.TensorShape([num_anchors]),
+                        tf.TensorShape([num_anchors]),
                     ))
 
-            ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+            ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).batch(FLAGS.batch_size)
             logger.info('{} dataset has been created, data dir: {}, is_training: {}, images: {}, classes: {}, anchors: {}'.format(
                 name, ann_file, is_training, num_images, num_classes, num_anchors))
 
@@ -139,11 +140,13 @@ def train():
             data_dir = os.path.join(FLAGS.train_dir, 'tmp')
             os.makedirs(data_dir, exist_ok=True)
 
-            for filename, image_id, image, true_bboxes, true_labels in train_dataset.take(10):
+            for filename, image_id, image, true_bboxes, true_labels, true_orig_labels in train_dataset.unbatch().take(10):
                 filename = str(filename)
                 dst = '{}/{}.png'.format(data_dir, image_id.numpy())
                 new_anns = []
-                for bb, cat_id in zip(true_bboxes, true_labels):
+                # category ID in true_labels does not match train_cat_names here, this is converted category_id into range [0, num_categories], where 0 is background class
+                # true_orig_labels contain original category ids
+                for bb, cat_id in zip(true_bboxes, true_orig_labels):
                     new_anns.append((bb.numpy(), cat_id.numpy()))
 
                 image = image.numpy() * 128. + 128
