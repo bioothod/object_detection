@@ -2,6 +2,7 @@ import cv2
 import json
 import os
 import random
+import time
 
 from collections import defaultdict
 
@@ -156,7 +157,7 @@ def get_training_augmentation(image_size, bbox_params):
             A.Compose([
                 A.ShiftScaleRotate(scale_limit=0.1, rotate_limit=0, shift_limit=0.1, p=0.5, border_mode=0),
 
-                A.Resize(height=int(image_size*1.4), width=int(image_size*1.4), interpolation=cv2.INTER_LANCZOS4, always_apply=True),
+                A.Resize(height=int(image_size*1.6), width=int(image_size*1.6), interpolation=cv2.INTER_CUBIC, always_apply=True),
                 A.RandomCrop(height=image_size, width=image_size, always_apply=True),
 
                 A.IAAAdditiveGaussianNoise(p=0.1),
@@ -190,11 +191,7 @@ def get_training_augmentation(image_size, bbox_params):
                 A.Lambda(mask=round_clip_0_1),
             ]),
             A.Compose([
-                A.Resize(height=int(image_size*1.2), width=int(image_size*1.2), interpolation=cv2.INTER_LANCZOS4, always_apply=True),
-                A.RandomCrop(height=image_size, width=image_size, always_apply=True),
-            ]),
-            A.Compose([
-                A.Resize(height=int(image_size*1.1), width=int(image_size*1.1), interpolation=cv2.INTER_LANCZOS4, always_apply=True),
+                A.Resize(height=int(image_size*1.2), width=int(image_size*1.2), interpolation=cv2.INTER_CUBIC, always_apply=True),
                 A.RandomCrop(height=image_size, width=image_size, always_apply=True),
             ]),
         ], p=1.),
@@ -205,8 +202,8 @@ def get_training_augmentation(image_size, bbox_params):
 
 def get_validation_augmentation(image_size, bbox_params):
     test_transform = [
-        #A.PadIfNeeded(image_size, image_size),
-        A.Resize(height=image_size, width=image_size, interpolation=cv2.INTER_LANCZOS4, always_apply=True),
+        A.PadIfNeeded(image_size, image_size),
+        A.Resize(height=image_size, width=image_size, interpolation=cv2.INTER_CUBIC, always_apply=True),
     ]
     return A.Compose(test_transform, bbox_params)
 
@@ -248,6 +245,8 @@ class COCO_Iterable:
         for cat_id in self.coco.cats.keys():
             self.cats[cat_id] = len(self.cats)
 
+        self.orig_images = {}
+
     def num_classes(self):
         return self.coco.num_classes()
 
@@ -258,11 +257,17 @@ class COCO_Iterable:
         return len(self.image_tuples)
 
     def __getitem__(self, i):
+        start_time = time.time()
+
         filename, image_id, anns = self.image_tuples[i]
 
-        image = cv2.imread(filename)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        image = image.astype(np.uint8)
+        image = self.orig_images.get(i, None)
+        if image is None:
+            image = cv2.imread(filename)
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            image = image.astype(np.uint8)
+
+            self.orig_images[i] = image
 
         bboxes = []
         cat_ids = []
@@ -296,14 +301,18 @@ class COCO_Iterable:
 
             converted_bboxes.append([x0, y0, x1, y1])
 
+        converted_bboxes = np.array(converted_bboxes)
+        if converted_bboxes.shape[0] != 0:
+            area = (converted_bboxes[:, 2] - converted_bboxes[:, 0] + 1) * (converted_bboxes[:, 3] - converted_bboxes[:, 1] + 1)
+
         true_bboxes = []
         true_labels = []
         true_orig_labels = []
         num_positive = 0
         for layer_shape, layer_anchors in self.anchor_boxes_for_layers:
             for anchor in layer_anchors:
-                if len(converted_bboxes) > 0:
-                    iou = anchor.process_ext_bboxes(np.array(converted_bboxes), cat_ids)
+                if converted_bboxes.shape[0] != 0:
+                    iou = anchor.process_ext_bboxes(converted_bboxes, area, cat_ids)
                     idx = np.argmax(iou, axis=0)
                     max_iou = iou[idx]
                 else:
@@ -326,13 +335,16 @@ class COCO_Iterable:
                 else:
                     true_bboxes.append(anchor.bbox)
                     true_labels.append(self.background_id)
+                    true_orig_labels.append(-1)
 
-        true_bboxes = np.array(true_bboxes, np.float32)
-        true_labels = np.array(true_labels, np.int32)
+        #true_bboxes = np.array(true_bboxes, np.float32)
+        #true_labels = np.array(true_labels, np.int32)
+        #true_orig_labels = np.array(true_orig_labels, np.int32)
 
-        self.logger.info('{}: image_id: {}, image: {}, bboxes: {}, labels: {}, orig_bboxes: {}, bboxes_after_augmentation: {}, num_positive: {}'.format(
-            filename, image_id, image.shape, true_bboxes.shape, true_labels.shape, len(anns), len(bboxes), num_positive))
-        return filename, image_id, image, true_bboxes, true_labels, true_orig_labels
+        #self.logger.info('{}: image_id: {}, image: {}, bboxes: {}, labels: {}, aug bboxes: {} -> {}, num_positive: {}, time: {:.1f} ms'.format(
+        #    filename, image_id, image.shape, true_bboxes.shape, true_labels.shape, len(anns), len(bboxes), num_positive, (time.time() - start_time) * 1000.))
+        #return filename, image_id, image, true_bboxes, true_labels, true_orig_labels
+        return filename, image_id, image
 
 def create_coco_iterable(image_size, ann_path, data_dir, logger, is_training, anchor_boxes_for_layers, min_area=0., min_visibility=0.15):
     bbox_params = A.BboxParams(

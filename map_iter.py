@@ -63,5 +63,3 @@ def from_indexable(iterator, output_types, output_shapes, num_parallel_calls=Non
                 name=name)
 
     return ds.map(index_to_entry, num_parallel_calls=num_parallel_calls)
-
-

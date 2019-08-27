@@ -120,23 +120,31 @@ def train():
 
             ds = map_iter.from_indexable(coco_iterable,
                     num_parallel_calls=FLAGS.num_cpus,
-                    output_types=(tf.string, tf.int64, tf.float32, tf.float32, tf.int32, tf.int32),
+                    #output_types=(tf.string, tf.int64, tf.float32, tf.float32, tf.int32, tf.int32),
+                    output_types=(tf.string, tf.int64, tf.float32),
                     output_shapes=(
                         tf.TensorShape([]),
                         tf.TensorShape([]),
                         tf.TensorShape([image_size, image_size, 3]),
-                        tf.TensorShape([num_anchors, 4]),
-                        tf.TensorShape([num_anchors]),
-                        tf.TensorShape([num_anchors]),
+                        #tf.TensorShape([num_anchors, 4]),
+                        #tf.TensorShape([num_anchors]),
+                        #tf.TensorShape([num_anchors]),
                     ))
 
-            ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).batch(FLAGS.batch_size)
+            #if is_training:
+            #    ds = ds.shuffle(FLAGS.batch_size * 2)
+
+            ds = ds.batch(FLAGS.batch_size)
+            ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
+
             logger.info('{} dataset has been created, data dir: {}, is_training: {}, images: {}, classes: {}, anchors: {}'.format(
                 name, ann_file, is_training, num_images, num_classes, num_anchors))
 
             return ds, num_images, num_classes, cat_names
 
         train_dataset, train_num_images, train_num_classes, train_cat_names = create_dataset('train', FLAGS.train_coco_annotations, FLAGS.train_coco_data_dir, is_training=True)
+        for _ in train_dataset:
+            continue
 
         if False:
             data_dir = os.path.join(FLAGS.train_dir, 'tmp')
@@ -191,7 +199,6 @@ def train():
             num_vars_ssd, int(num_params_ssd),
             dtype))
 
-        exit(0)
         opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
         checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model)
@@ -213,51 +220,88 @@ def train():
             logger.info("Initializing from scratch, no latest checkpoint")
 
         loss_metric = tf.keras.metrics.Mean(name='train_loss')
-        accuracy_metric = loss.IOUScore(threshold=0.5, name='train_accuracy')
+        accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='train_accuracy')
+        distance_metric = tf.keras.metrics.MeanAbsoluteError(name='train_mae')
+        iou_metric = loss.IOUScore(threshold=0.5, name='train_iou')
 
         eval_loss_metric = tf.keras.metrics.Mean(name='eval_loss')
-        eval_accuracy_metric = loss.IOUScore(threshold=0.5, name='eval_accuracy')
+        eval_accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='eval_accuracy')
+        eval_distance_metric = tf.keras.metrics.MeanAbsoluteError(name='eval_mae')
+        eval_iou_metric = loss.IOUScore(threshold=0.5, name='eval_iou')
 
         def reset_metrics():
             loss_metric.reset_states()
             accuracy_metric.reset_states()
+            distance_metric.reset_states()
+            iou_metric.reset_states()
 
             eval_loss_metric.reset_states()
             eval_accuracy_metric.reset_states()
+            eval_distance_metric.reset_states()
+            eval_iou_metric.reset_states()
 
-        #cross_entropy_loss_object = tf.keras.losses.BinaryCrossentropy(reduction=tf.keras.losses.Reduction.NONE, label_smoothing=FLAGS.label_smoothing)
-        cross_entropy_loss_object = loss.CategoricalFocalLoss(reduction=tf.keras.losses.Reduction.NONE)
-        dice_loss = loss.DiceLoss(reduction=tf.keras.losses.Reduction.NONE, class_weights=class_weights)
+        ce_loss_object = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
 
-        def calculate_metrics(logits, labels):
-            #one_hot_labels = tf.one_hot(labels, num_classes, axis=3)
-            #one_hot_labels = tf.squeeze(one_hot_labels, axis=4)
+        def calculate_metrics(logits, bboxes, true_labels, loss_metric, accuracy_metric, distance_metric):
+            prev_anchors = 0
+            total_mae_loss = None
+            total_ce_loss = None
+            for (coords, classes), (shape, anchors) in zip(logits, anchor_boxes_for_layers):
+                num_anchors = len(anchors)
+                num_anchors_per_output = int(num_anchors / (shape[1] * shape[1]))
 
-            #ce_loss = cross_entropy_loss_object(y_pred=logits, y_true=one_hot_labels)
-            ce_loss = cross_entropy_loss_object(y_pred=logits, y_true=labels)
-            ce_loss = tf.nn.compute_average_loss(ce_loss, global_batch_size=FLAGS.batch_size)
+                if coords.shape[1:3] != shape[1:3]:
+                    logger.error('layer: {}, anchors: {}, coords: {}, classes: {}'.format(shape, num_anchors, coords, classes))
+                    exit(-1)
 
-            total_loss = ce_loss
+                orig_coords_shape = coords.shape
+                orig_classes_shape = classes.shape
 
-            if True:
-                de_loss = dice_loss(y_pred=logits, y_true=labels)
-                de_loss = tf.nn.compute_average_loss(de_loss, global_batch_size=FLAGS.batch_size)
-                de_loss = 1. - de_loss
-                total_loss += de_loss
+                coords = tf.reshape(coords, [-1, num_anchors, 4])
+                classes = tf.reshape(classes, [-1, num_anchors, train_num_classes])
 
-            return total_loss
+                bboxes_for_layer = bboxes[:, prev_anchors:prev_anchors + num_anchors, :]
+                true_labels_for_layer = true_labels[:, prev_anchors:prev_anchors + num_anchors]
 
-        def eval_step(filenames, images, labels):
+                ce_loss = ce_loss_object(y_true=true_labels_for_layer, y_pred=classes)
+                ce_loss = tf.nn.compute_average_loss(ce_loss, global_batch_size=FLAGS.batch_size)
+
+                mae_loss = tf.keras.losses.MAE(y_true=bboxes_for_layer, y_pred=coords)
+                mae_loss = tf.nn.compute_average_loss(mae_loss, global_batch_size=FLAGS.batch_size)
+
+                accuracy_metric.update_state(y_true=true_labels_for_layer, y_pred=classes)
+                distance_metric.update_state(y_true=bboxes_for_layer, y_pred=coords)
+
+                if total_ce_loss is None:
+                    total_ce_loss = ce_loss
+                    total_mae_loss = mae_loss
+                else:
+                    total_ce_loss += ce_loss
+                    total_mae_loss += mae_loss
+
+                prev_anchors += num_anchors
+
+                logger.info('base_layer: {}, anchors: {}, coords: {} -> {}, classes: {} -> {}, bboxes_for_layer: {}, true_labels_for_layer: {}, ce_loss: {:.2e}, mae_loss: {:.2e}'.format(
+                    shape, num_anchors,
+                    coords.shape, orig_coords_shape,
+                    classes.shape, orig_classes_shape,
+                    bboxes_for_layer.shape, true_labels_for_layer.shape),
+                    tf.reduce_mean(ce_loss), tf.reduce_mean(mae_loss))
+
+
+            total_loss = total_ce_loss + total_mae_loss
+            loss_metric.update_state(total_loss)
+
+            return total_ce_loss, total_mae_loss, total_loss
+
+        def eval_step(filenames, images, bboxes, true_labels):
             logits = model(images, training=False)
-            total_loss = calculate_metrics(logits, labels)
+            ce_loss, mae_loss, total_loss = calculate_metrics(logits, bboxes, true_labels, eval_loss_metric, eval_accuracy_metric, eval_distance_metric)
 
-            eval_loss_metric.update_state(total_loss)
-            eval_accuracy_metric.update_state(labels, logits)
-
-        def train_step(filenames, images, labels):
+        def train_step(filenames, images, bboxes, true_labels):
             with tf.GradientTape() as tape:
                 logits = model(images, training=True)
-                total_loss = calculate_metrics(logits, labels)
+                ce_loss, mae_loss, total_loss = calculate_metrics(logits, bboxes, true_labels, loss_metric, accuracy_metric, distance_metric)
 
             #variables = model.trainable_variables + base_model.trainable_variables
             variables = model.trainable_variables
@@ -271,9 +315,6 @@ def train():
 
                 clip_gradients.append(g)
             opt.apply_gradients(zip(clip_gradients, variables))
-
-            loss_metric.update_state(total_loss)
-            accuracy_metric.update_state(labels, logits)
 
             global_step.assign_add(1)
 
@@ -294,7 +335,7 @@ def train():
             accs = []
 
             step = 0
-            for filenames, images, masks in dataset:
+            for filenames, image_ids, images, bboxes, true_labels, orig_true_labels in dataset:
                 # In most cases, the default data format NCHW instead of NHWC should be
                 # used for a significant performance boost on GPU/TPU. NHWC should be used
                 # only if the network needs to be run on CPU since the pooling operations
@@ -303,7 +344,7 @@ def train():
                     images = tf.transpose(images, [0, 3, 1, 2])
 
 
-                step_func(args=(filenames, images, masks))
+                step_func(args=(filenames, images, bboxes, true_labels))
 
                 step += 1
                 if step >= max_steps:
@@ -334,10 +375,10 @@ def train():
             train_steps = run_epoch(train_dataset, distributed_train_step, steps_per_epoch)
             eval_steps = run_epoch(eval_dataset, distributed_eval_step, steps_per_eval)
 
-            logger.info('epoch: {}, train: steps: {}, loss: {:.2e}, accuracy: {:.5f}, eval: loss: {:.2e}, accuracy: {:.5f}, lr: {:.2e}'.format(
+            logger.info('epoch: {}, train: steps: {}, accuracy: {:.2e}, distance: {:.2e}, loss: {:.2e}, eval: accuracy: {:.2e}, distance: {:.2e}, loss: {:.2e}, lr: {:.2e}'.format(
                 epoch, global_step.numpy(),
-                loss_metric.result(), accuracy_metric.result(),
-                eval_loss_metric.result(), eval_accuracy_metric.result(),
+                accuracy_metric.result(), distance_metric.result(), loss_metric.result(),
+                eval_accuracy_metric.result(), eval_distance_metric.result(), eval_loss_metric.result(),
                 learning_rate.numpy()))
 
             eval_acc = eval_accuracy_metric.result()

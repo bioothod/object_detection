@@ -124,13 +124,6 @@ class SSD_Head(tf.keras.models.Model):
 
         return x
 
-class SSD_Loss(tf.keras.losses.Loss):
-    def __init__(self, reduction=tf.keras.losses.Reduction.NONE, name=None):
-        super(SSD_Loss, self).__init__(reduction, name)
-
-    def __call__(y_true, y_pred, sample_weight=None):
-        logger.info('true: {}, pred: {}'.format(y_true.shape, y_pred.shape))
-
 def create_base_model(dtype, model_name):
     model_map = {
         'efficientnet-b0': (efn.EfficientNetB0, 224),
@@ -148,8 +141,8 @@ def create_base_model(dtype, model_name):
     base_model.trainable = False
 
     #layers = ('top_activation', 'block6a_expand_activation', 'block4a_expand_activation', 'block3a_expand_activation', 'block2a_expand_activation')
-    layers = ('top_activation', 'block6a_expand_activation', 'block4a_expand_activation', 'block3a_expand_activation')
-    layers = [base_model.get_layer(name).output for name in layers]
+    layer_names = ('top_activation', 'block6a_expand_activation', 'block4a_expand_activation', 'block3a_expand_activation')
+    layers = [base_model.get_layer(name).output for name in layer_names]
     down_stack = tf.keras.Model(inputs=base_model.input, outputs=layers)
     down_stack.trainable = False
 
@@ -157,11 +150,11 @@ def create_base_model(dtype, model_name):
     features = down_stack(inputs)
 
     feature_shapes = []
-    for l in features:
-        logger.info('base model: {}, feature layer: {}, shape: {}'.format(model_name, l.name, l.shape))
+    for name, l in zip(layer_names, features):
+        logger.info('{}: base model: {}, feature layer: {}, shape: {}'.format(name, model_name, l.name, l.shape))
         feature_shapes.append(l.shape)
 
-    return down_stack, image_size, list(reversed(feature_shapes))
+    return down_stack, image_size, feature_shapes
 
 def create_model(down_stack, image_size, num_classes, anchor_boxes_for_layers):
     inputs = tf.keras.layers.Input(shape=(image_size, image_size, 3))
@@ -175,7 +168,7 @@ def create_model(down_stack, image_size, num_classes, anchor_boxes_for_layers):
     )
 
     ssd_stack = []
-    for ft, (shape, anchors) in zip(features, reversed(anchor_boxes_for_layers)):
+    for ft, (shape, anchors) in zip(features, anchor_boxes_for_layers):
         num_anchors = len(anchors)
         num_anchors_per_output = int(num_anchors / (shape[1] * shape[1]))
         ssd_head = SSD_Head(global_params, num_anchors_per_output, num_classes)
@@ -185,7 +178,7 @@ def create_model(down_stack, image_size, num_classes, anchor_boxes_for_layers):
     model = tf.keras.Model(inputs=inputs, outputs=ssd_stack)
 
     features = model(inputs)
-    for ft, (shape, anchors) in zip(features, reversed(anchor_boxes_for_layers)):
+    for ft, (shape, anchors) in zip(features, anchor_boxes_for_layers):
         num_anchors = len(anchors)
         num_anchors_per_output = int(num_anchors / (shape[1] * shape[1]))
         logger.info('{}: anchors: {}, num_anchors_per_output: {}, classes: {}, anchor_expects_shape: {}'.format(
