@@ -14,10 +14,10 @@ import unet
 logger = logging.getLogger('segmentation')
 logger.propagate = False
 
-def generate_images(filenames, images, masks, data_dir):
+def generate_images(filenames, images, masks, centroids, data_dir):
     vgg_means = np.array([91.4953, 103.8827, 131.0912], dtype=np.float32)
 
-    for filename, image, mask in zip(filenames, images, masks):
+    for filename, image, mask, centers in zip(filenames, images, masks, centroids):
         filename = str(filename)
         filename = os.path.basename(filename)
         image_id = os.path.splitext(filename)[0]
@@ -26,7 +26,7 @@ def generate_images(filenames, images, masks, data_dir):
         image = image.astype(np.uint8)
 
         dst = '{}/{}.png'.format(data_dir, image_id)
-        image_draw.draw_im_segm(image, [mask.numpy()], dst)
+        image_draw.draw_im_segm(image, [mask.numpy()], centers, dst)
 
 @tf.function
 def basic_preprocess(filename, image_size, dtype):
@@ -51,6 +51,47 @@ def load_image(datapoint, image_size, is_training, dtype):
         mask = tf.image.flip_left_right(mask)
 
     return filename, image, mask
+
+def choose_random_centroids(samples, n_clusters):
+    n_samples = tf.shape(samples)[0]
+    random_indices = tf.random.shuffle(tf.range(0, n_samples))
+    begin = [0,]
+    size = [n_clusters,]
+    size[0] = n_clusters
+    centroid_indices = tf.slice(random_indices, begin, size)
+    initial_centroids = tf.gather(samples, centroid_indices)
+    return initial_centroids
+
+def assign_to_nearest(samples, centroids):
+    expanded_vectors = tf.expand_dims(samples, 0)
+    expanded_centroids = tf.expand_dims(centroids, 1)
+    distances = tf.reduce_sum(tf.square(tf.subtract(expanded_vectors, expanded_centroids)), 2)
+    mins = tf.argmin(distances, 0)
+    nearest_indices = mins
+    return nearest_indices
+
+def update_centroids(samples, nearest_indices, n_clusters):
+    # Updates the centroid to be the mean of all samples associated with it.
+    nearest_indices = tf.cast(nearest_indices, tf.int32)
+    partitions = tf.dynamic_partition(samples, nearest_indices, n_clusters)
+    new_centroids = tf.concat([tf.expand_dims(tf.reduce_mean(partition, 0), 0) for partition in partitions], 0)
+    return new_centroids
+
+@tf.function
+def find_centroids(filename, corner_mask):
+    filename = str(filename)
+
+    max_value = tf.reduce_max(corner_mask)
+    points = tf.where(corner_mask > max_value * 0.7)
+
+    num_clusters = 15
+    centroids = choose_random_centroids(points, num_clusters)
+
+    for i in range(10):
+        nearest_indices = assign_to_nearest(points, centroids)
+        centroids = update_centroids(points, nearest_indices, num_clusters)
+
+    return centroids
 
 if __name__ == '__main__':
     logger.setLevel(logging.INFO)
@@ -113,6 +154,8 @@ if __name__ == '__main__':
 
     os.makedirs(FLAGS.dst_dir, exist_ok=True)
 
+    corner_layer = 4
+
     start_time = time.time()
     total_images = 0
     for t in dataset:
@@ -122,7 +165,37 @@ if __name__ == '__main__':
         masks = eval_step(images)
         total_images += len(filenames)
 
-        generate_images(filenames, images, masks, FLAGS.dst_dir)
+
+        centroids = []
+        for filename, mask in zip(filenames, masks):
+            corner_mask_tensor = mask[:, :, corner_layer]
+            
+            corner_mask = mask[:, :, corner_layer].numpy()
+
+            #max_value = corner_mask.max()
+            #idx = corner_mask > max_value * 0.8
+            #wh = np.where(idx)
+            #points = np.stack(wh, axis=1)
+            #logger.info('{}: max: {}, selected shape: {}, points shape: {}'.format(filename, max_value, corner_mask.shape, points.shape))
+
+            centers = find_centroids(filename, corner_mask_tensor).numpy()
+
+            new_centroids = []
+            for c in centers:
+                skip = False
+                for o in new_centroids:
+                    dist = np.abs(c - o)
+                    if np.any(dist < 10):
+                        skip = True
+
+                if not skip:
+                    new_centroids.append(c)
+
+            centroids.append(new_centroids)
+
+            #logger.info('{}: max: {}, selected shape: {}, points shape: {}, centroids: {}'.format(filename, max_value, corner_mask.shape, points.shape, centers))
+
+        generate_images(filenames, images, masks, centroids, FLAGS.dst_dir)
         logger.info('saved {}/{} images'.format(len(filenames), total_images))
 
     dur = time.time() - start_time
