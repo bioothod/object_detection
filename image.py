@@ -59,7 +59,7 @@ def draw_filename(fn, ann, dst, cat_names):
     im = mpimg.imread(fn)
     draw_im(im, ann, dst, cat_names)
 
-def draw_im_segm(img, masks, dst):
+def draw_im_segm(img, masks, centers, dst):
     rows = 1
     columns = 1 + 1 + len(masks)*masks[0].shape[2]
 
@@ -95,6 +95,14 @@ def draw_im_segm(img, masks, dst):
 
             ax.imshow(np.dstack((mask_img, mask)))
             ax_img_mask.imshow(np.dstack((mask_img, mask * 0.4)))
+
+            if mchannel == 4:
+                for c in centers:
+                    cr = plt.Circle((c[1], c[0]), 2, color='r')
+                    ax.add_artist(cr)
+
+                    cr = plt.Circle((c[1], c[0]), 2, color='r')
+                    ax_img_mask.add_artist(cr)
 
     plt.savefig(dst)
     plt.close(fig)
