@@ -6,7 +6,6 @@ import time
 import numpy as np
 import tensorflow as tf
 
-import efficientnet
 import image as image_draw
 import preprocess
 import unet
@@ -181,17 +180,19 @@ if __name__ == '__main__':
             centers = find_centroids(filename, corner_mask_tensor).numpy()
 
             new_centroids = []
+            new_converted_centroids = []
             for c in centers:
                 skip = False
                 for o in new_centroids:
-                    dist = np.abs(c - o)
-                    if np.any(dist < 10):
+                    dist = np.sum(np.square(c - o))
+                    if dist < 15*15:
                         skip = True
 
                 if not skip:
                     new_centroids.append(c)
+                    new_converted_centroids.append([c[1], c[0]])
 
-            centroids.append(new_centroids)
+            centroids.append(new_converted_centroids)
 
             #logger.info('{}: max: {}, selected shape: {}, points shape: {}, centroids: {}'.format(filename, max_value, corner_mask.shape, points.shape, centers))
 
