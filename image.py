@@ -98,10 +98,12 @@ def draw_im_segm(img, masks, centers, dst):
 
             if mchannel == 4:
                 for c in centers:
-                    cr = plt.Circle((c[1], c[0]), 2, color='r')
+                    #cr = plt.Circle((c[1], c[0]), 2, color='r')
+                    cr = plt.Circle(c, 2, color='r')
                     ax.add_artist(cr)
 
-                    cr = plt.Circle((c[1], c[0]), 2, color='r')
+                    cr = plt.Circle(c, 2, color='r')
+                    #cr = plt.Circle((c[1], c[0]), 2, color='r')
                     ax_img_mask.add_artist(cr)
 
     plt.savefig(dst)
