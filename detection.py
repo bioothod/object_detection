@@ -42,6 +42,7 @@ parser.add_argument('--min_learning_rate', default=1e-6, type=float, help='Minim
 parser.add_argument('--steps_per_eval', default=-1, type=int, help='Number of steps per evaluation run')
 parser.add_argument('--steps_per_epoch', default=-1, type=int, help='Number of steps per training run')
 parser.add_argument('--min_eval_metric', default=0.75, type=float, help='Minimal evaluation metric to start saving models')
+parser.add_argument('--epochs_lr_update', default=10, type=int, help='Maximum number of epochs without improvement used to reset or decrease learning rate')
 parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16 training/inference')
 FLAGS = parser.parse_args()
 
@@ -297,6 +298,8 @@ def train():
                 mae_loss = tf.keras.losses.MAE(y_true=sampled_true_bboxes, y_pred=sampled_pred_coords)
                 mae_loss = tf.nn.compute_average_loss(mae_loss, global_batch_size=FLAGS.batch_size)
 
+                sampled_true_labels = tf.gather_nd(true_labels_for_layer, positive_indexes)
+                sampled_pred_classes = tf.gather_nd(classes, positive_indexes)
                 accuracy_metric.update_state(y_true=sampled_true_labels, y_pred=sampled_pred_classes)
                 distance_metric.update_state(y_true=sampled_true_bboxes, y_pred=sampled_pred_coords)
 
@@ -436,7 +439,7 @@ def train():
             else:
                 num_epochs_without_improvement += 1
 
-            if num_epochs_without_improvement >= 10:
+            if num_epochs_without_improvement >= FLAGS.epochs_lr_update:
                 want_reset = False
 
                 if learning_rate > FLAGS.min_learning_rate:
@@ -449,7 +452,7 @@ def train():
                         learning_rate_multiplier /= 2
 
                     want_reset = True
-                elif num_epochs_without_improvement >= 10:
+                elif num_epochs_without_improvement >= FLAGS.epochs_lr_update:
                     new_lr = FLAGS.initial_learning_rate
                     logger.info('epoch: {}, epochs without metric improvement: {}, best metric: {:.5f}, resetting learning rate: {:.2e} -> {:.2e}'.format(
                         epoch, num_epochs_without_improvement, min_metric, learning_rate.numpy(), new_lr))
