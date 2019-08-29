@@ -6,6 +6,7 @@ import sys
 
 import numpy as np
 import tensorflow as tf
+from tensorflow.python.client import device_lib
 
 import anchor
 import coco
@@ -132,6 +133,7 @@ def train():
 
             ds = ds.batch(FLAGS.batch_size)
             ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
+            ds = dstrategy.experimental_distribute_dataset(ds)
 
             logger.info('{} dataset has been created, data dir: {}, is_training: {}, images: {}, classes: {}, anchors: {}'.format(
                 name, ann_file, is_training, num_images, num_classes, num_anchors))
@@ -234,7 +236,7 @@ def train():
             eval_distance_metric.reset_states()
             eval_iou_metric.reset_states()
 
-        ce_loss_object = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
+        ce_loss_object = loss.CategoricalFocalLoss(reduction=tf.keras.losses.Reduction.NONE)
 
         def calculate_metrics(logits, bboxes, true_labels, loss_metric, accuracy_metric, distance_metric):
             prev_anchors = 0
@@ -256,7 +258,9 @@ def train():
                 bboxes_for_layer = bboxes[:, prev_anchors:prev_anchors + num_anchor_boxes_for_layer, :]
                 true_labels_for_layer = true_labels[:, prev_anchors:prev_anchors + num_anchor_boxes_for_layer]
 
-                ce_loss = ce_loss_object(y_true=true_labels_for_layer, y_pred=classes)
+                true_labels_for_layer_one_hot = tf.one_hot(true_labels_for_layer, train_num_classes, axis=-1)
+
+                ce_loss = ce_loss_object(y_true=true_labels_for_layer_one_hot, y_pred=classes)
                 ce_loss = tf.nn.compute_average_loss(ce_loss, global_batch_size=FLAGS.batch_size)
 
                 mae_loss = tf.keras.losses.MAE(y_true=bboxes_for_layer, y_pred=coords)
@@ -274,10 +278,10 @@ def train():
 
                 prev_anchors += num_anchor_boxes_for_layer
 
-                logger.debug('base_layer: {}, anchors: {}, coords: {} -> {}, classes: {} -> {}, bboxes_for_layer: {}, true_labels_for_layer: {}'.format(
+                logger.info('base_layer: {}, anchors: {}, coords: {} -> {}, classes: {} -> {}, bboxes_for_layer: {}, true_labels_for_layer: {}'.format(
                     shape, num_anchor_boxes_for_layer,
-                    coords.shape, orig_coords_shape,
-                    classes.shape, orig_classes_shape,
+                    orig_coords_shape, coords.shape,
+                    orig_classes_shape, classes.shape,
                     bboxes_for_layer.shape, true_labels_for_layer.shape))
 
 
@@ -289,6 +293,7 @@ def train():
         def eval_step(filenames, images, bboxes, true_labels):
             logits = model(images, training=False)
             ce_loss, mae_loss, total_loss = calculate_metrics(logits, bboxes, true_labels, eval_loss_metric, eval_accuracy_metric, eval_distance_metric)
+            return ce_loss, mae_loss, total_loss
 
         def train_step(filenames, images, bboxes, true_labels):
             with tf.GradientTape() as tape:
@@ -310,19 +315,25 @@ def train():
 
             global_step.assign_add(1)
 
-            return total_loss
+            return ce_loss, mae_loss, total_loss
 
         @tf.function
         def distributed_train_step(args):
-            pr_total_losses = dstrategy.experimental_run_v2(train_step, args=args)
+            pr_ce_losses, pr_mae_losses, pr_total_losses = dstrategy.experimental_run_v2(train_step, args=args)
+            ce_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_ce_losses, axis=None)
+            mae_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_mae_losses, axis=None)
             total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_total_losses, axis=None)
-            return total_loss
+            return ce_loss, mae_loss, total_loss
 
         @tf.function
         def distributed_eval_step(args):
-            return dstrategy.experimental_run_v2(eval_step, args=args)
+            pr_ce_losses, pr_mae_losses, pr_total_losses = dstrategy.experimental_run_v2(eval_step, args=args)
+            ce_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_ce_losses, axis=None)
+            mae_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_mae_losses, axis=None)
+            total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_total_losses, axis=None)
+            return ce_loss, mae_loss, total_loss
 
-        def run_epoch(dataset, step_func, max_steps):
+        def run_epoch(name, dataset, step_func, max_steps):
             losses = []
             accs = []
 
@@ -336,7 +347,10 @@ def train():
                     images = tf.transpose(images, [0, 3, 1, 2])
 
 
-                step_func(args=(filenames, images, bboxes, true_labels))
+                ce_loss, mae_loss, total_loss = step_func(args=(filenames, images, bboxes, true_labels))
+                if name == 'train':
+                    logger.info('{}: step: {}, ce_loss: {}, mae_loss: {}, total_loss: {}, accuracy: {}, distance: {}'.format(
+                        name, step, ce_loss, mae_loss, total_loss, accuracy_metric, loss_metric))
 
                 step += 1
                 if step >= max_steps:
@@ -353,7 +367,7 @@ def train():
             reset_metrics()
             logger.info('there is a checkpoint {}, running initial validation'.format(manager.latest_checkpoint))
 
-            eval_steps = run_epoch(eval_dataset, distributed_eval_step, steps_per_eval)
+            eval_steps = run_epoch('eval', eval_dataset, distributed_eval_step, steps_per_eval)
             min_metric = eval_accuracy_metric.result()
             logger.info('initial validation metric: {}'.format(min_metric))
 
@@ -364,8 +378,8 @@ def train():
         for epoch in range(FLAGS.epoch, FLAGS.num_epochs):
             reset_metrics()
 
-            train_steps = run_epoch(train_dataset, distributed_train_step, steps_per_epoch)
-            eval_steps = run_epoch(eval_dataset, distributed_eval_step, steps_per_eval)
+            train_steps = run_epoch('train', train_dataset, distributed_train_step, steps_per_epoch)
+            eval_steps = run_epoch('eval', eval_dataset, distributed_eval_step, steps_per_eval)
 
             logger.info('epoch: {}, train: steps: {}, accuracy: {:.2e}, distance: {:.2e}, loss: {:.2e}, eval: accuracy: {:.2e}, distance: {:.2e}, loss: {:.2e}, lr: {:.2e}'.format(
                 epoch, global_step.numpy(),

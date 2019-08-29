@@ -62,7 +62,8 @@ class StdConv(tf.keras.layers.Layer):
         return self.dropout0(self.bn0(self.c0(inputs), training=training))
 
 def flaten_conv(x, k):
-    return tf.reshape(x, (-1, tf.shape(x)[-1] // k))
+    shape = tf.shape(x)
+    return tf.reshape(x, (-1, shape[1] * shape[2] * k, shape[3] // k))
 
 class OutConv(tf.keras.layers.Layer):
     def __init__(self, global_params, k, num_classes):
@@ -83,7 +84,8 @@ class OutConv(tf.keras.layers.Layer):
             data_format=self.data_format,
             kernel_initializer=conv_kernel_initializer,
             padding='same',
-            use_bias=False)
+            use_bias=False,
+            activation='softmax')
 
         self.loc_out = tf.keras.layers.Conv2D(
             filters=4*self.k,

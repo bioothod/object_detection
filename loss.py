@@ -105,10 +105,10 @@ class DiceLoss(tf.keras.losses.Loss):
         return 1. - score
 
 class CategoricalFocalLoss(tf.keras.losses.Loss):
-    def __init__(self, from_logits=False, reduction=tf.keras.losses.Reduction.NONE):
+    def __init__(self, from_logits=False, reduction=tf.keras.losses.Reduction.AUTO):
         super(CategoricalFocalLoss, self).__init__()
         self.alpha = 0.25
-        self.gamma = 1
+        self.gamma = 2
         self.reduction = reduction
         self.from_logits = from_logits
         self.data_format = 'channels_last'
@@ -120,8 +120,8 @@ class CategoricalFocalLoss(tf.keras.losses.Loss):
         assert true_shape == pred_shape
 
         if self.from_logits:
-            axis = 3 if self.data_format() == 'channels_last' else 1
-            y_pred /= tf.math.sum(y_pred, axis=axis, keepdims=True)
+            axis = 3 if self.data_format == 'channels_last' else 1
+            y_pred = tf.nn.softmax(y_pred, axis=axis)
 
         y_true = tf.cast(y_true, y_pred.dtype)
         #y_true = tf.clip_by_value(y_true, 1e-10, 1-1e-10)
