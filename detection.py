@@ -90,6 +90,10 @@ def train():
     handler.setFormatter(__fmt)
     logger.addHandler(handler)
 
+    logger.info('threads: inter(between): {}, intra(within): {}'.format(tf.config.threading.get_inter_op_parallelism_threads(), tf.config.threading.get_intra_op_parallelism_threads()))
+    tf.config.threading.set_inter_op_parallelism_threads(10)
+    tf.config.threading.set_intra_op_parallelism_threads(10)
+
     num_replicas = 1
     #dstrategy = None
     dstrategy = tf.distribute.MirroredStrategy()
@@ -259,7 +263,7 @@ def train():
                 bboxes_for_layer = bboxes[:, prev_anchors:prev_anchors + num_anchor_boxes_for_layer, :]
                 true_labels_for_layer = true_labels[:, prev_anchors:prev_anchors + num_anchor_boxes_for_layer]
 
-                logger.info('base_layer: {}, anchors: {}, coords: {} -> {}, classes: {} -> {}, bboxes_for_layer: {}, true_labels_for_layer: {}'.format(
+                logger.debug('base_layer: {}, anchors: {}, coords: {} -> {}, classes: {} -> {}, bboxes_for_layer: {}, true_labels_for_layer: {}'.format(
                     shape, num_anchor_boxes_for_layer,
                     orig_coords_shape, coords.shape,
                     orig_classes_shape, classes.shape,
@@ -271,7 +275,7 @@ def train():
                 num_positive = tf.shape(positive_indexes)[0]
                 num_positives.append(num_positive)
 
-                num_negative = 3 * (num_positive + 1)
+                num_negative = 2 * num_positive
 
                 # because 'x == 0' condition yields (none, 0) tensor, and ' < 1' yields (none, 2) shape, the same as aboe positive index selection
                 negative_indexes = tf.where(true_labels_for_layer < 1)
@@ -303,6 +307,8 @@ def train():
                     total_ce_loss += ce_loss
                     total_mae_loss += mae_loss
 
+
+            total_mae_loss = total_mae_loss *  0.01
 
             total_loss = total_ce_loss + total_mae_loss
             loss_metric.update_state(total_loss)
@@ -399,10 +405,10 @@ def train():
 
             eval_steps = run_epoch('eval', eval_dataset, distributed_eval_step, steps_per_eval)
             min_metric = eval_accuracy_metric.result()
-            logger.info('initial validation metric: {}'.format(min_metric))
+            logger.info('initial validation metric: {:.5f}'.format(min_metric))
 
         if min_metric < FLAGS.min_eval_metric:
-            logger.info('setting minimal evaluation metric {} -> {} from command line arguments'.format(min_metric, FLAGS.min_eval_metric))
+            logger.info('setting minimal evaluation metric {:.5f} -> {} from command line arguments'.format(min_metric, FLAGS.min_eval_metric))
             min_metric = FLAGS.min_eval_metric
 
         for epoch in range(FLAGS.epoch, FLAGS.num_epochs):
@@ -411,7 +417,7 @@ def train():
             train_steps = run_epoch('train', train_dataset, distributed_train_step, steps_per_epoch)
             eval_steps = run_epoch('eval', eval_dataset, distributed_eval_step, steps_per_eval)
 
-            logger.info('epoch: {}, train: steps: {}, accuracy: {:.2e}, distance: {:.2e}, loss: {:.2e}, eval: accuracy: {:.2e}, distance: {:.2e}, loss: {:.2e}, lr: {:.2e}'.format(
+            logger.info('epoch: {}, train: steps: {}, accuracy: {:.4f}, distance: {:.2e}, loss: {:.2e}, eval: accuracy: {:.4f}, distance: {:.2e}, loss: {:.2e}, lr: {:.2e}'.format(
                 epoch, global_step.numpy(),
                 accuracy_metric.result(), distance_metric.result(), loss_metric.result(),
                 eval_accuracy_metric.result(), eval_distance_metric.result(), eval_loss_metric.result(),
