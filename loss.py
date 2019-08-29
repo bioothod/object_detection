@@ -1,5 +1,9 @@
+import logging
+
 import tensorflow as tf
 from tensorflow.python.ops import array_ops
+
+logger = logging.getLogger('detection')
 
 class CategoricalLoss(tf.keras.losses.Loss):
     def __init__(self, from_logits=False, reduction=tf.keras.losses.Reduction.NONE, class_weights=1.):
@@ -114,11 +118,6 @@ class CategoricalFocalLoss(tf.keras.losses.Loss):
         self.data_format = 'channels_last'
 
     def call(self, y_true, y_pred):
-        true_shape = y_true.shape
-        pred_shape = y_pred.shape
-
-        assert true_shape == pred_shape
-
         if self.from_logits:
             axis = 3 if self.data_format == 'channels_last' else 1
             y_pred = tf.nn.softmax(y_pred, axis=axis)

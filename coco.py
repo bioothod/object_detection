@@ -306,7 +306,6 @@ class COCO_Iterable:
         true_bboxes = self.np_anchor_boxes.copy()
         true_labels = np.zeros((self.np_anchor_boxes.shape[0]))
         true_orig_labels = np.zeros((self.np_anchor_boxes.shape[0]))
-        num_positive = 0
 
         def update_true_arrays(iou, cat_id, max_iou_threshold):
             converted_cat_id = self.cats[cat_id]
@@ -341,10 +340,10 @@ class COCO_Iterable:
                 max_iou = np.max(iou)
                 num_p = update_true_arrays(iou, cat_id, max_iou * 0.8)
 
-            num_positive += num_p
-
-        self.logger.debug('{}: image_id: {}, image: {}, bboxes: {}, labels: {}, aug bboxes: {} -> {}, num_positive: {}, time: {:.1f} ms'.format(
-            filename, image_id, image.shape, true_bboxes.shape, true_labels.shape, len(anns), len(bboxes), num_positive, (time.time() - start_time) * 1000.))
+        self.logger.debug('{}: image_id: {}, image: {}, bboxes: {}, labels: {}, aug bboxes: {} -> {}, num_positive: {}, num_negatives: {}, time: {:.1f} ms'.format(
+            filename, image_id, image.shape, true_bboxes.shape, true_labels.shape, len(anns), len(bboxes),
+            np.where(true_labels > 0)[0].shape[0], np.where(true_labels == 0)[0].shape[0],
+            (time.time() - start_time) * 1000.))
         return filename, image_id, image, true_bboxes, true_labels, true_orig_labels
 
 def create_coco_iterable(image_size, ann_path, data_dir, logger, is_training, np_anchor_boxes, np_anchor_areas, min_area=0., min_visibility=0.15):
