@@ -259,8 +259,6 @@ class COCO_Iterable:
         for cat_id in self.coco.cats.keys():
             self.cats[cat_id] = len(self.cats)
 
-        self.orig_images = {}
-
     def num_classes(self):
         return self.coco.num_classes()
 
@@ -275,13 +273,9 @@ class COCO_Iterable:
 
         filename, image_id, anns = self.image_tuples[i]
 
-        image = self.orig_images.get(i, None)
-        if image is None:
-            image = cv2.imread(filename)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            image = image.astype(np.uint8)
-
-            self.orig_images[i] = image
+        image = cv2.imread(filename)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = image.astype(np.uint8)
 
         bboxes = []
         cat_ids = []
