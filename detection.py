@@ -351,8 +351,8 @@ def train():
 
                 ce_loss, dist_loss, total_loss, num_positive = step_func(args=(filenames, images, bboxes, true_labels))
                 if name == 'train':
-                    logger.info('{}: step: {}, num_positive: {}, ce_loss: {:.2e}, dist_loss: {:.2e}, total_loss: {:.2e}, accuracy: {:.4f}, distance: {:.4f}'.format(
-                        name, step, num_positive, ce_loss, dist_loss, total_loss, accuracy_metric.result(), distance_metric.result()))
+                    logger.info('{}: step: {}/{}, num_positive: {}, ce_loss: {:.2e}, dist_loss: {:.2e}, total_loss: {:.2e}, accuracy: {:.4f}, distance: {:.4f}'.format(
+                        name, step, max_steps, num_positive, ce_loss, dist_loss, total_loss, accuracy_metric.result(), distance_metric.result()))
 
                 step += 1
                 if step >= max_steps:
