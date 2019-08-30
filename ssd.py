@@ -84,8 +84,7 @@ class OutConv(tf.keras.layers.Layer):
             data_format=self.data_format,
             kernel_initializer=conv_kernel_initializer,
             padding='same',
-            use_bias=False,
-            activation='softmax')
+            use_bias=False)
 
         self.loc_out = tf.keras.layers.Conv2D(
             filters=4*self.k,
@@ -94,7 +93,8 @@ class OutConv(tf.keras.layers.Layer):
             data_format=self.data_format,
             kernel_initializer=conv_kernel_initializer,
             padding='same',
-            use_bias=False)
+            use_bias=False,
+            activation='relu')
 
     def call1(self, inputs, training=True):
         return [flaten_conv(self.loc_out(inputs), self.k),
