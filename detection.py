@@ -42,6 +42,7 @@ parser.add_argument('--min_learning_rate', default=1e-6, type=float, help='Minim
 parser.add_argument('--steps_per_eval', default=-1, type=int, help='Number of steps per evaluation run')
 parser.add_argument('--steps_per_epoch', default=-1, type=int, help='Number of steps per training run')
 parser.add_argument('--min_eval_metric', default=0.75, type=float, help='Minimal evaluation metric to start saving models')
+parser.add_argument('--negative_positive_rate', default=2, type=float, help='Negative to positive anchors ratio')
 parser.add_argument('--epochs_lr_update', default=10, type=int, help='Maximum number of epochs without improvement used to reset or decrease learning rate')
 parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16 training/inference')
 FLAGS = parser.parse_args()
@@ -91,9 +92,9 @@ def train():
     handler.setFormatter(__fmt)
     logger.addHandler(handler)
 
-    logger.info('threads: inter(between): {}, intra(within): {}'.format(tf.config.threading.get_inter_op_parallelism_threads(), tf.config.threading.get_intra_op_parallelism_threads()))
-    tf.config.threading.set_inter_op_parallelism_threads(10)
-    tf.config.threading.set_intra_op_parallelism_threads(10)
+#    logger.info('threads: inter(between): {}, intra(within): {}'.format(tf.config.threading.get_inter_op_parallelism_threads(), tf.config.threading.get_intra_op_parallelism_threads()))
+#    tf.config.threading.set_inter_op_parallelism_threads(10)
+#    tf.config.threading.set_intra_op_parallelism_threads(10)
 
     num_replicas = 1
     #dstrategy = None
@@ -276,7 +277,7 @@ def train():
                 num_positive = tf.shape(positive_indexes)[0]
                 num_positives.append(num_positive)
 
-                num_negative = 2 * num_positive
+                num_negative = tf.cast(FLAGS.negative_positive_rate * tf.cast(num_positive, tf.float32), tf.int32)
 
                 # because 'x == 0' condition yields (none, 0) tensor, and ' < 1' yields (none, 2) shape, the same as aboe positive index selection
                 negative_indexes = tf.where(true_labels_for_layer < 1)
