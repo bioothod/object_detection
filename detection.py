@@ -1,7 +1,6 @@
 import argparse
 import logging
 import os
-import re
 import sys
 
 import numpy as np
@@ -62,27 +61,10 @@ def call_base_model(model, inputs):
 def call_model(model, inputs):
     return model(inputs, training=True)
 
-def run_eval(model, eval_dataset, eval_num_images, train_dir, global_step):
-    @tf.function
-    def eval_step_mask(images):
-        logits = model(images, training=False)
-        return logits
-
-    dst_dir = os.path.join(train_dir, 'eval', str(global_step))
-    os.makedirs(dst_dir, exist_ok=True)
-
-    num_files = 0
-    for filenames, images, true_masks in eval_dataset:
-        masks = eval_step_mask(images)
-        num_files += len(filenames)
-
-        validate.generate_images(filenames, images, masks, dst_dir)
-        logger.info('saved {}/{} images'.format(len(filenames), num_files))
-
-        if num_files >= eval_num_images:
-            break
-
-    logger.info('global_step: {}, evaluated {} images -> {}'.format(global_step, num_files, dst_dir))
+def smooth_l1_loss(x):
+    square_loss   = 0.5*x**2
+    absolute_loss = tf.abs(x)
+    return tf.where(tf.less(absolute_loss, 1.), square_loss, absolute_loss-0.5)
 
 def train():
     checkpoint_dir = os.path.join(FLAGS.train_dir, 'checkpoints')
@@ -92,9 +74,9 @@ def train():
     handler.setFormatter(__fmt)
     logger.addHandler(handler)
 
-#    logger.info('threads: inter(between): {}, intra(within): {}'.format(tf.config.threading.get_inter_op_parallelism_threads(), tf.config.threading.get_intra_op_parallelism_threads()))
-#    tf.config.threading.set_inter_op_parallelism_threads(10)
-#    tf.config.threading.set_intra_op_parallelism_threads(10)
+    logger.info('threads: inter(between): {}, intra(within): {}'.format(tf.config.threading.get_inter_op_parallelism_threads(), tf.config.threading.get_intra_op_parallelism_threads()))
+    tf.config.threading.set_inter_op_parallelism_threads(10)
+    tf.config.threading.set_intra_op_parallelism_threads(10)
 
     num_replicas = 1
     #dstrategy = None
@@ -147,26 +129,6 @@ def train():
             return ds, num_images, num_classes, cat_names
 
         train_dataset, train_num_images, train_num_classes, train_cat_names = create_dataset('train', FLAGS.train_coco_annotations, FLAGS.train_coco_data_dir, is_training=True)
-
-        if False:
-            data_dir = os.path.join(FLAGS.train_dir, 'tmp')
-            os.makedirs(data_dir, exist_ok=True)
-
-            for filename, image_id, image, true_bboxes, true_labels, true_orig_labels in train_dataset.unbatch().take(10):
-                filename = str(filename)
-                dst = '{}/{}.png'.format(data_dir, image_id.numpy())
-                new_anns = []
-                # category ID in true_labels does not match train_cat_names here, this is converted category_id into range [0, num_categories], where 0 is background class
-                # true_orig_labels contain original category ids
-                for bb, cat_id in zip(true_bboxes, true_orig_labels):
-                    new_anns.append((bb.numpy(), cat_id.numpy()))
-
-                image = image.numpy() * 128. + 128
-                image = image.astype(np.uint8)
-                image_draw.draw_im(image, new_anns, dst, train_cat_names)
-
-            exit(0)
-
         eval_dataset, eval_num_images, eval_num_classes, eval_cat_names = create_dataset('eval', FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, is_training=False)
 
         steps_per_epoch = calc_epoch_steps(train_num_images)
@@ -216,19 +178,17 @@ def train():
 
         if manager.latest_checkpoint:
             logger.info("Restored from {}, global step: {}".format(manager.latest_checkpoint, global_step.numpy()))
-            #run_eval(model, eval_dataset, eval_num_images, FLAGS.train_dir, global_step.numpy())
-            #exit(0)
         else:
             logger.info("Initializing from scratch, no latest checkpoint")
 
         loss_metric = tf.keras.metrics.Mean(name='train_loss')
         accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='train_accuracy')
-        distance_metric = tf.keras.metrics.MeanAbsoluteError(name='train_mae')
+        distance_metric = tf.keras.metrics.MeanAbsoluteError(name='train_dist')
         iou_metric = loss.IOUScore(threshold=0.5, name='train_iou')
 
         eval_loss_metric = tf.keras.metrics.Mean(name='eval_loss')
         eval_accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='eval_accuracy')
-        eval_distance_metric = tf.keras.metrics.MeanAbsoluteError(name='eval_mae')
+        eval_distance_metric = tf.keras.metrics.MeanAbsoluteError(name='eval_dist')
         eval_iou_metric = loss.IOUScore(threshold=0.5, name='eval_iou')
 
         def reset_metrics():
@@ -246,7 +206,7 @@ def train():
 
         def calculate_metrics(logits, bboxes, true_labels, loss_metric, accuracy_metric, distance_metric):
             prev_anchors = 0
-            total_mae_loss = None
+            total_dist_loss = None
             total_ce_loss = None
             num_positives = []
             for (coords, classes), num_anchor_boxes_for_layer, shape in zip(logits, anchor_layers, feature_shapes):
@@ -289,15 +249,18 @@ def train():
                 sampled_true_labels = tf.gather_nd(true_labels_for_layer, new_indexes)
                 sampled_true_labels_one_hot = tf.one_hot(sampled_true_labels, train_num_classes, axis=-1)
                 sampled_pred_classes = tf.gather_nd(classes, new_indexes)
+                sampled_pred_classes = tf.nn.softmax(sampled_pred_classes, axis=-1)
 
                 sampled_true_bboxes = tf.gather_nd(bboxes_for_layer, new_indexes)
+                sampled_true_bboxes = tf.cast(sampled_true_bboxes, tf.float32) / float(image_size)
                 sampled_pred_coords = tf.gather_nd(coords, new_indexes)
+                sampled_pred_coords = tf.cast(sampled_pred_coords, tf.float32) / float(image_size)
 
                 ce_loss = ce_loss_object(y_true=sampled_true_labels_one_hot, y_pred=sampled_pred_classes)
                 ce_loss = tf.nn.compute_average_loss(ce_loss, global_batch_size=FLAGS.batch_size)
 
-                mae_loss = tf.keras.losses.MAE(y_true=sampled_true_bboxes, y_pred=sampled_pred_coords)
-                mae_loss = tf.nn.compute_average_loss(mae_loss, global_batch_size=FLAGS.batch_size)
+                dist_loss = smooth_l1_loss(sampled_true_bboxes - sampled_pred_coords)
+                dist_loss = tf.nn.compute_average_loss(dist_loss, global_batch_size=FLAGS.batch_size)
 
                 sampled_true_labels = tf.gather_nd(true_labels_for_layer, positive_indexes)
                 sampled_pred_classes = tf.gather_nd(classes, positive_indexes)
@@ -306,28 +269,27 @@ def train():
 
                 if total_ce_loss is None:
                     total_ce_loss = ce_loss
-                    total_mae_loss = mae_loss
+                    total_dist_loss = dist_loss
                 else:
                     total_ce_loss += ce_loss
-                    total_mae_loss += mae_loss
+                    total_dist_loss += dist_loss
 
+            #total_dist_loss = total_dist_loss * 1.
 
-            total_mae_loss = total_mae_loss *  0.01
-
-            total_loss = total_ce_loss + total_mae_loss
+            total_loss = total_ce_loss + total_dist_loss
             loss_metric.update_state(total_loss)
 
-            return total_ce_loss, total_mae_loss, total_loss, num_positives
+            return total_ce_loss, total_dist_loss, total_loss, num_positives
 
         def eval_step(filenames, images, bboxes, true_labels):
             logits = model(images, training=False)
-            ce_loss, mae_loss, total_loss, num_positive = calculate_metrics(logits, bboxes, true_labels, eval_loss_metric, eval_accuracy_metric, eval_distance_metric)
-            return ce_loss, mae_loss, total_loss, num_positive
+            ce_loss, dist_loss, total_loss, num_positive = calculate_metrics(logits, bboxes, true_labels, eval_loss_metric, eval_accuracy_metric, eval_distance_metric)
+            return ce_loss, dist_loss, total_loss, num_positive
 
         def train_step(filenames, images, bboxes, true_labels):
             with tf.GradientTape() as tape:
                 logits = model(images, training=True)
-                ce_loss, mae_loss, total_loss, num_positive = calculate_metrics(logits, bboxes, true_labels, loss_metric, accuracy_metric, distance_metric)
+                ce_loss, dist_loss, total_loss, num_positive = calculate_metrics(logits, bboxes, true_labels, loss_metric, accuracy_metric, distance_metric)
 
             #variables = model.trainable_variables + base_model.trainable_variables
             variables = model.trainable_variables
@@ -337,14 +299,14 @@ def train():
                 if g is None:
                     logger.info('no gradients for variable: {}'.format(v))
                 else:
-                    g = tf.clip_by_value(g, -1, 1)
+                    g = tf.clip_by_value(g, -2, 2)
 
                 clip_gradients.append(g)
             opt.apply_gradients(zip(clip_gradients, variables))
 
             global_step.assign_add(1)
 
-            return ce_loss, mae_loss, total_loss, num_positive
+            return ce_loss, dist_loss, total_loss, num_positive
 
         @tf.function
         def distributed_train_step_dummy(args):
@@ -357,21 +319,21 @@ def train():
 
         @tf.function
         def distributed_train_step(args):
-            pr_ce_losses, pr_mae_losses, pr_total_losses, num_positive = dstrategy.experimental_run_v2(train_step, args=args)
+            pr_ce_losses, pr_dist_losses, pr_total_losses, num_positive = dstrategy.experimental_run_v2(train_step, args=args)
             ce_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_ce_losses, axis=None)
-            mae_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_mae_losses, axis=None)
+            dist_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_dist_losses, axis=None)
             total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_total_losses, axis=None)
             num_positive = dstrategy.reduce(tf.distribute.ReduceOp.SUM, num_positive, axis=0)
-            return ce_loss, mae_loss, total_loss, num_positive
+            return ce_loss, dist_loss, total_loss, num_positive
 
         @tf.function
         def distributed_eval_step(args):
-            pr_ce_losses, pr_mae_losses, pr_total_losses, num_positive = dstrategy.experimental_run_v2(eval_step, args=args)
+            pr_ce_losses, pr_dist_losses, pr_total_losses, num_positive = dstrategy.experimental_run_v2(eval_step, args=args)
             ce_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_ce_losses, axis=None)
-            mae_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_mae_losses, axis=None)
+            dist_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_dist_losses, axis=None)
             total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_total_losses, axis=None)
             num_positive = dstrategy.reduce(tf.distribute.ReduceOp.SUM, num_positive, axis=0)
-            return ce_loss, mae_loss, total_loss, num_positive
+            return ce_loss, dist_loss, total_loss, num_positive
 
         def run_epoch(name, dataset, step_func, max_steps):
             losses = []
@@ -387,10 +349,10 @@ def train():
                     images = tf.transpose(images, [0, 3, 1, 2])
 
 
-                ce_loss, mae_loss, total_loss, num_positive = step_func(args=(filenames, images, bboxes, true_labels))
+                ce_loss, dist_loss, total_loss, num_positive = step_func(args=(filenames, images, bboxes, true_labels))
                 if name == 'train':
-                    logger.info('{}: step: {}, num_positive: {}, ce_loss: {:.2e}, mae_loss: {:.2e}, total_loss: {:.2e}, accuracy: {:.4f}, distance: {:.2f}'.format(
-                        name, step, num_positive, ce_loss, mae_loss, total_loss, accuracy_metric.result(), loss_metric.result()))
+                    logger.info('{}: step: {}, num_positive: {}, ce_loss: {:.2e}, dist_loss: {:.2e}, total_loss: {:.2e}, accuracy: {:.4f}, distance: {:.2f}'.format(
+                        name, step, num_positive, ce_loss, dist_loss, total_loss, accuracy_metric.result(), distance_metric.result()))
 
                 step += 1
                 if step >= max_steps:
@@ -434,9 +396,6 @@ def train():
                 min_metric = eval_acc
                 num_epochs_without_improvement = 0
                 learning_rate_multiplier = initial_learning_rate_multiplier
-
-                if False:
-                    run_eval(model, eval_dataset, eval_num_images, FLAGS.train_dir, global_step.numpy())
             else:
                 num_epochs_without_improvement += 1
 
