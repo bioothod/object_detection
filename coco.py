@@ -158,7 +158,7 @@ def get_training_augmentation(image_size, bbox_params):
             A.Compose([
                 A.ShiftScaleRotate(scale_limit=0.1, rotate_limit=0, shift_limit=0.1, p=0.5, border_mode=0),
 
-                A.Resize(height=int(image_size*1.6), width=int(image_size*1.6), interpolation=cv2.INTER_CUBIC, always_apply=True),
+                A.Resize(height=int(image_size*1.6), width=int(image_size*1.6), interpolation=cv2.INTER_LINEAR, always_apply=True),
                 A.RandomCrop(height=image_size, width=image_size, always_apply=True),
 
                 A.IAAAdditiveGaussianNoise(p=0.1),
@@ -192,7 +192,19 @@ def get_training_augmentation(image_size, bbox_params):
                 A.Lambda(mask=round_clip_0_1),
             ]),
             A.Compose([
-                A.Resize(height=int(image_size*1.2), width=int(image_size*1.2), interpolation=cv2.INTER_CUBIC, always_apply=True),
+                A.Resize(height=int(image_size*1.2), width=int(image_size*1.2), interpolation=cv2.INTER_LINEAR, always_apply=True),
+                A.RandomCrop(height=image_size, width=image_size, always_apply=True),
+                A.OneOf(
+                    [
+                        A.IAASharpen(p=1),
+                        A.Blur(blur_limit=3, p=1),
+                        A.MotionBlur(blur_limit=3, p=1),
+                    ],
+                    p=0.5,
+                ),
+            ]),
+            A.Compose([
+                A.Resize(height=int(image_size*1.1), width=int(image_size*1.1), interpolation=cv2.INTER_LINEAR, always_apply=True),
                 A.RandomCrop(height=image_size, width=image_size, always_apply=True),
             ]),
         ], p=1.),
@@ -204,7 +216,7 @@ def get_training_augmentation(image_size, bbox_params):
 def get_validation_augmentation(image_size, bbox_params):
     test_transform = [
         A.PadIfNeeded(image_size, image_size),
-        A.Resize(height=image_size, width=image_size, interpolation=cv2.INTER_CUBIC, always_apply=True),
+        A.Resize(height=image_size, width=image_size, interpolation=cv2.INTER_LINEAR, always_apply=True),
     ]
     return A.Compose(test_transform, bbox_params)
 
