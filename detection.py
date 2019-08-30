@@ -351,7 +351,7 @@ def train():
 
                 ce_loss, dist_loss, total_loss, num_positive = step_func(args=(filenames, images, bboxes, true_labels))
                 if name == 'train':
-                    logger.info('{}: step: {}, num_positive: {}, ce_loss: {:.2e}, dist_loss: {:.2e}, total_loss: {:.2e}, accuracy: {:.4f}, distance: {:.2f}'.format(
+                    logger.info('{}: step: {}, num_positive: {}, ce_loss: {:.2e}, dist_loss: {:.2e}, total_loss: {:.2e}, accuracy: {:.4f}, distance: {:.4f}'.format(
                         name, step, num_positive, ce_loss, dist_loss, total_loss, accuracy_metric.result(), distance_metric.result()))
 
                 step += 1
@@ -383,7 +383,7 @@ def train():
             train_steps = run_epoch('train', train_dataset, distributed_train_step, steps_per_epoch)
             eval_steps = run_epoch('eval', eval_dataset, distributed_eval_step, steps_per_eval)
 
-            logger.info('epoch: {}, train: steps: {}, accuracy: {:.4f}, distance: {:.2e}, loss: {:.2e}, eval: accuracy: {:.4f}, distance: {:.2e}, loss: {:.2e}, lr: {:.2e}'.format(
+            logger.info('epoch: {}, train: steps: {}, accuracy: {:.4f}, distance: {:.4f}, loss: {:.2e}, eval: accuracy: {:.4f}, distance: {:.4f}, loss: {:.2e}, lr: {:.2e}'.format(
                 epoch, global_step.numpy(),
                 accuracy_metric.result(), distance_metric.result(), loss_metric.result(),
                 eval_accuracy_metric.result(), eval_distance_metric.result(), eval_loss_metric.result(),
