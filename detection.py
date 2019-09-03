@@ -205,91 +205,61 @@ def train():
         ce_loss_object = loss.CategoricalFocalLoss(reduction=tf.keras.losses.Reduction.NONE)
 
         def calculate_metrics(logits, bboxes, true_labels, loss_metric, accuracy_metric, distance_metric):
-            prev_anchors = 0
-            total_dist_loss = None
-            total_ce_loss = None
-            num_positives = []
-            for (coords, classes), num_anchor_boxes_for_layer, shape in zip(logits, anchor_layers, feature_shapes):
-                num_anchors_per_output = int(num_anchor_boxes_for_layer / (shape[1] * shape[1]))
+            coords, classes = logits
 
-                if coords.shape[1:3] != shape[1:3]:
-                    logger.error('layer: {}, anchors: {}, coords: {}, classes: {}'.format(shape, num_anchor_boxes_for_layer, coords, classes))
-                    exit(-1)
+            positive_indexes = tf.where(true_labels > 0)
+            num_positive = tf.shape(positive_indexes)[0]
 
-                orig_coords_shape = coords.shape
-                orig_classes_shape = classes.shape
+            num_negative = tf.cast(FLAGS.negative_positive_rate * tf.cast(num_positive, tf.float32), tf.int32)
 
-                coords = tf.reshape(coords, [-1, num_anchor_boxes_for_layer, 4])
-                classes = tf.reshape(classes, [-1, num_anchor_boxes_for_layer, train_num_classes])
+            # because 'x == 0' condition yields (none, 0) tensor, and ' < 1' yields (none, 2) shape, the same as aboe positive index selection
+            negative_indexes = tf.where(true_labels < 1)
+            negative_indexes = tf.random.shuffle(negative_indexes)
+            negative_indexes = negative_indexes[:num_negative]
 
-                bboxes_for_layer = bboxes[:, prev_anchors:prev_anchors + num_anchor_boxes_for_layer, :]
-                true_labels_for_layer = true_labels[:, prev_anchors:prev_anchors + num_anchor_boxes_for_layer]
+            new_indexes = tf.concat([positive_indexes, negative_indexes], axis=0)
 
-                logger.debug('base_layer: {}, anchors: {}, coords: {} -> {}, classes: {} -> {}, bboxes_for_layer: {}, true_labels_for_layer: {}'.format(
-                    shape, num_anchor_boxes_for_layer,
-                    orig_coords_shape, coords.shape,
-                    orig_classes_shape, classes.shape,
-                    bboxes_for_layer.shape, true_labels_for_layer.shape))
+            sampled_true_labels = tf.gather_nd(true_labels, new_indexes)
+            sampled_true_labels_one_hot = tf.one_hot(sampled_true_labels, train_num_classes, axis=-1)
+            sampled_pred_classes = tf.gather_nd(classes, new_indexes)
+            sampled_pred_classes = tf.nn.softmax(sampled_pred_classes, axis=-1)
 
-                prev_anchors += num_anchor_boxes_for_layer
+            sampled_true_bboxes = tf.gather_nd(bboxes, new_indexes)
+            sampled_true_bboxes = tf.cast(sampled_true_bboxes, tf.float32) / float(image_size)
+            sampled_pred_coords = tf.gather_nd(coords, new_indexes)
+            sampled_pred_coords = tf.cast(sampled_pred_coords, tf.float32) / float(image_size)
 
-                positive_indexes = tf.where(true_labels_for_layer > 0)
-                num_positive = tf.shape(positive_indexes)[0]
-                num_positives.append(num_positive)
+            ce_loss = ce_loss_object(y_true=sampled_true_labels_one_hot, y_pred=sampled_pred_classes)
+            ce_loss = tf.nn.compute_average_loss(ce_loss, global_batch_size=FLAGS.batch_size)
 
-                num_negative = tf.cast(FLAGS.negative_positive_rate * tf.cast(num_positive, tf.float32), tf.int32)
+            dist_loss = smooth_l1_loss(sampled_true_bboxes - sampled_pred_coords)
+            dist_loss = tf.nn.compute_average_loss(dist_loss, global_batch_size=FLAGS.batch_size)
 
-                # because 'x == 0' condition yields (none, 0) tensor, and ' < 1' yields (none, 2) shape, the same as aboe positive index selection
-                negative_indexes = tf.where(true_labels_for_layer < 1)
-                negative_indexes = tf.random.shuffle(negative_indexes)
-                negative_indexes = negative_indexes[:num_negative]
+            sampled_true_labels = tf.gather_nd(true_labels, positive_indexes)
+            sampled_pred_classes = tf.gather_nd(classes, positive_indexes)
+            accuracy_metric.update_state(y_true=sampled_true_labels, y_pred=sampled_pred_classes)
 
-                new_indexes = tf.concat([positive_indexes, negative_indexes], axis=0)
 
-                sampled_true_labels = tf.gather_nd(true_labels_for_layer, new_indexes)
-                sampled_true_labels_one_hot = tf.one_hot(sampled_true_labels, train_num_classes, axis=-1)
-                sampled_pred_classes = tf.gather_nd(classes, new_indexes)
-                sampled_pred_classes = tf.nn.softmax(sampled_pred_classes, axis=-1)
+            sampled_true_bboxes = tf.gather_nd(bboxes, positive_indexes)
+            sampled_true_bboxes = tf.cast(sampled_true_bboxes, tf.float32) / float(image_size)
+            sampled_pred_coords = tf.gather_nd(coords, positive_indexes)
+            sampled_pred_coords = tf.cast(sampled_pred_coords, tf.float32) / float(image_size)
+            distance_metric.update_state(y_true=sampled_true_bboxes, y_pred=sampled_pred_coords)
 
-                sampled_true_bboxes = tf.gather_nd(bboxes_for_layer, new_indexes)
-                sampled_true_bboxes = tf.cast(sampled_true_bboxes, tf.float32) / float(image_size)
-                sampled_pred_coords = tf.gather_nd(coords, new_indexes)
-                sampled_pred_coords = tf.cast(sampled_pred_coords, tf.float32) / float(image_size)
-
-                ce_loss = ce_loss_object(y_true=sampled_true_labels_one_hot, y_pred=sampled_pred_classes)
-                ce_loss = tf.nn.compute_average_loss(ce_loss, global_batch_size=FLAGS.batch_size)
-
-                dist_loss = smooth_l1_loss(sampled_true_bboxes - sampled_pred_coords)
-                dist_loss = tf.nn.compute_average_loss(dist_loss, global_batch_size=FLAGS.batch_size)
-
-                sampled_true_labels = tf.gather_nd(true_labels_for_layer, positive_indexes)
-                sampled_pred_classes = tf.gather_nd(classes, positive_indexes)
-                accuracy_metric.update_state(y_true=sampled_true_labels, y_pred=sampled_pred_classes)
-                distance_metric.update_state(y_true=sampled_true_bboxes, y_pred=sampled_pred_coords)
-
-                if total_ce_loss is None:
-                    total_ce_loss = ce_loss
-                    total_dist_loss = dist_loss
-                else:
-                    total_ce_loss += ce_loss
-                    total_dist_loss += dist_loss
-
-            #total_dist_loss = total_dist_loss * 1.
-
-            total_loss = total_ce_loss + total_dist_loss
+            total_loss = ce_loss + dist_loss
             loss_metric.update_state(total_loss)
 
-            return total_ce_loss, total_dist_loss, total_loss, num_positives
+            return ce_loss, dist_loss, total_loss
 
         def eval_step(filenames, images, bboxes, true_labels):
             logits = model(images, training=False)
-            ce_loss, dist_loss, total_loss, num_positive = calculate_metrics(logits, bboxes, true_labels, eval_loss_metric, eval_accuracy_metric, eval_distance_metric)
-            return ce_loss, dist_loss, total_loss, num_positive
+            ce_loss, dist_loss, total_loss = calculate_metrics(logits, bboxes, true_labels, eval_loss_metric, eval_accuracy_metric, eval_distance_metric)
+            return ce_loss, dist_loss, total_loss
 
         def train_step(filenames, images, bboxes, true_labels):
             with tf.GradientTape() as tape:
                 logits = model(images, training=True)
-                ce_loss, dist_loss, total_loss, num_positive = calculate_metrics(logits, bboxes, true_labels, loss_metric, accuracy_metric, distance_metric)
+                ce_loss, dist_loss, total_loss = calculate_metrics(logits, bboxes, true_labels, loss_metric, accuracy_metric, distance_metric)
 
             #variables = model.trainable_variables + base_model.trainable_variables
             variables = model.trainable_variables
@@ -306,7 +276,7 @@ def train():
 
             global_step.assign_add(1)
 
-            return ce_loss, dist_loss, total_loss, num_positive
+            return ce_loss, dist_loss, total_loss
 
         @tf.function
         def distributed_train_step_dummy(args):
@@ -319,21 +289,19 @@ def train():
 
         @tf.function
         def distributed_train_step(args):
-            pr_ce_losses, pr_dist_losses, pr_total_losses, num_positive = dstrategy.experimental_run_v2(train_step, args=args)
+            pr_ce_losses, pr_dist_losses, pr_total_losses = dstrategy.experimental_run_v2(train_step, args=args)
             ce_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_ce_losses, axis=None)
             dist_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_dist_losses, axis=None)
             total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_total_losses, axis=None)
-            num_positive = dstrategy.reduce(tf.distribute.ReduceOp.SUM, num_positive, axis=0)
-            return ce_loss, dist_loss, total_loss, num_positive
+            return ce_loss, dist_loss, total_loss
 
         @tf.function
         def distributed_eval_step(args):
-            pr_ce_losses, pr_dist_losses, pr_total_losses, num_positive = dstrategy.experimental_run_v2(eval_step, args=args)
+            pr_ce_losses, pr_dist_losses, pr_total_losses = dstrategy.experimental_run_v2(eval_step, args=args)
             ce_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_ce_losses, axis=None)
             dist_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_dist_losses, axis=None)
             total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_total_losses, axis=None)
-            num_positive = dstrategy.reduce(tf.distribute.ReduceOp.SUM, num_positive, axis=0)
-            return ce_loss, dist_loss, total_loss, num_positive
+            return ce_loss, dist_loss, total_loss
 
         def run_epoch(name, dataset, step_func, max_steps):
             losses = []
@@ -349,10 +317,10 @@ def train():
                     images = tf.transpose(images, [0, 3, 1, 2])
 
 
-                ce_loss, dist_loss, total_loss, num_positive = step_func(args=(filenames, images, bboxes, true_labels))
-                if name == 'train':
-                    logger.info('{}: step: {}/{}, num_positive: {}, ce_loss: {:.2e}, dist_loss: {:.2e}, total_loss: {:.2e}, accuracy: {:.4f}, distance: {:.4f}'.format(
-                        name, step, max_steps, num_positive, ce_loss, dist_loss, total_loss, accuracy_metric.result(), distance_metric.result()))
+                ce_loss, dist_loss, total_loss = step_func(args=(filenames, images, bboxes, true_labels))
+                if name == 'train' and step % 100 == 0:
+                    logger.info('{}: step: {}/{}, ce_loss: {:.2e}, dist_loss: {:.2e}, total_loss: {:.2e}, accuracy: {:.4f}, distance: {:.4f}'.format(
+                        name, step, max_steps, ce_loss, dist_loss, total_loss, accuracy_metric.result(), distance_metric.result()))
 
                 step += 1
                 if step >= max_steps:
