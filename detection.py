@@ -7,14 +7,6 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.python.client import device_lib
 
-import anchor
-import coco
-import image as image_draw
-import loss
-import map_iter
-import validate
-import ssd
-
 logger = logging.getLogger('detection')
 logger.propagate = False
 logger.setLevel(logging.INFO)
@@ -22,6 +14,15 @@ __fmt = logging.Formatter(fmt='%(asctime)s.%(msecs)03d: %(message)s', datefmt='%
 __handler = logging.StreamHandler()
 __handler.setFormatter(__fmt)
 logger.addHandler(__handler)
+
+
+import anchor
+import coco
+import image as image_draw
+import loss
+import map_iter
+import validate
+import ssd
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--train_coco_annotations', type=str, required=True, help='Path to MS COCO dataset: annotations json file')
@@ -212,15 +213,22 @@ def train():
             coords, classes = logits
 
             positive_indexes = tf.where(true_labels > 0)
-            num_positive = tf.shape(positive_indexes)[0]
+            positive_pred = tf.gather_nd(classes, positive_indexes)
 
+            num_positive = tf.shape(positive_indexes)[0]
             num_negative = tf.cast(FLAGS.negative_positive_rate * tf.cast(num_positive, tf.float32), tf.int32)
 
             # because 'x == 0' condition yields (none, 0) tensor, and ' < 1' yields (none, 2) shape, the same as aboe positive index selection
             negative_indexes = tf.where(true_labels < 1)
-            negative_indexes = tf.random.shuffle(negative_indexes)
-            negative_indexes = negative_indexes[:num_negative]
+            # selecting scores for background class among true backgrounds (true_label == 0)
+            negative_pred_background = tf.gather_nd(classes, negative_indexes)[:, 0]
 
+            sampled_negative_pred_background, sampled_negative_indexes = tf.math.top_k(negative_pred_background, num_negative, sorted=True)
+
+            negative_indexes = tf.gather(negative_indexes, sampled_negative_indexes)
+
+            logger.debug('negative_pred_all: {}, sampled_negative_pred: {}, sampled_negative_indexes: {}, negative_indexes: {}, positive_indexes: {}'.format(
+                negative_pred_all.shape, sampled_negative_pred.shape, sampled_negative_indexes.shape, negative_indexes.shape, positive_indexes.shape))
             new_indexes = tf.concat([positive_indexes, negative_indexes], axis=0)
 
             sampled_true_labels = tf.gather_nd(true_labels, new_indexes)
@@ -266,8 +274,10 @@ def train():
                 logits = model(images, training=True)
                 ce_loss, dist_loss, total_loss = calculate_metrics(logits, bboxes, true_labels, loss_metric, accuracy_metric, full_accuracy_metric, distance_metric)
 
-            #variables = model.trainable_variables + base_model.trainable_variables
             variables = model.trainable_variables
+            if base_model.trainable:
+                variables += base_model.trainable_variables
+
             gradients = tape.gradient(total_loss, variables)
             clip_gradients = []
             for g, v in zip(gradients, variables):
