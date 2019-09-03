@@ -48,11 +48,11 @@ def create_anchors_for_layer(image_size, layer_size, cells_to_side):
 
     for x in range(layer_size):
         for y in range(layer_size):
-            for shift in cells_to_side:
-                x0 = x - shift
-                x1 = x + shift + 1
+            for shift_x, shift_y in cells_to_side:
+                x0 = x - shift_x
+                x1 = x + shift_x + 1
 
-                y0 = y - shift
+                y0 = y - shift_y
                 y1 = y + shift + 1
 
                 if x0 < 0:
@@ -74,8 +74,7 @@ def create_anchors_for_layer(image_size, layer_size, cells_to_side):
 
 def create_anchors(image_size, feature_shapes):
     anchors = []
-    cells_to_side = [0., 0.5, math.sqrt(2), 2.5]
-    #cells_to_side = [0.]
+    cells_to_side = [(0, 0), (0.5, 0.5), (1.5, 1.5), (2.5, 2.5), (0, 0.5), (0, 1), (0, 1.5), (0, 2), (0.5, 0), (1, 0), (1.5, 0), (2, 0)]
 
     anchor_layers = []
     num_anchors = 0
