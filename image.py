@@ -34,11 +34,12 @@ def draw_text(ax, xy, txt, sz=14):
 
 def bb_hw(a):
     # returned coordinates must be x, y, w, h
-    # this is the case for the original COCO dataset
-    # below is a line for the proceseed and converted format which is x0, y0, x1, y1
+    #
+    # down below is a line for the proceseed and converted format which is x0, y0, x1, y1
+    # this is the case for the original COCO dataset (?)
     #return a
 
-    # preprocessed and converted to x0, y0, x1, y1
+    # x0, y0, x1, y1 -> x0, y0, w, h
     return np.array([a[0], a[1], a[2]-a[0]+1, a[3]-a[1]+1])
 
 def draw_im(im, ann, dst, cat_names):
@@ -51,6 +52,8 @@ def draw_im(im, ann, dst, cat_names):
 
         if c in cat_names:
             draw_text(ax, b[:2], cat_names[c], sz=16)
+        else:
+            draw_text(ax, b[:2], str(c), sz=16)
 
     plt.savefig(dst)
     plt.close(fig)

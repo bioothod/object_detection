@@ -133,7 +133,7 @@ def run_eval(model, dataset, num_images, num_classes, dst_dir):
 
                 logger.info('{}: bbox: {}, score: {}, cat_id: {}'.format(filename, bb, score, cat_id))
 
-                anns.append((bb, cat_id.numpy(), score.numpy()))
+                anns.append((bb, cat_id.numpy()))
 
             image = image.numpy() * 128 + 128
             image = image.astype(np.uint8)
