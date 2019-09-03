@@ -66,7 +66,7 @@ def per_image_supression(anchors, num_classes):
         selected_coords = tf.gather(coords, index)
         selected_coords = tf.squeeze(selected_coords, 1)
 
-        selected_indexes = tf.image.non_max_suppression(selected_coords, selected_scores, FLAGS.max_ret, score_threshold=FLAGS.min_score)
+        selected_indexes = tf.image.non_max_suppression(selected_coords, selected_scores, FLAGS.max_ret, iou_threshold=0.5)
         selected_coords = tf.gather(selected_coords, selected_indexes)
         selected_scores = tf.gather(selected_scores, selected_indexes)
 
@@ -81,7 +81,7 @@ def per_image_supression(anchors, num_classes):
     ret_scores = tf.concat(ret_scores, 0)
     ret_cat_ids = tf.concat(ret_cat_ids, 0)
 
-    best_scores, best_index = tf.nn.top_k(ret_scores, tf.minimum(FLAGS.max_ret, tf.shape(ret_scores)[0]), sorted=True)
+    best_scores, best_index = tf.math.top_k(ret_scores, tf.minimum(FLAGS.max_ret, tf.shape(ret_scores)[0]), sorted=True)
 
     best_coords = tf.gather(ret_coords, best_index)
     best_cat_ids = tf.gather(ret_cat_ids, best_index)
@@ -113,16 +113,35 @@ def run_eval(model, dataset, num_images, num_classes, dst_dir):
     num_files = 0
     for filenames, images in dataset:
         coords_batch, scores_batch, cat_ids_batch = eval_step_logits(model, images, num_classes)
-        logger.info('batch: shapes: coords: {}, scores: {}, cat_ids: {}'.format(coords_batch.shape, scores_batch.shape, cat_ids_batch.shape))
+        #logger.info('batch: shapes: coords: {}, scores: {}, cat_ids: {}'.format(coords_batch.shape, scores_batch.shape, cat_ids_batch.shape))
 
         num_files += len(filenames)
 
-        for filename, coords, scores, cat_ids in zip(filenames, coords_batch, scores_batch, cat_ids_batch):
-            filename = str(filename)
+        for filename, image, coords, scores, cat_ids in zip(filenames, images, coords_batch, scores_batch, cat_ids_batch):
+            filename = str(filename.numpy(), 'utf8')
 
             logger.info('{}: coords: {}, scores: {}, cat_ids: {}'.format(filename, coords.shape, scores.shape, cat_ids.shape))
 
             anns = []
+
+            for coord, score, cat_id in zip(coords, scores, cat_ids):
+                if score.numpy() == 0:
+                    break
+
+                y0, x0, y1, x1 = coord.numpy()
+                bb = [x0, y0, x1, y1]
+
+                logger.info('{}: bbox: {}, score: {}, cat_id: {}'.format(filename, bb, score, cat_id))
+
+                anns.append((bb, cat_id.numpy(), score.numpy()))
+
+            image = image.numpy() * 128 + 128
+            image = image.astype(np.uint8)
+
+            cat_names = {}
+            dst_filename = os.path.basename(filename)
+            dst_filename = os.path.join(FLAGS.output_dir, dst_filename)
+            image_draw.draw_im(image, anns, dst_filename, cat_names)
 
         return
             #for cat_id in range(num_classes)
@@ -135,7 +154,7 @@ def train():
 
     checkpoint = tf.train.Checkpoint(model=model)
     status = checkpoint.restore(FLAGS.checkpoint)
-    status.assert_existing_objects_matched()
+    status.assert_existing_objects_matched().expect_partial()
     logger.info("Restored from external checkpoint {}".format(FLAGS.checkpoint))
 
 
@@ -148,6 +167,7 @@ def train():
     logger.info('Dataset has been created: num_images: {}, num_classes: {}, model_name: {}'.format(num_images, FLAGS.num_classes, FLAGS.model_name))
 
     logger.info('anchor_layers: {}, feature_shapes: {}'.format(anchor_layers, feature_shapes))
+    os.makedirs(FLAGS.output_dir, exist_ok=True)
     run_eval(model, ds, num_images, FLAGS.num_classes, FLAGS.output_dir)
 
 if __name__ == '__main__':
