@@ -6,7 +6,7 @@ import tensorflow as tf
 
 import efficientnet.tfkeras as efn
 
-logger = logging.getLogger('objdet')
+logger = logging.getLogger('detection')
 logger.setLevel(logging.INFO)
 
 GlobalParams = collections.namedtuple('GlobalParams', [
@@ -129,6 +129,25 @@ class SSD_Head(tf.keras.models.Model):
 
         return x
 
+class TopLayer(tf.keras.layers.Layer):
+    def __init__(self, global_params, num_filters, strides=2):
+        super(TopLayer, self).__init__()
+
+        self.global_params = global_params
+        self.relu_fn = global_params.relu_fn or tf.nn.swish
+
+        self.dropout = tf.keras.layers.Dropout(0.25)
+        self.sc0 = StdConv(self.global_params, num_filters, strides=1)
+        self.sc1 = StdConv(self.global_params, num_filters, strides=strides)
+
+    def call(self, inputs, training=True):
+        x = self.relu_fn(inputs)
+        x = self.dropout(x)
+        x = self.sc0(x)
+        x = self.sc1(x)
+
+        return x
+
 def create_base_model(dtype, model_name):
     model_map = {
         'efficientnet-b0': (efn.EfficientNetB0, 224),
@@ -145,11 +164,27 @@ def create_base_model(dtype, model_name):
     base_model = base_model(include_top=False)
     base_model.trainable = False
 
-    #layers = ('top_activation', 'block6a_expand_activation', 'block4a_expand_activation', 'block3a_expand_activation', 'block2a_expand_activation')
-    layer_names = ('top_activation', 'block6a_expand_activation', 'block4a_expand_activation', 'block3a_expand_activation')
+    global_params = GlobalParams(
+        data_format='channels_last',
+        batch_norm_momentum=0.99,
+        batch_norm_epsilon=1e-8,
+        relu_fn=tf.nn.swish,
+    )
+
+    layer_names = ['block3a_expand_activation', 'block4a_expand_activation',  'block6a_expand_activation', 'top_activation']
     layers = [base_model.get_layer(name).output for name in layer_names]
+
+    if False:
+        top_input = layers[-1]
+        for _ in range(4):
+            t = TopLayer(global_params, int(top_input.shape[-1] * 1.5), 2)(top_input)
+            layers.append(t)
+            layer_names.append(t.name)
+
+            top_input = t
+
     down_stack = tf.keras.Model(inputs=base_model.input, outputs=layers)
-    down_stack.trainable = False
+    #down_stack.trainable = False
 
     inputs = tf.keras.layers.Input(shape=(image_size, image_size, 3))
     features = down_stack(inputs)
@@ -177,15 +212,19 @@ def create_model(down_stack, image_size, num_classes, anchor_layers, feature_sha
         num_anchors_per_output = int(num_anchor_boxes_for_layer / (shape[0] * shape[0]))
         ssd_head = SSD_Head(global_params, num_anchors_per_output, num_classes)
         coords, classes = ssd_head(ft)
-        #coords = tf.reshape(coords, [-1, num_anchor_boxes_for_layer, 4])
-        #classes = tf.reshape(coords, [-1, num_anchor_boxes_for_layer, num_classes])
+
+        logger.info('model: feature: {}/{}, num_anchor_boxes_for_layer: {}, shape: {}, num_anchors_per_output: {}, coords: {}, classes: {}'.format(
+            ft.name, ft.shape,
+            num_anchor_boxes_for_layer, shape, num_anchors_per_output,
+            coords.shape, classes.shape))
+
         ssd_stack_coords.append(coords)
         ssd_stack_classes.append(classes)
 
-    #logger.info('stack: {}'.format(ssd_stack))
     output_classes = tf.concat(ssd_stack_classes, axis=1)
     output_coords = tf.concat(ssd_stack_coords, axis=1)
-    logger.info('output: coords: {}, classes: {}'.format(output_coords, output_classes))
+
+    logger.info('model: output_coords: {}, output_classes: {}'.format(output_coords, output_classes))
 
     model = tf.keras.Model(inputs=inputs, outputs=[output_coords, output_classes])
     return model
