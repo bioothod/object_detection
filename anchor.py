@@ -53,7 +53,7 @@ def create_anchors_for_layer(image_size, layer_size, cells_to_side):
                 x1 = x + shift_x + 1
 
                 y0 = y - shift_y
-                y1 = y + shift + 1
+                y1 = y + shift_y + 1
 
                 if x0 < 0:
                     x0 = 0
