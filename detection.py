@@ -183,10 +183,12 @@ def train():
 
         loss_metric = tf.keras.metrics.Mean(name='train_loss')
         accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='train_accuracy')
+        full_accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='train_full_accuracy')
         distance_metric = tf.keras.metrics.MeanAbsoluteError(name='train_dist')
         iou_metric = loss.IOUScore(threshold=0.5, name='train_iou')
 
         eval_loss_metric = tf.keras.metrics.Mean(name='eval_loss')
+        eval_full_accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='eval_full_accuracy')
         eval_accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='eval_accuracy')
         eval_distance_metric = tf.keras.metrics.MeanAbsoluteError(name='eval_dist')
         eval_iou_metric = loss.IOUScore(threshold=0.5, name='eval_iou')
@@ -194,17 +196,19 @@ def train():
         def reset_metrics():
             loss_metric.reset_states()
             accuracy_metric.reset_states()
+            full_accuracy_metric.reset_states()
             distance_metric.reset_states()
             iou_metric.reset_states()
 
             eval_loss_metric.reset_states()
             eval_accuracy_metric.reset_states()
+            eval_full_accuracy_metric.reset_states()
             eval_distance_metric.reset_states()
             eval_iou_metric.reset_states()
 
         ce_loss_object = loss.CategoricalFocalLoss(reduction=tf.keras.losses.Reduction.NONE)
 
-        def calculate_metrics(logits, bboxes, true_labels, loss_metric, accuracy_metric, distance_metric):
+        def calculate_metrics(logits, bboxes, true_labels, loss_metric, accuracy_metric, full_accuracy_metric, distance_metric):
             coords, classes = logits
 
             positive_indexes = tf.where(true_labels > 0)
@@ -235,6 +239,7 @@ def train():
             dist_loss = smooth_l1_loss(sampled_true_bboxes - sampled_pred_coords)
             dist_loss = tf.nn.compute_average_loss(dist_loss, global_batch_size=FLAGS.batch_size)
 
+            full_accuracy_metric.update_state(y_true=sampled_true_labels, y_pred=sampled_pred_classes)
             sampled_true_labels = tf.gather_nd(true_labels, positive_indexes)
             sampled_pred_classes = tf.gather_nd(classes, positive_indexes)
             accuracy_metric.update_state(y_true=sampled_true_labels, y_pred=sampled_pred_classes)
@@ -253,13 +258,13 @@ def train():
 
         def eval_step(filenames, images, bboxes, true_labels):
             logits = model(images, training=False)
-            ce_loss, dist_loss, total_loss = calculate_metrics(logits, bboxes, true_labels, eval_loss_metric, eval_accuracy_metric, eval_distance_metric)
+            ce_loss, dist_loss, total_loss = calculate_metrics(logits, bboxes, true_labels, eval_loss_metric, eval_accuracy_metric, eval_full_accuracy_metric, eval_distance_metric)
             return ce_loss, dist_loss, total_loss
 
         def train_step(filenames, images, bboxes, true_labels):
             with tf.GradientTape() as tape:
                 logits = model(images, training=True)
-                ce_loss, dist_loss, total_loss = calculate_metrics(logits, bboxes, true_labels, loss_metric, accuracy_metric, distance_metric)
+                ce_loss, dist_loss, total_loss = calculate_metrics(logits, bboxes, true_labels, loss_metric, accuracy_metric, full_accuracy_metric, distance_metric)
 
             #variables = model.trainable_variables + base_model.trainable_variables
             variables = model.trainable_variables
@@ -319,8 +324,8 @@ def train():
 
                 ce_loss, dist_loss, total_loss = step_func(args=(filenames, images, bboxes, true_labels))
                 if name == 'train' and step % 100 == 0:
-                    logger.info('{}: step: {}/{}, ce_loss: {:.2e}, dist_loss: {:.2e}, total_loss: {:.2e}, accuracy: {:.4f}, distance: {:.4f}'.format(
-                        name, step, max_steps, ce_loss, dist_loss, total_loss, accuracy_metric.result(), distance_metric.result()))
+                    logger.info('{}: step: {}/{}, ce_loss: {:.2e}, dist_loss: {:.2e}, total_loss: {:.2e}, accuracy: {:.4f}/{:.4f}, distance: {:.4f}'.format(
+                        name, step, max_steps, ce_loss, dist_loss, total_loss, accuracy_metric.result(), full_accuracy_metric.result(), distance_metric.result()))
 
                 step += 1
                 if step >= max_steps:
@@ -351,10 +356,10 @@ def train():
             train_steps = run_epoch('train', train_dataset, distributed_train_step, steps_per_epoch)
             eval_steps = run_epoch('eval', eval_dataset, distributed_eval_step, steps_per_eval)
 
-            logger.info('epoch: {}, train: steps: {}, accuracy: {:.4f}, distance: {:.4f}, loss: {:.2e}, eval: accuracy: {:.4f}, distance: {:.4f}, loss: {:.2e}, lr: {:.2e}'.format(
+            logger.info('epoch: {}, train: steps: {}, accuracy: {:.4f}/{:.4f}, distance: {:.4f}, loss: {:.2e}, eval: accuracy: {:.4f}/{:.4f}, distance: {:.4f}, loss: {:.2e}, lr: {:.2e}'.format(
                 epoch, global_step.numpy(),
-                accuracy_metric.result(), distance_metric.result(), loss_metric.result(),
-                eval_accuracy_metric.result(), eval_distance_metric.result(), eval_loss_metric.result(),
+                accuracy_metric.result(), full_accuracy_metric.result(), distance_metric.result(), loss_metric.result(),
+                eval_accuracy_metric.result(), eval_full_accuracy_metric.result(), eval_distance_metric.result(), eval_loss_metric.result(),
                 learning_rate.numpy()))
 
             eval_acc = eval_accuracy_metric.result()
