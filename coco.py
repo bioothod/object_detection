@@ -156,13 +156,10 @@ def get_training_augmentation(image_size, bbox_params):
 
         A.OneOf([
             A.Compose([
-                A.ShiftScaleRotate(scale_limit=0.1, rotate_limit=0, shift_limit=0.1, p=0.5, border_mode=0),
-
-                A.Resize(height=int(image_size*1.6), width=int(image_size*1.6), interpolation=cv2.INTER_LINEAR, always_apply=True),
+                A.Resize(height=int(image_size*1.4), width=int(image_size*1.4), interpolation=cv2.INTER_LINEAR, always_apply=True),
                 A.RandomCrop(height=image_size, width=image_size, always_apply=True),
 
                 A.IAAAdditiveGaussianNoise(p=0.1),
-                A.IAAPerspective(p=0.1),
 
                 A.OneOf(
                     [
@@ -191,6 +188,7 @@ def get_training_augmentation(image_size, bbox_params):
                 ),
                 A.Lambda(mask=round_clip_0_1),
             ]),
+
             A.Compose([
                 A.Resize(height=int(image_size*1.2), width=int(image_size*1.2), interpolation=cv2.INTER_LINEAR, always_apply=True),
                 A.RandomCrop(height=image_size, width=image_size, always_apply=True),
@@ -203,6 +201,7 @@ def get_training_augmentation(image_size, bbox_params):
                     p=0.5,
                 ),
             ]),
+
             A.Compose([
                 A.Resize(height=int(image_size*1.1), width=int(image_size*1.1), interpolation=cv2.INTER_LINEAR, always_apply=True),
                 A.RandomCrop(height=image_size, width=image_size, always_apply=True),
@@ -352,7 +351,7 @@ class COCO_Iterable:
             (time.time() - start_time) * 1000.))
         return filename, image_id, image, true_bboxes, true_labels, true_orig_labels
 
-def create_coco_iterable(image_size, ann_path, data_dir, logger, is_training, np_anchor_boxes, np_anchor_areas, min_area=0., min_visibility=0.15):
+def create_coco_iterable(image_size, ann_path, data_dir, logger, is_training, np_anchor_boxes, np_anchor_areas, min_area=0., min_visibility=0.5):
     bbox_params = A.BboxParams(
             format='coco',
             min_area=min_area,
