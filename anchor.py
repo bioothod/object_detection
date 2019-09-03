@@ -3,7 +3,7 @@ import math
 
 import numpy as np
 
-logger = logging.getLogger('objdet')
+logger = logging.getLogger('detection')
 logger.setLevel(logging.INFO)
 
 def calc_iou(box, box_area, boxes, area):
