@@ -7,10 +7,10 @@ logger = logging.getLogger('objdet')
 logger.setLevel(logging.INFO)
 
 def calc_iou(box, box_area, boxes, area):
-    xx1 = np.maximum(box[0], boxes[:, 0])
-    yy1 = np.maximum(box[1], boxes[:, 1])
-    xx2 = np.minimum(box[2], boxes[:, 2])
-    yy2 = np.minimum(box[3], boxes[:, 3])
+    xx1 = np.maximum(box[1], boxes[:, 1])
+    yy1 = np.maximum(box[0], boxes[:, 0])
+    xx2 = np.minimum(box[3], boxes[:, 3])
+    yy2 = np.minimum(box[2], boxes[:, 2])
 
     w = np.maximum(0, xx2 - xx1 + 1)
     h = np.maximum(0, yy2 - yy1 + 1)
@@ -27,21 +27,21 @@ class Anchor:
         self.layer_size = layer_size
 
         self.bbox = self.convert_to_bbox()
-        x0, y0, x1, y1 = self.bbox
+        y0, x0, y1, x1 = self.bbox
         self.bbox_area = (x1 - x0 + 1) * (y1 - y0 + 1)
 
     def convert_to_bbox(self):
         scale = self.image_size / self.layer_size
 
-        x0, y0 = self.c0
-        x1, y1 = self.c1
+        y0, x0 = self.c0
+        y1, x1 = self.c1
 
         x0 *= scale
         y0 *= scale
         x1 *= scale
         y1 *= scale
 
-        return [x0, y0, x1, y1]
+        return [y0, x0, y1, x1]
 
 def create_anchors_for_layer(image_size, layer_size, cells_to_side):
     anchor_boxes, anchor_areas = [], []
@@ -65,7 +65,7 @@ def create_anchors_for_layer(image_size, layer_size, cells_to_side):
                 if y1 > layer_size:
                     y1 = layer_size
 
-                a = Anchor((x0, y0), (x1, y1), image_size, layer_size)
+                a = Anchor((y0, x0), (y1, x1), image_size, layer_size)
 
                 anchor_boxes.append(a.bbox)
                 anchor_areas.append(a.bbox_area)

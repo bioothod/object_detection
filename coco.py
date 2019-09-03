@@ -259,8 +259,6 @@ class COCO_Iterable:
         for cat_id in self.coco.cats.keys():
             self.cats[cat_id] = len(self.cats)
 
-        self.orig_images = {}
-
     def num_classes(self):
         return self.coco.num_classes()
 
@@ -275,13 +273,10 @@ class COCO_Iterable:
 
         filename, image_id, anns = self.image_tuples[i]
 
-        image = self.orig_images.get(i, None)
-        if image is None:
-            image = cv2.imread(filename)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            image = image.astype(np.uint8)
+        image = cv2.imread(filename)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = image.astype(np.uint8)
 
-            self.orig_images[i] = image
 
         bboxes = []
         cat_ids = []
@@ -319,7 +314,7 @@ class COCO_Iterable:
         true_labels = np.zeros((self.np_anchor_boxes.shape[0]))
         true_orig_labels = np.zeros((self.np_anchor_boxes.shape[0]))
 
-        def update_true_arrays(iou, cat_id, max_iou_threshold):
+        def update_true_arrays(filename, image_id, image, box, iou, cat_id, max_iou_threshold):
             converted_cat_id = self.cats[cat_id]
 
             idx = iou > max_iou_threshold
@@ -341,16 +336,16 @@ class COCO_Iterable:
         for bb, cat_id in zip(bboxes, cat_ids):
             x0, y0, x1, y1 = [bb[0], bb[1], bb[0]+bb[2], bb[1]+bb[3]]
 
-            box = np.array([x0, y0, x1, y1])
+            box = np.array([y0, x0, y1, x1])
             box_area = (x1 - x0 + 1) * (y1 - y0 + 1)
             iou = anchor.calc_iou(box, box_area, self.np_anchor_boxes, self.np_anchor_areas)
 
             assert iou.shape == max_ious.shape
 
-            num_p = update_true_arrays(iou, cat_id, 0.5)
+            num_p = update_true_arrays(filename, image_id, image, box, iou, cat_id, 0.5)
             if num_p == 0:
                 max_iou = np.max(iou)
-                num_p = update_true_arrays(iou, cat_id, max_iou * 0.8)
+                num_p = update_true_arrays(filename, image_id, image, box, iou, cat_id, max_iou * 0.8)
 
         self.logger.debug('{}: image_id: {}, image: {}, bboxes: {}, labels: {}, aug bboxes: {} -> {}, num_positive: {}, num_negatives: {}, time: {:.1f} ms'.format(
             filename, image_id, image.shape, true_bboxes.shape, true_labels.shape, len(anns), len(bboxes),
