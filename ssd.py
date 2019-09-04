@@ -151,14 +151,16 @@ def create_base_model(dtype, model_name):
     base_model = base_model(include_top=False)
     base_model.trainable = False
 
-    layer_names = ['block4a_expand_activation', 'block6a_expand_activation', 'top_activation']
+    layer_names = ['top_activation']
     layers = [base_model.get_layer(name).output for name in layer_names]
 
-    down_stack = tf.keras.Model(inputs=base_model.input, outputs=layers)
+    down_stack = tf.keras.Model(inputs=base_model.input, outputs=[layers])
     #down_stack.trainable = False
 
     inputs = tf.keras.layers.Input(shape=(image_size, image_size, 3))
     features = down_stack(inputs)
+
+    logger.info('layers: {}, features: {}'.format(layers, features))
 
     feature_shapes = []
     for name, l in zip(layer_names, features):
@@ -175,8 +177,15 @@ def create_model(dtype, model_name, num_classes):
             (1, 0.3), (1, 0.5), (1, 0.7),
             (0.3, 1), (0.5, 1), (0.7, 1),
     ]
-    scales = [1/1.5, 1]
-    num_anchors_per_output = len(cells_to_side) * len(scales)
+    shifts = [
+            (-0.1, 0), (0.1, 0), (0, 0),
+            (-0.1, 0.1), (0.1, 0.1), (0, 0.1),
+            (-0.1, -0.1), (0.1, -0.1), (0, -0.1),
+            (-0.2, 0), (0.2, 0), (0, 0),
+            (-0.2, 0.2), (0.2, 0.2), (0, 0.2),
+            (-0.2, -0.2), (0.2, -0.2), (0, -0.2),
+    ]
+    num_anchors_per_output = len(cells_to_side) * len(shifts)
 
     down_stack, image_size, feature_shapes = create_base_model(dtype, model_name)
 
@@ -194,7 +203,7 @@ def create_model(dtype, model_name, num_classes):
     ssd_stack_coords, ssd_stack_classes = [], []
     for ft in features:
         layer_size = ft.shape[1]
-        anchor_boxes_for_layer, anchor_areas_for_layer = anchor.create_anchors_for_layer(image_size, layer_size, cells_to_side, scales)
+        anchor_boxes_for_layer, anchor_areas_for_layer = anchor.create_anchors_for_layer(image_size, layer_size, cells_to_side, shifts)
 
         anchor_boxes += anchor_boxes_for_layer
         anchor_areas += anchor_areas_for_layer
@@ -210,8 +219,12 @@ def create_model(dtype, model_name, num_classes):
         ssd_stack_coords.append(coords)
         ssd_stack_classes.append(classes)
 
-    output_classes = tf.concat(ssd_stack_classes, axis=1)
-    output_coords = tf.concat(ssd_stack_coords, axis=1)
+    if len(ssd_stack_classes) == 1:
+        output_classes = ssd_stack_classes[0]
+        output_coords = ssd_stack_coords[0]
+    else:
+        output_classes = tf.concat(ssd_stack_classes, axis=1)
+        output_coords = tf.concat(ssd_stack_coords, axis=1)
 
     anchor_boxes = np.array(anchor_boxes)
     anchor_areas = np.array(anchor_areas)

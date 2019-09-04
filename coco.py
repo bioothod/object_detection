@@ -362,7 +362,7 @@ class COCO_Iterable:
 
         good_bboxes = []
         for bb, cat_id in zip(bboxes, cat_ids):
-            if bb[2] <= 3 or bb[3] <= 3:
+            if bb[2] <= 6 or bb[3] <= 6:
                 continue
 
             good_bboxes.append(bb)
