@@ -254,8 +254,6 @@ def train():
 
             negative_indexes = tf.gather(negative_indexes, sampled_negative_indexes)
 
-            logger.debug('negative_pred_all: {}, sampled_negative_pred: {}, sampled_negative_indexes: {}, negative_indexes: {}, positive_indexes: {}'.format(
-                negative_pred_all.shape, sampled_negative_pred.shape, sampled_negative_indexes.shape, negative_indexes.shape, positive_indexes.shape))
             new_indexes = tf.concat([positive_indexes, negative_indexes], axis=0)
 
             sampled_true_labels = tf.gather_nd(true_labels, new_indexes)
