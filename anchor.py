@@ -19,30 +19,6 @@ def calc_iou(box, box_area, boxes, area):
     ovr = inter / (box_area + area - inter)
     return ovr
 
-class Anchor:
-    def __init__(self, c0, c1, image_size, layer_size):
-        self.c0 = c0
-        self.c1 = c1
-        self.image_size = image_size
-        self.layer_size = layer_size
-
-        self.bbox = self.convert_to_bbox()
-        y0, x0, y1, x1 = self.bbox
-        self.bbox_area = (x1 - x0 + 1) * (y1 - y0 + 1)
-
-    def convert_to_bbox(self):
-        scale = self.image_size / self.layer_size
-
-        y0, x0 = self.c0
-        y1, x1 = self.c1
-
-        x0 *= scale
-        y0 *= scale
-        x1 *= scale
-        y1 *= scale
-
-        return [y0, x0, y1, x1]
-
 def create_anchors_for_layer(image_size, layer_size, cells_to_side):
     anchor_boxes, anchor_areas = [], []
 
@@ -65,16 +41,25 @@ def create_anchors_for_layer(image_size, layer_size, cells_to_side):
                 if y1 > layer_size:
                     y1 = layer_size
 
-                a = Anchor((y0, x0), (y1, x1), image_size, layer_size)
+                scale = image_size / layer_size
+                x0 *= scale
+                y0 *= scale
+                x1 *= scale
+                y1 *= scale
 
-                anchor_boxes.append(a.bbox)
-                anchor_areas.append(a.bbox_area)
+                bbox = [y0, x0, y1, x1]
+                area = (x1 - x0 + 1) * (y1 - y0 + 1)
+
+                anchor_boxes.append(bbox)
+                anchor_areas.append(area)
 
     return anchor_boxes, anchor_areas
 
 def create_anchors(image_size, feature_shapes):
     anchors = []
+    #cells_to_side = [(0, 0)]
     cells_to_side = [(0, 0), (0.5, 0.5), (1.5, 1.5), (2.5, 2.5), (0, 0.5), (0, 1), (0, 1.5), (0, 2), (0.5, 0), (1, 0), (1.5, 0), (2, 0)]
+    #cells_to_side = [(0, 0), (0, 0.5), (0, 1), (0, 1.5), (0.5, 0), (1, 0), (1.5, 0)]
 
     anchor_layers = []
     num_anchors = 0
