@@ -25,14 +25,14 @@ parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel 
 parser.add_argument('--num_classes', type=int, required=True, help='Number of the output classes in the model')
 parser.add_argument('--max_ret', type=int, default=100, help='Maximum number of returned boxes')
 parser.add_argument('--min_score', type=float, default=0.7, help='Minimal class probability')
+parser.add_argument('--min_size', type=float, default=10, help='Minimal size of the bounding box')
+parser.add_argument('--iou_threshold', type=float, default=0.45, help='Minimal IoU threshold for non-maximum suppression')
 parser.add_argument('--output_dir', type=str, required=True, help='Path to directory, where images will be stored')
 parser.add_argument('--checkpoint', type=str, required=True, help='Load model weights from this file')
 parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='Model name')
 parser.add_argument('--data_format', type=str, default='channels_last', choices=['channels_first', 'channels_last'], help='Data format: [channels_first, channels_last]')
 parser.add_argument('filenames', type=str, nargs='*', help='Numeric label : file path')
 FLAGS = parser.parse_args()
-
-min_size = 10
 
 def tf_read_image(filename, image_size, dtype):
     image = tf.io.read_file(filename)
@@ -61,7 +61,6 @@ def non_max_suppression(coords, scores, iou_threshold):
 
     pick = tf.TensorArray(tf.int32, size=max_idx)
     written = 0
-    logger.info('coords: {}, scores: {}, idxs: {}, area: {}, xmin: {}, pick: {}'.format(coords.shape, scores.shape, idxs, area, xmin, pick.size()))
 
     for idx in range(max_idx):
         last_idx = tf.shape(idxs)[0] - 1
@@ -142,15 +141,21 @@ def per_image_supression(anchors, num_classes):
         selected_coords = tf.gather(coords, index)
         selected_coords = tf.squeeze(selected_coords, 1)
 
-        #y0, x0, y1, x1 = tf.split(selected_coords, num_or_size_splits=4)
-        #index = tf.where((y1 - y0) < min_size or (x1 - x0) < min_size)
-        #selected_scores = tf.gather(selected_scores, index)
-        #selected_coords = tf.gather(selected_coords, index)
+        y0, x0, y1, x1 = tf.split(selected_coords, num_or_size_splits=4, axis=1)
+        x0 = tf.squeeze(x0, 1)
+        y0 = tf.squeeze(y0, 1)
+        x1 = tf.squeeze(x1, 1)
+        y1 = tf.squeeze(y1, 1)
 
+        index = tf.where(tf.logical_and((y1 - y0) >= FLAGS.min_size, (x1 - x0) >= FLAGS.min_size))
+        selected_scores = tf.gather(selected_scores, index)
+        selected_scores = tf.squeeze(selected_scores, 1)
+        selected_coords = tf.gather(selected_coords, index)
+        selected_coords = tf.squeeze(selected_coords, 1)
 
-        #selected_indexes = tf.image.non_max_suppression(selected_coords, selected_scores, FLAGS.max_ret, iou_threshold=0.45)
+        #selected_indexes = tf.image.non_max_suppression(selected_coords, selected_scores, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
 
-        selected_indexes = non_max_suppression(selected_coords, selected_scores, iou_threshold=0.45)
+        selected_indexes = non_max_suppression(selected_coords, selected_scores, iou_threshold=FLAGS.iou_threshold)
         selected_coords = tf.gather(selected_coords, selected_indexes)
         selected_scores = tf.gather(selected_scores, selected_indexes)
 
