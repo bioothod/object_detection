@@ -41,6 +41,82 @@ def tf_read_image(filename, image_size, dtype):
     image = preprocess.prepare_image_for_evaluation(image, image_size, image_size, dtype)
     return filename, image
 
+def non_max_suppression(coords, scores, iou_threshold):
+    ymin, xmin, ymax, xmax = tf.split(coords, num_or_size_splits=4, axis=1)
+
+    xmin = tf.squeeze(xmin, 1)
+    ymin = tf.squeeze(ymin, 1)
+    xmax = tf.squeeze(xmax, 1)
+    ymax = tf.squeeze(ymax, 1)
+
+    #---------------------------------------------------------------------------
+    # Compute the area of each box and sort the indices by confidence level
+    # (lowest confidence first first).
+    #---------------------------------------------------------------------------
+    area = (xmax-xmin+1) * (ymax-ymin+1)
+
+    idxs = tf.argsort(scores, direction='ASCENDING', stable=False)
+
+    max_idx = tf.shape(idxs)[0]
+
+    pick = tf.TensorArray(tf.int32, size=max_idx)
+    written = 0
+    logger.info('coords: {}, scores: {}, idxs: {}, area: {}, xmin: {}, pick: {}'.format(coords.shape, scores.shape, idxs, area, xmin, pick.size()))
+
+    for idx in range(max_idx):
+        last_idx = tf.shape(idxs)[0] - 1
+        if idx >= last_idx:
+            break
+
+        #-----------------------------------------------------------------------
+        # Grab the last index (ie. the most confident detection), remove it from
+        # the list of indices to process, and put it on the list of picks
+        #-----------------------------------------------------------------------
+        i = idxs[last_idx]
+        idxs = idxs[:last_idx]
+
+        pick = pick.write(idx, i)
+        written += 1
+        suppress = []
+
+        xmin_idx = tf.gather(xmin, idxs)
+        xmax_idx = tf.gather(xmax, idxs)
+        ymin_idx = tf.gather(ymin, idxs)
+        ymax_idx = tf.gather(ymax, idxs)
+
+        xmin_i = tf.gather(xmin, i)
+        xmax_i = tf.gather(xmax, i)
+        ymin_i = tf.gather(ymin, i)
+        ymax_i = tf.gather(ymax, i)
+
+        #-----------------------------------------------------------------------
+        # Figure out the intersection with the remaining windows
+        #-----------------------------------------------------------------------
+        xxmin = tf.maximum(xmin_i, xmin_idx)
+        xxmax = tf.minimum(xmax_i, xmax_idx)
+        yymin = tf.maximum(ymin_i, ymin_idx)
+        yymax = tf.minimum(ymax_i, ymax_idx)
+
+        w = tf.maximum(0., xxmax-xxmin+1)
+        h = tf.maximum(0., yymax-yymin+1)
+        intersection = w*h
+
+        #-----------------------------------------------------------------------
+        # Compute IOU and suppress indices with IOU higher than a threshold
+        #-----------------------------------------------------------------------
+        area_i = tf.gather(area, i)
+        area_idx = tf.gather(area, idxs)
+        union = area_i + area_idx - intersection
+        iou = intersection/union
+        nonoverlap_index = tf.where(iou <= iou_threshold)
+        nonoverlap_index = tf.squeeze(nonoverlap_index, 1)
+
+        idxs = tf.gather(idxs, nonoverlap_index)
+
+    pick = pick.stack()[:written]
+    return pick
+    #return tf.gather(coords, pick), tf.gather(scores, pick)
+
 def per_image_supression(anchors, num_classes):
     coords, classes = anchors
     classes = tf.nn.softmax(classes, axis=-1)
@@ -66,7 +142,15 @@ def per_image_supression(anchors, num_classes):
         selected_coords = tf.gather(coords, index)
         selected_coords = tf.squeeze(selected_coords, 1)
 
-        selected_indexes = tf.image.non_max_suppression(selected_coords, selected_scores, FLAGS.max_ret, iou_threshold=0.5)
+        #y0, x0, y1, x1 = tf.split(selected_coords, num_or_size_splits=4)
+        #index = tf.where((y1 - y0) < min_size or (x1 - x0) < min_size)
+        #selected_scores = tf.gather(selected_scores, index)
+        #selected_coords = tf.gather(selected_coords, index)
+
+
+        #selected_indexes = tf.image.non_max_suppression(selected_coords, selected_scores, FLAGS.max_ret, iou_threshold=0.5)
+
+        selected_indexes = non_max_suppression(selected_coords, selected_scores, iou_threshold=0.5)
         selected_coords = tf.gather(selected_coords, selected_indexes)
         selected_scores = tf.gather(selected_scores, selected_indexes)
 
