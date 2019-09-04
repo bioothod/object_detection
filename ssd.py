@@ -6,6 +6,8 @@ import tensorflow as tf
 
 import efficientnet.tfkeras as efn
 
+import anchor
+
 logger = logging.getLogger('detection')
 logger.setLevel(logging.INFO)
 
@@ -61,10 +63,6 @@ class StdConv(tf.keras.layers.Layer):
     def call(self, inputs, training=True):
         return self.dropout0(self.bn0(self.c0(inputs), training=training))
 
-def flaten_conv(x, k):
-    shape = tf.shape(x)
-    return tf.reshape(x, (-1, shape[1] * shape[2] * k, shape[3] // k))
-
 class OutConv(tf.keras.layers.Layer):
     def __init__(self, global_params, k, num_classes):
         super(OutConv, self).__init__()
@@ -96,13 +94,21 @@ class OutConv(tf.keras.layers.Layer):
             use_bias=False,
             activation='relu')
 
-    def call(self, inputs, training=True):
-        return [flaten_conv(self.loc_out(inputs), self.k),
-                flaten_conv(self.class_out(inputs), self.k)]
-    def call1(self, inputs, training=True):
-        return self.loc_out(inputs), self.class_out(inputs)
+    def flatten_anchors(self, x):
+        return tf.reshape(x, [-1, x.shape[1] * x.shape[2] * self.k, x.shape[3] // self.k])
 
-class SSD_Head(tf.keras.models.Model):
+    def call(self, inputs, training=True):
+        coords = self.loc_out(inputs)
+        classes = self.class_out(inputs)
+
+        flatten_coords = self.flatten_anchors(coords)
+        flatten_classes = self.flatten_anchors(classes)
+
+        #logger.info('output conv: coords: {} -> {}, classes: {} -> {}'.format(coords.shape, flatten_coords.shape, classes.shape, flatten_classes.shape))
+
+        return [flatten_coords, flatten_classes]
+
+class SSD_Head(tf.keras.layers.Layer):
     def __init__(self, global_params, k, num_classes):
         super(SSD_Head, self).__init__()
 
@@ -129,25 +135,6 @@ class SSD_Head(tf.keras.models.Model):
 
         return x
 
-class TopLayer(tf.keras.layers.Layer):
-    def __init__(self, global_params, num_filters, strides=2):
-        super(TopLayer, self).__init__()
-
-        self.global_params = global_params
-        self.relu_fn = global_params.relu_fn or tf.nn.swish
-
-        self.dropout = tf.keras.layers.Dropout(0.25)
-        self.sc0 = StdConv(self.global_params, num_filters, strides=1)
-        self.sc1 = StdConv(self.global_params, num_filters, strides=strides)
-
-    def call(self, inputs, training=True):
-        x = self.relu_fn(inputs)
-        x = self.dropout(x)
-        x = self.sc0(x)
-        x = self.sc1(x)
-
-        return x
-
 def create_base_model(dtype, model_name):
     model_map = {
         'efficientnet-b0': (efn.EfficientNetB0, 224),
@@ -164,24 +151,8 @@ def create_base_model(dtype, model_name):
     base_model = base_model(include_top=False)
     base_model.trainable = False
 
-    global_params = GlobalParams(
-        data_format='channels_last',
-        batch_norm_momentum=0.99,
-        batch_norm_epsilon=1e-8,
-        relu_fn=tf.nn.swish,
-    )
-
-    layer_names = ['block3a_expand_activation', 'block4a_expand_activation',  'block6a_expand_activation', 'top_activation']
+    layer_names = ['block4a_expand_activation', 'block6a_expand_activation', 'top_activation']
     layers = [base_model.get_layer(name).output for name in layer_names]
-
-    if False:
-        top_input = layers[-1]
-        for _ in range(4):
-            t = TopLayer(global_params, int(top_input.shape[-1] * 1.5), 2)(top_input)
-            layers.append(t)
-            layer_names.append(t.name)
-
-            top_input = t
 
     down_stack = tf.keras.Model(inputs=base_model.input, outputs=layers)
     #down_stack.trainable = False
@@ -191,12 +162,24 @@ def create_base_model(dtype, model_name):
 
     feature_shapes = []
     for name, l in zip(layer_names, features):
-        logger.info('{}: base model: {}, feature layer: {}, shape: {}'.format(name, model_name, l.name, l.shape))
+        logger.info('base model: {}, name: {}, feature layer: {}, shape: {}'.format(model_name, name, l.name, l.shape))
         feature_shapes.append([l.shape[1], l.shape[2], l.shape[3]])
 
     return down_stack, image_size, feature_shapes
 
-def create_model(down_stack, image_size, num_classes, anchor_layers, feature_shapes):
+def create_model(dtype, model_name, num_classes):
+    cells_to_side = [
+            (0, 0), (0.5, 0.5), (1.5, 1.5), (2, 2),
+            (0, 0.3), (0, 0.5), (0, 1), (0, 1.5), (0, 2), (0, 2.5),
+            (0.3, 0), (0.5, 0), (1, 0), (1.5, 0), (2, 0), (2.5, 0),
+            (1, 0.3), (1, 0.5), (1, 0.7),
+            (0.3, 1), (0.5, 1), (0.7, 1),
+    ]
+    scales = [1/1.5, 1]
+    num_anchors_per_output = len(cells_to_side) * len(scales)
+
+    down_stack, image_size, feature_shapes = create_base_model(dtype, model_name)
+
     inputs = tf.keras.layers.Input(shape=(image_size, image_size, 3))
     features = down_stack(inputs)
 
@@ -207,16 +190,22 @@ def create_model(down_stack, image_size, num_classes, anchor_layers, feature_sha
         relu_fn=tf.nn.swish,
     )
 
+    anchor_boxes, anchor_areas = [], []
     ssd_stack_coords, ssd_stack_classes = [], []
-    for ft, num_anchor_boxes_for_layer, shape in zip(features, anchor_layers, feature_shapes):
-        num_anchors_per_output = int(num_anchor_boxes_for_layer / (shape[0] * shape[0]))
-        ssd_head = SSD_Head(global_params, num_anchors_per_output, num_classes)
-        coords, classes = ssd_head(ft)
+    for ft in features:
+        layer_size = ft.shape[1]
+        anchor_boxes_for_layer, anchor_areas_for_layer = anchor.create_anchors_for_layer(image_size, layer_size, cells_to_side, scales)
 
-        logger.info('model: feature: {}/{}, num_anchor_boxes_for_layer: {}, shape: {}, num_anchors_per_output: {}, coords: {}, classes: {}'.format(
+        anchor_boxes += anchor_boxes_for_layer
+        anchor_areas += anchor_areas_for_layer
+
+        num_filters = int(ft.shape[-1] * 2)
+        coords, classes = SSD_Head(global_params, num_anchors_per_output, num_classes)(ft)
+
+        logger.info('model: feature: {}/{}, coords: {}, classes: {}, anchors: {}, total_anchors: {}'.format(
             ft.name, ft.shape,
-            num_anchor_boxes_for_layer, shape, num_anchors_per_output,
-            coords.shape, classes.shape))
+            coords.shape, classes.shape,
+            len(anchor_boxes_for_layer), len(anchor_boxes)))
 
         ssd_stack_coords.append(coords)
         ssd_stack_classes.append(classes)
@@ -224,7 +213,10 @@ def create_model(down_stack, image_size, num_classes, anchor_layers, feature_sha
     output_classes = tf.concat(ssd_stack_classes, axis=1)
     output_coords = tf.concat(ssd_stack_coords, axis=1)
 
-    logger.info('model: output_coords: {}, output_classes: {}'.format(output_coords, output_classes))
+    anchor_boxes = np.array(anchor_boxes)
+    anchor_areas = np.array(anchor_areas)
+
+    logger.info('model: output_coords: {}, output_classes: {}, anchors: {}'.format(output_coords, output_classes, anchor_boxes.shape[0]))
 
     model = tf.keras.Model(inputs=inputs, outputs=[output_coords, output_classes])
-    return model
+    return model, image_size, anchor_boxes, anchor_areas

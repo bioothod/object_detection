@@ -16,7 +16,6 @@ __handler.setFormatter(__fmt)
 logger.addHandler(__handler)
 
 
-import anchor
 import coco
 import image as image_draw
 import loss
@@ -92,20 +91,21 @@ def train():
         global_step = tf.Variable(1, dtype=tf.int64, name='global_step', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
         learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
 
-        base_model, image_size, feature_shapes = ssd.create_base_model(dtype, FLAGS.model_name)
+        train_base = coco.create_coco_iterable(FLAGS.train_coco_annotations, FLAGS.train_coco_data_dir, logger)
+        eval_base = coco.create_coco_iterable(FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, logger)
 
-        np_anchor_boxes, np_anchor_areas, anchor_layers = anchor.create_anchors(image_size, feature_shapes)
-        num_anchors = np_anchor_boxes.shape[0]
-        logger.info('base model: {}, num_anchors: {}, image_size: {}'.format(FLAGS.model_name, num_anchors, image_size))
+        model, image_size, anchors_boxes, anchor_areas = ssd.create_model(dtype, FLAGS.model_name, train_base.num_classes())
+        num_anchors = anchors_boxes.shape[0]
+        logger.info('base_model: {}, num_anchors: {}, image_size: {}'.format(FLAGS.model_name, num_anchors, image_size))
 
-        def create_dataset(name, ann_file, data_dir, is_training):
-            coco_iterable = coco.create_coco_iterable(image_size, ann_file, data_dir, logger, is_training, np_anchor_boxes, np_anchor_areas)
+        def create_dataset(name, base, is_training):
+            coco.complete_initialization(base, image_size, anchors_boxes, anchor_areas, is_training)
 
-            num_images = len(coco_iterable)
-            num_classes = coco_iterable.num_classes()
-            cat_names = coco_iterable.cat_names()
+            num_images = len(base)
+            num_classes = base.num_classes()
+            cat_names = base.cat_names()
 
-            ds = map_iter.from_indexable(coco_iterable,
+            ds = map_iter.from_indexable(base,
                     num_parallel_calls=FLAGS.num_cpus,
                     output_types=(tf.string, tf.int64, tf.float32, tf.float32, tf.int32, tf.int32),
                     output_shapes=(
@@ -124,12 +124,13 @@ def train():
             ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
             ds = dstrategy.experimental_distribute_dataset(ds)
 
-            logger.info('{} dataset has been created, data dir: {}, is_training: {}, images: {}, classes: {}, anchors: {}'.format(
-                name, ann_file, is_training, num_images, num_classes, num_anchors))
+            logger.info('{} dataset has been created, images: {}, classes: {}'.format(name, num_images, num_classes))
 
             return ds, num_images, num_classes, cat_names
 
-        train_dataset, train_num_images, train_num_classes, train_cat_names = create_dataset('train', FLAGS.train_coco_annotations, FLAGS.train_coco_data_dir, is_training=True)
+        train_dataset, train_num_images, train_num_classes, train_cat_names = create_dataset('train', train_base, is_training=True)
+        eval_dataset, eval_num_images, eval_num_classes, eval_cat_names = create_dataset('eval', train_base, is_training=False)
+
         if False:
             data_dir = os.path.join(FLAGS.train_dir, 'tmp')
             os.makedirs(data_dir, exist_ok=True)
@@ -157,7 +158,6 @@ def train():
 
             exit(0)
 
-        eval_dataset, eval_num_images, eval_num_classes, eval_cat_names = create_dataset('eval', FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, is_training=False)
 
         steps_per_epoch = calc_epoch_steps(train_num_images)
         if FLAGS.steps_per_epoch > 0:
@@ -170,24 +170,16 @@ def train():
             steps_per_epoch, calc_epoch_steps(train_num_images), train_num_images,
             steps_per_eval, calc_epoch_steps(eval_num_images), eval_num_images))
 
-        model = ssd.create_model(base_model, image_size, train_num_classes, anchor_layers, feature_shapes)
-
         dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
         dstrategy.experimental_run_v2(call_model, args=(model, dummy_input))
-
-        num_vars_base = 0
-        num_vars_base = len(base_model.trainable_variables)
-        num_params_base = 0
-        num_params_base = np.sum([np.prod(v.shape) for v in base_model.trainable_variables])
 
         num_vars_ssd = 0
         num_vars_ssd = len(model.trainable_variables)
         num_params_ssd = 0
         num_params_ssd = np.sum([np.prod(v.shape) for v in model.trainable_variables])
 
-        logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, base model trainable variables/params: {}/{}, ssd model trainable variables/params: {}/{}, dtype: {}'.format(
+        logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, ssd model trainable variables/params: {}/{}, dtype: {}'.format(
             num_replicas, checkpoint_dir, FLAGS.model_name, image_size,
-            num_vars_base, int(num_params_base),
             num_vars_ssd, int(num_params_ssd),
             dtype))
 
@@ -300,9 +292,6 @@ def train():
                 ce_loss, dist_loss, total_loss = calculate_metrics(logits, bboxes, true_labels, loss_metric, accuracy_metric, full_accuracy_metric, distance_metric)
 
             variables = model.trainable_variables
-            if base_model.trainable:
-                variables += base_model.trainable_variables
-
             gradients = tape.gradient(total_loss, variables)
             clip_gradients = []
             for g, v in zip(gradients, variables):
