@@ -148,9 +148,9 @@ def per_image_supression(anchors, num_classes):
         #selected_coords = tf.gather(selected_coords, index)
 
 
-        #selected_indexes = tf.image.non_max_suppression(selected_coords, selected_scores, FLAGS.max_ret, iou_threshold=0.5)
+        #selected_indexes = tf.image.non_max_suppression(selected_coords, selected_scores, FLAGS.max_ret, iou_threshold=0.45)
 
-        selected_indexes = non_max_suppression(selected_coords, selected_scores, iou_threshold=0.5)
+        selected_indexes = non_max_suppression(selected_coords, selected_scores, iou_threshold=0.45)
         selected_coords = tf.gather(selected_coords, selected_indexes)
         selected_scores = tf.gather(selected_scores, selected_indexes)
 
