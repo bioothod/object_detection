@@ -24,8 +24,8 @@ def show_img(im, figsize=None, ax=None):
 def draw_outline(o, lw):
     o.set_path_effects([patheffects.Stroke(linewidth=lw, foreground='black'), patheffects.Normal()])
 
-def draw_rect(ax, b):
-    patch = ax.add_patch(patches.Rectangle(b[:2], *b[-2:], fill=False, edgecolor='white', lw=1))
+def draw_rect(ax, b, color):
+    patch = ax.add_patch(patches.Rectangle(b[:2], *b[-2:], color=color, fill=False, edgecolor='white', lw=1))
     draw_outline(patch, 2)
 
 def draw_text(ax, xy, txt, sz=14):
@@ -44,16 +44,24 @@ def bb_hw(a):
 
 def draw_im(im, ann, dst, cat_names):
     fig, ax = show_img(im, figsize=(10, 10))
+
+    color_map = {}
     for b, c in ann:
         b = bb_hw(b)
 
         if c != 0:
-            draw_rect(ax, b)
+            color = color_map.get(c)
+            if color is None:
+                color = np.random.rand(3,)
+                color_map[c] = color
 
-        if c in cat_names:
-            draw_text(ax, b[:2], cat_names[c], sz=16)
-        else:
-            draw_text(ax, b[:2], str(c), sz=16)
+            draw_rect(ax, b, color)
+
+        if True:
+            if c in cat_names:
+                draw_text(ax, b[:2], cat_names[c], sz=16)
+            else:
+                draw_text(ax, b[:2], str(c), sz=16)
 
     plt.savefig(dst)
     plt.close(fig)
