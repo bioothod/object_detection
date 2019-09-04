@@ -126,23 +126,40 @@ class COCO:
             d[category_id] = cat['name']
         return d
 
+    def gen_anns_for_id(self, image_id, annotations):
+        anns = []
+        for ann in annotations:
+            iscrowd = ann.get('iscrowd', 0)
+            if iscrowd != 0:
+                continue
+
+            bbox = ann['bbox']
+            category_id = ann['category_id']
+            segm = ann['segmentation']
+
+            anns.append((bbox, category_id))
+
+        img = self.imgs[image_id]
+        filename = os.path.join(self.data_dir, img['file_name'])
+
+        return (filename, image_id, anns)
+
     def get_images(self):
         tuples = []
         for image_id, annotations in self.img2anns.items():
-            anns = []
-            for ann in annotations:
-                bbox = ann['bbox']
-                category_id = ann['category_id']
-                segm = ann['segmentation']
-
-                anns.append((bbox, category_id))
-
-            img = self.imgs[image_id]
-            filename = os.path.join(self.data_dir, img['file_name'])
-
-            tuples.append((filename, image_id, anns))
+            t = self.gen_anns_for_id(image_id, annotations)
+            tuples.append(t)
 
         random.shuffle(tuples)
+
+        if False:
+            image_id = 283290
+            annotations = self.img2anns[image_id]
+            t = self.gen_anns_for_id(image_id, annotations)
+
+            self.logger.info('image_id: {}, anns: {}'.format(image_id, t))
+
+            tuples = [t] + tuples
 
         return tuples
 
@@ -276,19 +293,19 @@ class COCO_Iterable:
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         image = image.astype(np.uint8)
 
-        bboxes = []
+        orig_bboxes = []
         cat_ids = []
         for bb, cat_id in anns:
             if bb[2] <= 1 or bb[3] <= 1:
                 #self.logger.error('{}: image_id: {}, image: {}: bad bbox: {}, bboxes: {}, categories: {}'.format(filename, image_id, image.shape, bb, bboxes, cat_ids))
                 continue
 
-            bboxes.append(bb)
+            orig_bboxes.append(bb)
             cat_ids.append(cat_id)
 
         annotations = {
             'image': image,
-            'bboxes': bboxes,
+            'bboxes': orig_bboxes,
             'category_id': cat_ids,
         }
 
@@ -336,6 +353,7 @@ class COCO_Iterable:
 
             box = np.array([y0, x0, y1, x1])
             box_area = (x1 - x0 + 1) * (y1 - y0 + 1)
+
             iou = anchor.calc_iou(box, box_area, self.np_anchor_boxes, self.np_anchor_areas)
 
             assert iou.shape == max_ious.shape
@@ -343,7 +361,7 @@ class COCO_Iterable:
             num_p = update_true_arrays(filename, image_id, image, box, iou, cat_id, 0.5)
             if num_p == 0:
                 max_iou = np.max(iou)
-                num_p = update_true_arrays(filename, image_id, image, box, iou, cat_id, max_iou * 0.8)
+                num_p = update_true_arrays(filename, image_id, image, box, iou, cat_id, 0.4)
 
         self.logger.debug('{}: image_id: {}, image: {}, bboxes: {}, labels: {}, aug bboxes: {} -> {}, num_positive: {}, num_negatives: {}, time: {:.1f} ms'.format(
             filename, image_id, image.shape, true_bboxes.shape, true_labels.shape, len(anns), len(bboxes),
@@ -351,7 +369,7 @@ class COCO_Iterable:
             (time.time() - start_time) * 1000.))
         return filename, image_id, image, true_bboxes, true_labels, true_orig_labels
 
-def create_coco_iterable(image_size, ann_path, data_dir, logger, is_training, np_anchor_boxes, np_anchor_areas, min_area=0., min_visibility=0.5):
+def create_coco_iterable(image_size, ann_path, data_dir, logger, is_training, np_anchor_boxes, np_anchor_areas, min_area=0., min_visibility=0.3):
     bbox_params = A.BboxParams(
             format='coco',
             min_area=min_area,
@@ -360,6 +378,7 @@ def create_coco_iterable(image_size, ann_path, data_dir, logger, is_training, np
 
     if is_training:
         augmentation = get_training_augmentation(image_size, bbox_params)
+        #augmentation = get_validation_augmentation(image_size, bbox_params)
     else:
         augmentation = get_validation_augmentation(image_size, bbox_params)
 
