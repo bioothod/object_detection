@@ -96,7 +96,7 @@ def train():
 
         np_anchor_boxes, np_anchor_areas, anchor_layers = anchor.create_anchors(image_size, feature_shapes)
         num_anchors = np_anchor_boxes.shape[0]
-        logger.info('base model: {}, num_anchors: {}'.format(FLAGS.model_name, num_anchors))
+        logger.info('base model: {}, num_anchors: {}, image_size: {}'.format(FLAGS.model_name, num_anchors, image_size))
 
         def create_dataset(name, ann_file, data_dir, is_training):
             coco_iterable = coco.create_coco_iterable(image_size, ann_file, data_dir, logger, is_training, np_anchor_boxes, np_anchor_areas)
@@ -130,6 +130,33 @@ def train():
             return ds, num_images, num_classes, cat_names
 
         train_dataset, train_num_images, train_num_classes, train_cat_names = create_dataset('train', FLAGS.train_coco_annotations, FLAGS.train_coco_data_dir, is_training=True)
+        if False:
+            data_dir = os.path.join(FLAGS.train_dir, 'tmp')
+            os.makedirs(data_dir, exist_ok=True)
+
+            for filename, image_id, image, true_bboxes, true_labels, true_orig_labels in train_dataset.unbatch().take(10):
+                filename = str(filename.numpy(), 'utf8')
+
+                dst = '{}/{}.png'.format(data_dir, image_id.numpy())
+                new_anns = []
+                # category ID in true_labels does not match train_cat_names here, this is converted category_id into range [0, num_categories], where 0 is background class
+                # true_orig_labels contain original category ids
+                non_background_index = np.where(true_labels.numpy() != 0)
+
+                for bb, nn_cat_id, orig_cat_id in zip(true_bboxes.numpy()[non_background_index], true_labels.numpy()[non_background_index], true_orig_labels.numpy()[non_background_index]):
+                    y0, x0, y1, x1 = bb
+
+                    bb = [x0, y0, x1, y1]
+                    new_anns.append((bb, orig_cat_id))
+
+                logger.info('{}: true anchors: {}'.format(dst, len(new_anns)))
+
+                image = image.numpy() * 128. + 128
+                image = image.astype(np.uint8)
+                image_draw.draw_im(image, new_anns, dst, train_cat_names)
+
+            exit(0)
+
         eval_dataset, eval_num_images, eval_num_classes, eval_cat_names = create_dataset('eval', FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, is_training=False)
 
         steps_per_epoch = calc_epoch_steps(train_num_images)
