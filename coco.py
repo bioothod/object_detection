@@ -358,10 +358,11 @@ class COCO_Iterable:
 
             assert iou.shape == max_ious.shape
 
-            num_p = update_true_arrays(filename, image_id, image, box, iou, cat_id, 0.5)
-            if num_p == 0:
-                max_iou = np.max(iou)
-                num_p = update_true_arrays(filename, image_id, image, box, iou, cat_id, 0.4)
+            accepted_ious = [0.7, 0.6, 0.5, 0.45]
+            for accepted_iou in accepted_ious:
+                num_p = update_true_arrays(filename, image_id, image, box, iou, cat_id, accepted_iou)
+                if num_p != 0:
+                    break
 
         self.logger.debug('{}: image_id: {}, image: {}, bboxes: {}, labels: {}, aug bboxes: {} -> {}, num_positive: {}, num_negatives: {}, time: {:.1f} ms'.format(
             filename, image_id, image.shape, true_bboxes.shape, true_labels.shape, len(anns), len(bboxes),
