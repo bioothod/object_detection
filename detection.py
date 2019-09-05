@@ -129,7 +129,7 @@ def train():
             return ds, num_images, num_classes, cat_names
 
         train_dataset, train_num_images, train_num_classes, train_cat_names = create_dataset('train', train_base, is_training=True)
-        eval_dataset, eval_num_images, eval_num_classes, eval_cat_names = create_dataset('eval', train_base, is_training=False)
+        eval_dataset, eval_num_images, eval_num_classes, eval_cat_names = create_dataset('eval', eval_base, is_training=False)
 
         if False:
             data_dir = os.path.join(FLAGS.train_dir, 'tmp')
