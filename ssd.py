@@ -151,10 +151,12 @@ def create_base_model(dtype, model_name):
     base_model = base_model(include_top=False)
     base_model.trainable = False
 
-    layer_names = ['top_activation']
+    layer_names = ['block4a_expand_activation', 'block6a_expand_activation', 'top_activation']
     layers = [base_model.get_layer(name).output for name in layer_names]
+    if len(layers) == 1:
+        layers = [layers]
 
-    down_stack = tf.keras.Model(inputs=base_model.input, outputs=[layers])
+    down_stack = tf.keras.Model(inputs=base_model.input, outputs=layers)
     #down_stack.trainable = False
 
     inputs = tf.keras.layers.Input(shape=(image_size, image_size, 3))
@@ -171,21 +173,31 @@ def create_base_model(dtype, model_name):
 
 def create_model(dtype, model_name, num_classes):
     cells_to_side = [
-            (0, 0), (0.5, 0.5), (1.5, 1.5), (2, 2),
-            (0, 0.3), (0, 0.5), (0, 1), (0, 1.5), (0, 2), (0, 2.5),
-            (0.3, 0), (0.5, 0), (1, 0), (1.5, 0), (2, 0), (2.5, 0),
-            (1, 0.3), (1, 0.5), (1, 0.7),
-            (0.3, 1), (0.5, 1), (0.7, 1),
+        [
+            (0, 0), (0.5, 0.5),
+            (0, 1), (0, 1.5),
+            (1, 0), (1.5, 0),
+        ],
+        [
+            (0, 0), (0.5, 0.5), (1.5, 1.5),
+            (0, 0.3), (0, 1), (0, 1.5),
+            (0.3, 0), (1, 0), (1.5, 0),
+            (1, 0.5),
+            (0.5, 1),
+        ],
+        [
+            (0, 0), (0.5, 0.5), (1.5, 1.5),
+            (0, 0.3), (0, 0.5), (0, 1), (0, 1.5), (0, 2),
+            (0.3, 0), (0.5, 0), (1, 0), (1.5, 0), (2, 0),
+            (1, 0.3), (1, 0.5),
+            (0.3, 1), (0.5, 1),
+        ]
     ]
     shifts = [
             (-0.1, 0), (0.1, 0), (0, 0),
             (-0.1, 0.1), (0.1, 0.1), (0, 0.1),
             (-0.1, -0.1), (0.1, -0.1), (0, -0.1),
-            (-0.2, 0), (0.2, 0), (0, 0),
-            (-0.2, 0.2), (0.2, 0.2), (0, 0.2),
-            (-0.2, -0.2), (0.2, -0.2), (0, -0.2),
     ]
-    num_anchors_per_output = len(cells_to_side) * len(shifts)
 
     down_stack, image_size, feature_shapes = create_base_model(dtype, model_name)
 
@@ -201,14 +213,14 @@ def create_model(dtype, model_name, num_classes):
 
     anchor_boxes, anchor_areas = [], []
     ssd_stack_coords, ssd_stack_classes = [], []
-    for ft in features:
+    for ft, cells in zip(features, cells_to_side):
         layer_size = ft.shape[1]
-        anchor_boxes_for_layer, anchor_areas_for_layer = anchor.create_anchors_for_layer(image_size, layer_size, cells_to_side, shifts)
+        anchor_boxes_for_layer, anchor_areas_for_layer = anchor.create_anchors_for_layer(image_size, layer_size, cells, shifts)
 
         anchor_boxes += anchor_boxes_for_layer
         anchor_areas += anchor_areas_for_layer
 
-        num_filters = int(ft.shape[-1] * 2)
+        num_anchors_per_output = len(cells) * len(shifts)
         coords, classes = SSD_Head(global_params, num_anchors_per_output, num_classes)(ft)
 
         logger.info('model: feature: {}/{}, coords: {}, classes: {}, anchors: {}, total_anchors: {}'.format(
