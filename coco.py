@@ -384,10 +384,9 @@ class COCO_Iterable:
         if true_labels.sum() != 0:
             return filename, image_id, image, true_bboxes, true_labels, true_orig_labels
 
-        if len(good_bboxes) != 0:
-            areas = [bb[2] * bb[3] for bb in good_bboxes]
+        areas = [bb[2] * bb[3] for bb in good_bboxes]
 
-            self.logger.info('{}: image_id: {}, image: {}, bboxes: {}, labels: {}, aug bboxes: {} -> {}/{}, num_positive: {}, num_negatives: {}, time: {:.1f}/{:.1f} ms, bboxes: {}, areas: {}'.format(
+        self.logger.info('{}: image_id: {}, image: {}, bboxes: {}, labels: {}, aug bboxes: {} -> {}/{}, num_positive: {}, num_negatives: {}, time: {:.1f}/{:.1f} ms, bboxes: {}, areas: {}'.format(
                 filename, image_id, image.shape, true_bboxes.shape, true_labels.shape, len(anns), len(bboxes), len(good_bboxes),
                 np.where(true_labels > 0)[0].shape[0], np.where(true_labels == 0)[0].shape[0],
                 (time.time() - start_aug_time) * 1000.,
@@ -426,7 +425,10 @@ def complete_initialization(coco_base, image_size, np_anchor_boxes, np_anchor_ar
             min_visibility=0.3,
             label_fields=['category_id'])
 
-    train_augmentation = get_training_augmentation(image_size, bbox_params)
+    if is_training:
+	    train_augmentation = get_training_augmentation(image_size, bbox_params)
+    else:
+	    train_augmentation = get_validation_augmentation(image_size, bbox_params)
     eval_augmentation = get_validation_augmentation(image_size, bbox_params)
 
     preprocessing = get_preprocessing(preprocess_input, bbox_params)
