@@ -114,9 +114,6 @@ class COCO:
             self.logger.info('annotations: {}, images: {}, categories: {}'.format(len(self.anns), len(self.imgs), len(self.cats)))
             category_names = [c['name'] for c in self.cats.values()]
 
-    def num_classes(self):
-        return len(self.cats)
-
     def num_images(self):
         return len(self.img2anns)
 
@@ -277,7 +274,7 @@ class COCO_Iterable:
             self.cats[cat_id] = len(self.cats)
 
     def num_classes(self):
-        return self.coco.num_classes()
+        return len(self.cats)
 
     def set_augmentation(self, train_augmentation=None, eval_augmentation=None, preprocessing=None):
         if not self.train_augmentation:
@@ -336,6 +333,7 @@ class COCO_Iterable:
         cat_ids = annotations['category_id']
 
         max_ious = np.zeros((self.np_anchor_boxes.shape[0]), dtype=np.float32)
+        max_per_bbox_ious = np.zeros((self.np_anchor_boxes.shape[0]), dtype=np.float32)
 
         true_bboxes = self.np_anchor_boxes.copy()
         true_labels = np.zeros((self.np_anchor_boxes.shape[0]))
@@ -344,8 +342,17 @@ class COCO_Iterable:
         def update_true_arrays(filename, image_id, image, box, iou, cat_id, max_iou_threshold):
             converted_cat_id = self.cats[cat_id]
 
+            # only select anchor index to update if appropriate anchors have large IoU and IoU for this anchor is larger than that for previous true boxes,
+            # and if previous (smaller intersections) were not in fact maximum intersection
             idx = iou > max_iou_threshold
-            update_idx = idx & (iou > max_ious)
+            update_idx = idx & (iou > max_ious) & (max_per_bbox_ious == 0)
+
+            assert update_idx.shape == max_ious.shape
+
+            binary_update_idx = update_idx.astype(int)
+            masked_iou = iou * binary_update_idx
+            max_update = masked_iou.argmax()
+            max_per_bbox_ious[max_update] = iou[max_update]
 
             true_bboxes[update_idx] = box
             true_labels[update_idx] = converted_cat_id
@@ -362,7 +369,7 @@ class COCO_Iterable:
 
         good_bboxes = []
         for bb, cat_id in zip(bboxes, cat_ids):
-            if bb[2] <= 6 or bb[3] <= 6:
+            if bb[2] <= 3 or bb[3] <= 3:
                 continue
 
             good_bboxes.append(bb)
@@ -375,7 +382,7 @@ class COCO_Iterable:
 
             assert iou.shape == max_ious.shape
 
-            accepted_ious = [0.7, 0.6, 0.5, 0.45, 0.4]
+            accepted_ious = [0.7, 0.6, 0.5, 0.45]
             for accepted_iou in accepted_ious:
                 num_p = update_true_arrays(filename, image_id, image, box, iou, cat_id, accepted_iou)
                 if num_p != 0:
