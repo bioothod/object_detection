@@ -6,6 +6,8 @@ import sys
 import numpy as np
 import tensorflow as tf
 
+from collections import defaultdict
+
 import anchor
 import image as image_draw
 import preprocess
@@ -20,6 +22,8 @@ __handler.setFormatter(__fmt)
 logger.addHandler(__handler)
 
 parser = argparse.ArgumentParser()
+parser.add_argument('--eval_coco_annotations', type=str, help='Path to MS COCO dataset: annotations json file')
+parser.add_argument('--eval_coco_data_dir', type=str, help='Path to MS COCO dataset: image directory')
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch')
 parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel preprocessing jobs')
 parser.add_argument('--num_classes', type=int, required=True, help='Number of the output classes in the model')
@@ -41,7 +45,7 @@ def tf_read_image(filename, image_size, dtype):
     image = preprocess.prepare_image_for_evaluation(image, image_size, image_size, dtype)
     return filename, image
 
-def non_max_suppression(coords, scores, iou_threshold):
+def non_max_suppression(coords, scores, max_ret, iou_threshold):
     ymin, xmin, ymax, xmax = tf.split(coords, num_or_size_splits=4, axis=1)
 
     xmin = tf.squeeze(xmin, 1)
@@ -57,7 +61,7 @@ def non_max_suppression(coords, scores, iou_threshold):
 
     idxs = tf.argsort(scores, direction='ASCENDING', stable=False)
 
-    max_idx = tf.shape(idxs)[0]
+    max_idx = tf.minimum(tf.shape(idxs)[0], max_ret)
 
     pick = tf.TensorArray(tf.int32, size=max_idx)
     written = 0
@@ -118,7 +122,6 @@ def non_max_suppression(coords, scores, iou_threshold):
 
 def per_image_supression(anchors, num_classes):
     coords, classes = anchors
-    classes = tf.nn.softmax(classes, axis=-1)
 
     logger.info('supression: coords: {}, classes: {}'.format(coords, classes))
 
@@ -155,7 +158,7 @@ def per_image_supression(anchors, num_classes):
 
         #selected_indexes = tf.image.non_max_suppression(selected_coords, selected_scores, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
 
-        selected_indexes = non_max_suppression(selected_coords, selected_scores, iou_threshold=FLAGS.iou_threshold)
+        selected_indexes = non_max_suppression(selected_coords, selected_scores, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
         selected_coords = tf.gather(selected_coords, selected_indexes)
         selected_scores = tf.gather(selected_scores, selected_indexes)
 
@@ -175,7 +178,7 @@ def per_image_supression(anchors, num_classes):
     best_coords = tf.gather(ret_coords, best_index)
     best_cat_ids = tf.gather(ret_cat_ids, best_index)
 
-    to_add = (FLAGS.max_ret - tf.shape(best_scores)[0])
+    to_add = tf.maximum(FLAGS.max_ret - tf.shape(best_scores)[0], 0)
 
     best_coords = tf.pad(best_coords, [[0, to_add], [0, 0]] , 'CONSTANT')
     best_scores = tf.pad(best_scores, [[0, to_add]], 'CONSTANT')
@@ -190,9 +193,11 @@ def per_image_supression(anchors, num_classes):
 @tf.function
 def eval_step_logits(model, images, num_classes):
     logits = model(images, training=False)
+    coords, classes = logits
+    classes = tf.nn.softmax(classes, axis=-1)
 
     return tf.map_fn(lambda anchor: per_image_supression(anchor, num_classes),
-                     logits,
+                     (coords, classes),
                      parallel_iterations=FLAGS.num_cpus,
                      back_prop=False,
                      infer_shape=False,
@@ -213,16 +218,35 @@ def run_eval(model, dataset, num_images, num_classes, dst_dir):
 
             anns = []
 
+            prev_bboxes_cat_ids = defaultdict(list)
+
             for coord, score, cat_id in zip(coords, scores, cat_ids):
                 if score.numpy() == 0:
                     break
 
-                y0, x0, y1, x1 = coord.numpy()
+                coord = coord.numpy()
+
+                y0, x0, y1, x1 = coord
                 bb = [x0, y0, x1, y1]
 
-                logger.info('{}: bbox: {}, score: {}, cat_id: {}'.format(filename, bb, score, cat_id))
+                cat_id = cat_id.numpy()
+                area = (x1 - x0 + 1) * (y1 - y0 + 1)
 
-                anns.append((bb, cat_id.numpy()))
+                prev = prev_bboxes_cat_ids[cat_id]
+                max_iou = 0
+                max_arg = 0
+                if len(prev) > 0:
+                    prev_bboxes = np.array(prev)
+                    prev_areas = (prev_bboxes[:, 2] - prev_bboxes[:, 0] + 1) * (prev_bboxes[:, 3] - prev_bboxes[:, 1] + 1)
+                    ious = anchor.calc_iou(coord, area, prev_bboxes, prev_areas)
+                    max_arg = np.argmax(ious)
+                    max_iou = ious[max_arg]
+
+                prev.append(coord)
+
+                logger.info('{}: bbox: {}, score: {:.3f}, area: {:.1f}, cat_id: {}, max_iou_with_prev: {:.3f}, iou_idx: {}'.format(filename, bb, score, area, cat_id, max_iou, max_arg))
+
+                anns.append((bb, cat_id))
 
             image = image.numpy() * 128 + 128
             image = image.astype(np.uint8)
@@ -236,22 +260,46 @@ def run_eval(model, dataset, num_images, num_classes, dst_dir):
             #for cat_id in range(num_classes)
 
 def train():
+    num_classes = FLAGS.num_classes
+    num_images = len(FLAGS.filenames)
+
+    if FLAGS.eval_coco_annotations:
+        eval_base = coco.create_coco_iterable(FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, logger)
+
     dtype = tf.float32
-    model, image_size, anchors_boxes, anchor_areas = ssd.create_model(dtype, FLAGS.model_name, FLAGS.num_classes)
+    model, image_size, anchors_boxes, anchor_areas = ssd.create_model(dtype, FLAGS.model_name, num_classes)
 
     checkpoint = tf.train.Checkpoint(model=model)
     status = checkpoint.restore(FLAGS.checkpoint)
     status.assert_existing_objects_matched().expect_partial()
     logger.info("Restored from external checkpoint {}".format(FLAGS.checkpoint))
 
+    if FLAGS.eval_coco_annotations:
+        coco.complete_initialization(eval_base, image_size, anchors_boxes, anchor_areas, is_training)
 
-    ds = tf.data.Dataset.from_tensor_slices((FLAGS.filenames))
-    ds = ds.map(lambda fn: tf_read_image(fn, image_size, dtype), num_parallel_calls=FLAGS.num_cpus)
+        num_images = len(eval_base)
+        num_classes = eval_base.num_classes()
+        cat_names = eval_base.cat_names()
+
+        ds = map_iter.from_indexable(base,
+                num_parallel_calls=FLAGS.num_cpus,
+                output_types=(tf.string, tf.int64, tf.float32, tf.float32, tf.int32, tf.int32),
+                output_shapes=(
+                    tf.TensorShape([]),
+                    tf.TensorShape([]),
+                    tf.TensorShape([image_size, image_size, 3]),
+                    tf.TensorShape([num_anchors, 4]),
+                    tf.TensorShape([num_anchors]),
+                    tf.TensorShape([num_anchors]),
+                ))
+    else:
+        ds = tf.data.Dataset.from_tensor_slices((FLAGS.filenames))
+        ds = ds.map(lambda fn: tf_read_image(fn, image_size, dtype), num_parallel_calls=FLAGS.num_cpus)
+
     ds = ds.batch(FLAGS.batch_size)
     ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
 
-    num_images = len(FLAGS.filenames)
-    logger.info('Dataset has been created: num_images: {}, num_classes: {}, model_name: {}'.format(num_images, FLAGS.num_classes, FLAGS.model_name))
+    logger.info('Dataset has been created: num_images: {}, num_classes: {}, model_name: {}'.format(num_images, num_classes, FLAGS.model_name))
 
     os.makedirs(FLAGS.output_dir, exist_ok=True)
     run_eval(model, ds, num_images, FLAGS.num_classes, FLAGS.output_dir)
