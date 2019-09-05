@@ -237,9 +237,7 @@ def run_eval(model, dataset, num_images, num_classes, dst_dir):
 
 def train():
     dtype = tf.float32
-    base_model, image_size, feature_shapes = ssd.create_base_model(dtype, FLAGS.model_name)
-    np_anchor_boxes, np_anchor_areas, anchor_layers = anchor.create_anchors(image_size, feature_shapes)
-    model = ssd.create_model(base_model, image_size, FLAGS.num_classes, anchor_layers, feature_shapes)
+    model, image_size, anchors_boxes, anchor_areas = ssd.create_model(dtype, FLAGS.model_name, FLAGS.num_classes)
 
     checkpoint = tf.train.Checkpoint(model=model)
     status = checkpoint.restore(FLAGS.checkpoint)
@@ -255,7 +253,6 @@ def train():
     num_images = len(FLAGS.filenames)
     logger.info('Dataset has been created: num_images: {}, num_classes: {}, model_name: {}'.format(num_images, FLAGS.num_classes, FLAGS.model_name))
 
-    logger.info('anchor_layers: {}, feature_shapes: {}'.format(anchor_layers, feature_shapes))
     os.makedirs(FLAGS.output_dir, exist_ok=True)
     run_eval(model, ds, num_images, FLAGS.num_classes, FLAGS.output_dir)
 
