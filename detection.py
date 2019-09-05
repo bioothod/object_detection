@@ -227,62 +227,80 @@ def train():
             eval_iou_metric.reset_states()
 
         ce_loss_object = loss.CategoricalFocalLoss(reduction=tf.keras.losses.Reduction.NONE)
+        ce_loss_sparse = tf.keras.losses.SparseCategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE, from_logits=True)
 
         def calculate_metrics(logits, bboxes, true_labels, loss_metric, accuracy_metric, full_accuracy_metric, distance_metric):
             coords, classes = logits
-            classes = tf.nn.softmax(classes, -1)
 
-            max_classes = tf.argmax(classes, -1)
-
-            true_positive_indexes = tf.where(true_labels > 0)
-            #positive_indexes = tf.where(tf.logical_or((true_labels > 0), tf.logical_and((max_classes > 0), tf.reduce_max(classes, -1) > 0.6)))
             positive_indexes = tf.where(true_labels > 0)
+            positive_true = tf.gather_nd(true_labels, positive_indexes)
             positive_pred = tf.gather_nd(classes, positive_indexes)
+            positive_pred = tf.nn.softmax(positive_pred, -1)
+            positive_ce = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=positive_true, logits=positive_pred)
+            positive_ce_sum = tf.reduce_sum(positive_ce)
+            positive_ce_sum *= FLAGS.negative_positive_rate
 
-            num_true_positives = tf.shape(true_positive_indexes)[0]
             num_positives = tf.shape(positive_indexes)[0]
-            num_negatives = tf.cast(FLAGS.negative_positive_rate * tf.cast(num_true_positives, tf.float32), tf.int32)
-            num_negatives_in_positive = num_positives - num_true_positives
-            num_negatives_to_sample = tf.maximum(num_negatives - num_negatives_in_positive, 0)
+            num_negatives = tf.cast(FLAGS.negative_positive_rate * tf.cast(num_positives, tf.float32), tf.int32)
 
             # because 'x == 0' condition yields (none, 0) tensor, and ' < 1' yields (none, 2) shape, the same as aboe positive index selection
             negative_indexes = tf.where(true_labels < 1)
-            #negative_indexes = tf.where(tf.logical_or((true_labels < 1), tf.logical_and((max_classes < 1), tf.reduce_max(classes, -1) > 0.6)))
             # selecting scores for background class among true backgrounds (true_label == 0)
-            negative_pred_background = tf.gather_nd(classes, negative_indexes)[:, 0]
+            #negative_pred_background = tf.gather_nd(classes, negative_indexes)[:, 0]
 
-            num_negatives_to_sample = tf.minimum(num_negatives_to_sample, tf.shape(negative_indexes)[0])
-            sampled_negative_pred_background, sampled_negative_indexes = tf.math.top_k(negative_pred_background, num_negatives_to_sample, sorted=True)
+            negative_true = tf.gather_nd(true_labels, negative_indexes)
+            negative_pred = tf.gather_nd(classes, negative_indexes)
+            negative_pred = tf.nn.softmax(negative_pred, -1)
+            negative_ce = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=negative_true, logits=negative_pred)
+
+            num_negatives_to_sample = tf.minimum(num_negatives, tf.shape(negative_indexes)[0])
+            #sampled_negative_pred_background, sampled_negative_indexes = tf.math.top_k(negative_pred_background, num_negatives_to_sample)
+            sampled_negative_ce, sampled_negative_indexes = tf.math.top_k(negative_ce, num_negatives_to_sample)
+
+            real_num_negatives = num_negatives_to_sample
+            negative_ce_sum = tf.reduce_sum(sampled_negative_ce[:real_num_negatives])
+
+            #cond = lambda s, num: tf.logical_and(tf.math.greater(s, positive_ce_sum), tf.math.greater(num, num_positives))
+            cond = lambda s, num: tf.math.greater(s, positive_ce_sum)
+            def body(s, num):
+                num = tf.cast(num / 2, tf.int32)
+                s = tf.reduce_sum(sampled_negative_ce[:num])
+
+                return s, num
+
+            negative_ce_sum, real_num_negatives = tf.while_loop(cond, body, loop_vars=[negative_ce_sum, real_num_negatives])
+
+            sampled_negative_indexes = sampled_negative_indexes[:real_num_negatives]
+
+            logger.info('true_labels: {}, bboxes: {}, coords: {}, classes: {}, negative_true: {}, negative_pred: {}, negative_ce: {}, negative_indexes: {}, sampled_negative_indexes: {}'.format(
+                true_labels.shape, bboxes.shape, coords.shape, classes.shape,
+                negative_true.shape, negative_pred.shape, negative_ce.shape,
+                negative_indexes.shape, sampled_negative_indexes.shape))
 
             negative_indexes = tf.gather(negative_indexes, sampled_negative_indexes)
 
             new_indexes = tf.concat([positive_indexes, negative_indexes], axis=0)
 
             sampled_true_labels = tf.gather_nd(true_labels, new_indexes)
-            sampled_true_labels_one_hot = tf.one_hot(sampled_true_labels, train_num_classes, axis=-1)
+            #sampled_true_labels_one_hot = tf.one_hot(sampled_true_labels, train_num_classes, axis=-1)
             sampled_pred_classes = tf.gather_nd(classes, new_indexes)
 
-            ce_loss = ce_loss_object(y_true=sampled_true_labels_one_hot, y_pred=sampled_pred_classes)
-            ce_loss = tf.nn.compute_average_loss(ce_loss, global_batch_size=FLAGS.batch_size)
+            ce_loss = ce_loss_sparse(y_true=sampled_true_labels, y_pred=sampled_pred_classes)
+            ce_loss = tf.nn.compute_average_loss(ce_loss, global_batch_size=FLAGS.batch_size) / tf.cast(num_positives, tf.float32)
 
             full_accuracy_metric.update_state(y_true=sampled_true_labels, y_pred=sampled_pred_classes)
             sampled_true_labels = tf.gather_nd(true_labels, positive_indexes)
             sampled_pred_classes = tf.gather_nd(classes, positive_indexes)
+            sampled_pred_classes = tf.nn.softmax(sampled_pred_classes, -1)
             accuracy_metric.update_state(y_true=sampled_true_labels, y_pred=sampled_pred_classes)
 
 
 
-            sampled_true_bboxes = tf.gather_nd(bboxes, new_indexes)
-            #sampled_true_bboxes = tf.cast(sampled_true_bboxes, tf.float32) / float(image_size)
-            sampled_pred_coords = tf.gather_nd(coords, new_indexes)
-            #sampled_pred_coords = tf.cast(sampled_pred_coords, tf.float32) / float(image_size)
-
-            dist_loss = smooth_l1_loss(sampled_true_bboxes - sampled_pred_coords)
-            dist_loss = tf.nn.compute_average_loss(dist_loss, global_batch_size=FLAGS.batch_size)
-
-
             sampled_true_bboxes = tf.gather_nd(bboxes, positive_indexes)
             sampled_pred_coords = tf.gather_nd(coords, positive_indexes)
+
+            dist_loss = smooth_l1_loss(sampled_true_bboxes - sampled_pred_coords)
+            dist_loss = tf.nn.compute_average_loss(dist_loss, global_batch_size=FLAGS.batch_size)  / tf.cast(num_positives, tf.float32)
             distance_metric.update_state(y_true=sampled_true_bboxes, y_pred=sampled_pred_coords)
 
 
