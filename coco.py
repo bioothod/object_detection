@@ -16,6 +16,10 @@ from pycocotools import mask as maskUtils
 
 import albumentations as A
 
+class ProcessingError(Exception):
+    def __init__(self, message):
+        self.message = message
+
 class COCO:
     def __init__(self, ann_path, data_dir, logger):
         self.data_dir = data_dir
@@ -259,12 +263,17 @@ class COCO_Iterable:
         self.np_anchor_boxes = np_anchor_boxes
         self.np_anchor_areas = np_anchor_areas
 
+        self.image_size = None
+
         self.train_augmentation = None
         self.eval_augmentation = None
         self.preprocessing = None
 
         self.coco = COCO(ann_path, data_dir, logger)
         self.image_tuples = self.coco.get_images()
+
+        self.good_bboxes = 0
+        self.failed_bboxes = 0
 
         self.cats = {}
         self.cats[-1] = len(self.cats)
@@ -276,7 +285,10 @@ class COCO_Iterable:
     def num_classes(self):
         return len(self.cats)
 
-    def set_augmentation(self, train_augmentation=None, eval_augmentation=None, preprocessing=None):
+    def set_augmentation(self, image_size=None, train_augmentation=None, eval_augmentation=None, preprocessing=None):
+        if not self.image_size:
+            self.image_size = image_size
+
         if not self.train_augmentation:
             self.train_augmentation = train_augmentation
 
@@ -300,6 +312,8 @@ class COCO_Iterable:
         return len(self.image_tuples)
 
     def process_image(self, i, augmentation):
+        start_time = time.time()
+
         filename, image_id, anns = self.image_tuples[i]
 
         orig_image = cv2.imread(filename)
@@ -316,7 +330,7 @@ class COCO_Iterable:
             orig_cat_ids.append(cat_id)
 
         if len(orig_bboxes) == 0:
-            raise NameError('empty orig bboxes')
+            raise ProcessingError('no orig bboxes')
 
         start_aug_time = time.time()
         annotations = {
@@ -339,13 +353,16 @@ class COCO_Iterable:
         true_labels = np.zeros((self.np_anchor_boxes.shape[0]))
         true_orig_labels = np.zeros((self.np_anchor_boxes.shape[0]))
 
-        def update_true_arrays(filename, image_id, image, box, iou, cat_id, max_iou_threshold):
+        def update_true_arrays(filename, image_id, image, box, iou, cat_id, max_iou_threshold, last):
             converted_cat_id = self.cats[cat_id]
 
             # only select anchor index to update if appropriate anchors have large IoU and IoU for this anchor is larger than that for previous true boxes,
             # and if previous (smaller intersections) were not in fact maximum intersection
             idx = iou > max_iou_threshold
             update_idx = idx & (iou > max_ious) & (max_per_bbox_ious == 0)
+            if last and False:
+                if update_idx.sum() == 0:
+                    update_idx = idx & (iou > max_ious)
 
             assert update_idx.shape == max_ious.shape
 
@@ -375,36 +392,49 @@ class COCO_Iterable:
             good_bboxes.append(bb)
             x0, y0, x1, y1 = [bb[0], bb[1], bb[0]+bb[2], bb[1]+bb[3]]
 
-            box = np.array([y0, x0, y1, x1])
-            box_area = (x1 - x0 + 1) * (y1 - y0 + 1)
+            cx = (x1 + x0) / 2
+            cy = (y1 + y0) / 2
+            w = x1 - x0
+            h = y1 - y0
 
-            iou = anchor.calc_iou(box, box_area, self.np_anchor_boxes, self.np_anchor_areas)
+            box = np.array([cx, cy, h, w])
+
+            iou = anchor.calc_iou(box, self.np_anchor_boxes, self.np_anchor_areas)
 
             assert iou.shape == max_ious.shape
 
             accepted_ious = [0.7, 0.6, 0.5, 0.45]
             for accepted_iou in accepted_ious:
-                num_p = update_true_arrays(filename, image_id, image, box, iou, cat_id, accepted_iou)
+                num_p = update_true_arrays(filename, image_id, image, box, iou, cat_id, accepted_iou, accepted_iou == accepted_ious[-1])
                 if num_p != 0:
                     break
 
         if true_labels.sum() != 0:
+            self.good_bboxes += 1
             return filename, image_id, image, true_bboxes, true_labels, true_orig_labels
 
-        areas = [bb[2] * bb[3] for bb in good_bboxes]
+        if len(good_bboxes) > 0:
+            self.failed_bboxes += 1
 
-        self.logger.info('{}: image_id: {}, image: {}, bboxes: {}, labels: {}, aug bboxes: {} -> {}/{}, num_positive: {}, num_negatives: {}, time: {:.1f}/{:.1f} ms, bboxes: {}, areas: {}'.format(
-                filename, image_id, image.shape, true_bboxes.shape, true_labels.shape, len(anns), len(bboxes), len(good_bboxes),
-                np.where(true_labels > 0)[0].shape[0], np.where(true_labels == 0)[0].shape[0],
-                (time.time() - start_aug_time) * 1000.,
-                (time.time() - start_time) * 1000.,
-                good_bboxes, areas))
+            if self.failed_bboxes % 100 == 0:
+                total_bboxes = self.good_bboxes + self.failed_bboxes
+                logger.info('good_bboxes: {}/{:.4f}, failed_bboxes: {}/{:.4f}, total_bboxes: {}'.format(
+                    self.good_bboxes, self.good_bboxes/total_bboxes, self.failed_bboxes, self.failed_bboxes/total_bboxes))
 
-        raise ValueError('no bboxes after augmentation')
+            areas = [bb[2] * bb[3] for bb in good_bboxes]
+
+            self.logger.debug('{}: image_id: {}, image: {}, bboxes: {}, labels: {}, aug bboxes: {} -> {}/{}, num_positive: {}, num_negatives: {}, time: {:.1f}/{:.1f} ms, bboxes: {}, areas: {}'.format(
+                    filename, image_id, image.shape,
+                    true_bboxes.shape, true_labels.shape,
+                    len(anns), len(bboxes), len(good_bboxes),
+                    np.where(true_labels > 0)[0].shape[0], np.where(true_labels == 0)[0].shape[0],
+                    (time.time() - start_aug_time) * 1000.,
+                    (time.time() - start_time) * 1000.,
+                    good_bboxes, areas))
+
+        raise ProcessingError('there are no true labels')
 
     def __getitem__(self, i):
-        start_time = time.time()
-
         if self.np_anchor_areas is None or self.np_anchor_boxes is None:
             raise ValueError('COCO iterable is not initialized: np_anchor_areas: {}, np_anchor_boxes: {}'.format(self.np_anchor_areas, self.np_anchor_boxes))
 
@@ -412,14 +442,15 @@ class COCO_Iterable:
         while True:
             try:
                 return self.process_image(i, augment)
-            except NameError:
-                i = np.random.randint(len(self.image_tuples))
-            except ValueError:
-                if augment == self.train_augmentation:
-                    augment = self.eval_augmentation
-                else:
-                    augment = self.train_augmentation
+            except ProcessingError as e:
+                if e.message == 'no orig bboxes':
                     i = np.random.randint(len(self.image_tuples))
+                else:
+                    if augment == self.train_augmentation:
+                        augment = self.eval_augmentation
+                    else:
+                        augment = self.train_augmentation
+                        i = np.random.randint(len(self.image_tuples))
 
 
 def create_coco_iterable(ann_path, data_dir, logger):
@@ -440,5 +471,5 @@ def complete_initialization(coco_base, image_size, np_anchor_boxes, np_anchor_ar
 
     preprocessing = get_preprocessing(preprocess_input, bbox_params)
 
-    coco_base.set_augmentation(train_augmentation, eval_augmentation, preprocessing)
+    coco_base.set_augmentation(image_size, train_augmentation, eval_augmentation, preprocessing)
     coco_base.set_anchors(np_anchor_boxes, np_anchor_areas)
