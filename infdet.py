@@ -32,7 +32,8 @@ parser.add_argument('--min_score', type=float, default=0.7, help='Minimal class 
 parser.add_argument('--min_size', type=float, default=10, help='Minimal size of the bounding box')
 parser.add_argument('--iou_threshold', type=float, default=0.45, help='Minimal IoU threshold for non-maximum suppression')
 parser.add_argument('--output_dir', type=str, required=True, help='Path to directory, where images will be stored')
-parser.add_argument('--checkpoint', type=str, required=True, help='Load model weights from this file')
+parser.add_argument('--checkpoint', type=str, help='Load model weights from this file')parser.add_argument('--checkpoint', type=str, help='Load model weights from this file')
+parser.add_argument('--checkpoint_dir', type=str, help='Load model weights from the latest checkpoint in this directory')
 parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='Model name')
 parser.add_argument('--data_format', type=str, default='channels_last', choices=['channels_first', 'channels_last'], help='Data format: [channels_first, channels_last]')
 parser.add_argument('filenames', type=str, nargs='*', help='Numeric label : file path')
@@ -270,9 +271,15 @@ def train():
     model, image_size, anchors_boxes, anchor_areas = ssd.create_model(dtype, FLAGS.model_name, num_classes)
 
     checkpoint = tf.train.Checkpoint(model=model)
-    status = checkpoint.restore(FLAGS.checkpoint)
+
+    if FLAGS.checkpoint:
+        checkpoint_prefix = FLAGS.checkpoint
+    elif FLAGS.checkpoint_dir:
+        checkpoint_prefix = tf.train.latest_checkpoint(FLAGS.checkpoint_dir)
+
+    status = checkpoint.restore(checkpoint_prefix)
     status.assert_existing_objects_matched().expect_partial()
-    logger.info("Restored from external checkpoint {}".format(FLAGS.checkpoint))
+    logger.info("Restored from external checkpoint {}".format(checkpoint_prefix))
 
     if FLAGS.eval_coco_annotations:
         coco.complete_initialization(eval_base, image_size, anchors_boxes, anchor_areas, is_training)
@@ -306,6 +313,10 @@ def train():
 
 if __name__ == '__main__':
     np.set_printoptions(formatter={'float': '{:0.4f}'.format, 'int': '{:4d}'.format}, linewidth=250, suppress=True, threshold=np.inf)
+
+    if not FLAGS.checkpoint and not FLAGS.checkpoint_dir:
+        logger.critical('You must provide either checkpoint or checkpoint dir')
+        exit(-1)
 
     try:
         train()
