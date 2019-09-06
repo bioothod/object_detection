@@ -175,13 +175,11 @@ def create_model(dtype, model_name, num_classes):
     cells_to_side = [
         [
             (0, 0),
-            (0, 1),
-            (1, 0),
         ],
         [
             (0, 0), (0.5, 0.5),
-            (0, 1), (0, 1.5),
-            (1, 0), (1.5, 0),
+            (0, 1),
+            (1, 0),
         ],
         [
             (0, 0), (0.5, 0.5), (1.5, 1.5),
@@ -193,8 +191,7 @@ def create_model(dtype, model_name, num_classes):
     ]
     shifts = [
             (-0.2, 0), (0.2, 0), (0, 0),
-            (-0.2, 0.2), (0.2, 0.2), (0, 0.2),
-            (-0.2, -0.2), (0.2, -0.2), (0, -0.2),
+            (0, 0.2), (0, -0.2),
     ]
 
     down_stack, image_size, feature_shapes = create_base_model(dtype, model_name)
