@@ -233,14 +233,8 @@ def train():
             coords, classes = logits
 
             positive_indexes = tf.where(true_labels > 0)
-            positive_true = tf.gather_nd(true_labels, positive_indexes)
-            positive_pred = tf.gather_nd(classes, positive_indexes)
-            positive_pred = tf.nn.softmax(positive_pred, -1)
-            positive_ce = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=positive_true, logits=positive_pred)
-            positive_ce_sum = tf.reduce_sum(positive_ce)
-            positive_ce_sum *= FLAGS.negative_positive_rate
-
             num_positives = tf.shape(positive_indexes)[0]
+
             num_negatives = tf.cast(FLAGS.negative_positive_rate * tf.cast(num_positives, tf.float32), tf.int32)
 
             # because 'x == 0' condition yields (none, 0) tensor, and ' < 1' yields (none, 2) shape, the same as aboe positive index selection
@@ -255,27 +249,9 @@ def train():
 
             num_negatives_to_sample = tf.minimum(num_negatives, tf.shape(negative_indexes)[0])
             #sampled_negative_pred_background, sampled_negative_indexes = tf.math.top_k(negative_pred_background, num_negatives_to_sample)
-            sampled_negative_ce, sampled_negative_indexes = tf.math.top_k(negative_ce, num_negatives_to_sample)
-
-            real_num_negatives = num_negatives_to_sample
-            negative_ce_sum = tf.reduce_sum(sampled_negative_ce[:real_num_negatives])
-
-            #cond = lambda s, num: tf.logical_and(tf.math.greater(s, positive_ce_sum), tf.math.greater(num, num_positives))
-            cond = lambda s, num: tf.math.greater(s, positive_ce_sum)
-            def body(s, num):
-                num = tf.cast(num / 2, tf.int32)
-                s = tf.reduce_sum(sampled_negative_ce[:num])
-
-                return s, num
-
-            negative_ce_sum, real_num_negatives = tf.while_loop(cond, body, loop_vars=[negative_ce_sum, real_num_negatives])
-
-            sampled_negative_indexes = sampled_negative_indexes[:real_num_negatives]
-
-            logger.info('true_labels: {}, bboxes: {}, coords: {}, classes: {}, negative_true: {}, negative_pred: {}, negative_ce: {}, negative_indexes: {}, sampled_negative_indexes: {}'.format(
-                true_labels.shape, bboxes.shape, coords.shape, classes.shape,
-                negative_true.shape, negative_pred.shape, negative_ce.shape,
-                negative_indexes.shape, sampled_negative_indexes.shape))
+            #sampled_negative_ce, sampled_negative_indexes = tf.math.top_k(negative_ce, num_negatives_to_sample)
+            sorted_negative_indexes = tf.argsort(negative_ce, direction='ASCENDING')
+            sampled_negative_indexes = sorted_negative_indexes[:num_negatives_to_sample]
 
             negative_indexes = tf.gather(negative_indexes, sampled_negative_indexes)
 
