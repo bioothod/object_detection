@@ -1,7 +1,11 @@
+import logging
+
 import tensorflow as tf
 
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.util import nest
+
+logger = logging.getLogger('detection')
 
 def py_func(func,
             args=(),
@@ -54,9 +58,12 @@ def py_func(func,
 def from_indexable(iterator, output_types, output_shapes, num_parallel_calls=None, name=None):
     ds = tf.data.Dataset.range(len(iterator))
 
+    def wrapper(i):
+        return iterator[i]
+
     def index_to_entry(index):
         return py_func(
-                func=iterator.__getitem__,
+                func=wrapper,
                 args=(index,),
                 output_types=output_types,
                 output_shapes=output_shapes,
