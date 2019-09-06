@@ -254,7 +254,7 @@ def train():
             negative_indexes = tf.gather(negative_indexes, sampled_negative_indexes)
 
 
-            num_negative_worst_to_sample = tf.minimum(tf.cast(num_positives/4, tf.int32), tf.shape(negative_ce)[0])
+            num_negative_worst_to_sample = tf.minimum(tf.cast(num_positives/3, tf.int32), tf.shape(negative_ce)[0])
             sampled_negative_worst_ce, sampled_negative_worst_indexes = tf.math.top_k(negative_ce, num_negative_worst_to_sample)
             negative_worst_indexes = tf.gather(negative_indexes, sampled_negative_worst_indexes)
 
