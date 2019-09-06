@@ -109,11 +109,12 @@ class OutConv(tf.keras.layers.Layer):
         return [flatten_coords, flatten_classes]
 
 class SSD_Head(tf.keras.layers.Layer):
-    def __init__(self, global_params, k, num_classes):
-        super(SSD_Head, self).__init__()
+    def __init__(self, global_params, k, num_classes, top_strides, name=None):
+        super(SSD_Head, self).__init__(name=name)
 
         self.k = k
         self.num_classes = num_classes
+        self.top_strides = top_strides
 
         self.global_params = global_params
         self.relu_fn = global_params.relu_fn or tf.nn.swish
@@ -121,6 +122,8 @@ class SSD_Head(tf.keras.layers.Layer):
         self._build()
 
     def _build(self):
+        self.top_sc0 = StdConv(self.global_params, 512, strides=self.top_strides)
+
         self.dropout = tf.keras.layers.Dropout(0.25)
         self.sc0 = StdConv(self.global_params, 256, strides=1)
         self.sc1 = StdConv(self.global_params, 256, strides=1)
@@ -128,6 +131,8 @@ class SSD_Head(tf.keras.layers.Layer):
 
     def call(self, inputs, training=True):
         x = self.relu_fn(inputs)
+
+        x = self.top_sc0(x)
         x = self.dropout(x)
         x = self.sc0(x)
         x = self.sc1(x)
@@ -172,32 +177,30 @@ def create_base_model(dtype, model_name):
     return down_stack, image_size, feature_shapes
 
 def create_model(dtype, model_name, num_classes):
-    cells_to_side = [
-        [
-            (0, 0),
-        ],
-        [
-            (0, 0), (0.5, 0.5),
-            (0, 1),
-            (1, 0),
-        ],
-        [
-            (0, 0), (0.5, 0.5), (1.5, 1.5),
-            (0, 0.3), (0, 0.5), (0, 1), (0, 1.5), (0, 2),
-            (0.3, 0), (0.5, 0), (1, 0), (1.5, 0), (2, 0),
-            (1, 0.3), (1, 0.5),
-            (0.3, 1), (0.5, 1),
-        ]
+    cell_scales = [
+        [1.3],
+        [2, 3, 4.1, 4.6],
+        [1.3, 2, 3, 4.5, 5, 6, 7],
+        [1.3, 2, 3, 4.5, 5, 6, 7],
+        [1.3, 2, 3, 4.5, 5, 6, 7, 8],
+        [],
     ]
-    shifts = [
-            (-0.2, 0), (0.2, 0), (0, 0),
-            (0, 0.2), (0, -0.2),
-    ]
+    shifts = [0, 0.2]
+    shifts_square = [0.1]
+
+    shifts2d = []
+    for shx in shifts:
+        for shy in shifts:
+            shifts2d.append((shx, shy))
+
+    for sh in shifts_square:
+        shifts2d.append((sh, sh))
 
     down_stack, image_size, feature_shapes = create_base_model(dtype, model_name)
 
     inputs = tf.keras.layers.Input(shape=(image_size, image_size, 3))
     features = down_stack(inputs)
+    features += [None] * 3
 
     global_params = GlobalParams(
         data_format='channels_last',
@@ -208,19 +211,54 @@ def create_model(dtype, model_name, num_classes):
 
     anchor_boxes, anchor_areas = [], []
     ssd_stack_coords, ssd_stack_classes = [], []
-    for ft, cells in zip(features, cells_to_side):
-        layer_size = ft.shape[1]
-        anchor_boxes_for_layer, anchor_areas_for_layer = anchor.create_anchors_for_layer(image_size, layer_size, cells, shifts)
+    top_strides = 1
+    last_good_features = None
+    layer_index = 0
+    for ft, cell_scales_for_layer in zip(features, cell_scales):
+        if ft is None:
+            ft = last_good_features
+            top_strides *= 2
+        else:
+            last_good_features = ft
+
+        aspect_ratios = []
+        for scale in cell_scales_for_layer:
+            scale = np.sqrt(scale)
+            aspect_ratios += [(scale, 1/scale), (1/scale, scale)]
+
+            scale *= 2
+            aspect_ratios += [(scale, 1/scale), (1/scale, scale)]
+
+        aspect_ratios += [(1, 1)]
+        if layer_index >= 2:
+            li = np.sqrt(layer_index)
+            aspect_ratios += [(li, li)]
+
+        if layer_index >= 1:
+            x = 1.3
+            aspect_ratios += [(x, x)]
+            x = 1.7
+            aspect_ratios += [(x, x)]
+            x = 2
+            aspect_ratios += [(1, 1/x), (1/x, x)]
+            x = 3
+            aspect_ratios += [(1, 1/x), (1/x, x)]
+
+        layer_index += 1
+        num_anchors_per_output = len(aspect_ratios) * len(shifts2d)
+        coords, classes = SSD_Head(global_params, num_anchors_per_output, num_classes, top_strides)(ft)
+
+        layer_size = int(np.sqrt(classes.shape[1] / num_anchors_per_output))
+
+        anchor_boxes_for_layer, anchor_areas_for_layer = anchor.create_anchors_for_layer(image_size, layer_size, aspect_ratios, shifts2d)
 
         anchor_boxes += anchor_boxes_for_layer
         anchor_areas += anchor_areas_for_layer
 
-        num_anchors_per_output = len(cells) * len(shifts)
-        coords, classes = SSD_Head(global_params, num_anchors_per_output, num_classes)(ft)
-
-        logger.info('model: feature: {}/{}, coords: {}, classes: {}, anchors: {}, total_anchors: {}'.format(
+        logger.info('model: input feature: {}/{}, coords: {}, classes: {}, layer_size: {}, anchors: {}, total_anchors: {}'.format(
             ft.name, ft.shape,
             coords.shape, classes.shape,
+            layer_size,
             len(anchor_boxes_for_layer), len(anchor_boxes)))
 
         ssd_stack_coords.append(coords)
