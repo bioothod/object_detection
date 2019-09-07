@@ -418,8 +418,8 @@ class COCO_Iterable:
 
             if self.failed_bboxes % 100 == 0:
                 total_bboxes = self.good_bboxes + self.failed_bboxes
-                logger.info('good_bboxes: {}/{:.4f}, failed_bboxes: {}/{:.4f}, total_bboxes: {}'.format(
-                    self.good_bboxes, self.good_bboxes/total_bboxes, self.failed_bboxes, self.failed_bboxes/total_bboxes))
+                self.logger.info('good_bboxes: {}/{:.4f}, failed_bboxes: {}/{:.4f}, total_bboxes: {}'.format(
+                    self.good_bboxes, self.good_bboxes/total_bboxes, self.failed_bboxes, self.failed_bboxes/total_bboxes, total_bboxes))
 
             areas = [bb[2] * bb[3] for bb in good_bboxes]
 
