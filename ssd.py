@@ -24,7 +24,7 @@ def conv_kernel_initializer(shape, dtype=None, partition_info=None):
     return tf.random.normal(shape, mean=0.0, stddev=np.sqrt(2.0 / fan_out), dtype=dtype)
 
 class StdConv(tf.keras.layers.Layer):
-    def __init__(self, global_params, num_filters, strides=2, dropout_rate=0.1):
+    def __init__(self, global_params, num_filters, strides=2, dilation_rate=1, dropout_rate=0.1):
         super(StdConv, self).__init__()
 
         self.num_filters = num_filters
@@ -50,6 +50,8 @@ class StdConv(tf.keras.layers.Layer):
             strides=self.strides,
             data_format=self.data_format,
             kernel_initializer=conv_kernel_initializer,
+            kernel_regularizer=tf.keras.regularizers.l2(),
+            bias_regularizer=tf.keras.regularizers.l2(),
             padding='same',
             use_bias=False)
 
@@ -81,8 +83,9 @@ class OutConv(tf.keras.layers.Layer):
             strides=1,
             data_format=self.data_format,
             kernel_initializer=conv_kernel_initializer,
-            padding='same',
-            use_bias=False)
+            kernel_regularizer=tf.keras.regularizers.l2(),
+            bias_regularizer=tf.keras.regularizers.l2(),
+            padding='same')
 
         self.loc_out = tf.keras.layers.Conv2D(
             filters=4*self.k,
@@ -90,8 +93,9 @@ class OutConv(tf.keras.layers.Layer):
             strides=1,
             data_format=self.data_format,
             kernel_initializer=conv_kernel_initializer,
+            kernel_regularizer=tf.keras.regularizers.l2(),
+            bias_regularizer=tf.keras.regularizers.l2(),
             padding='same',
-            use_bias=False,
             activation='relu')
 
     def flatten_anchors(self, x):
@@ -122,17 +126,13 @@ class SSD_Head(tf.keras.layers.Layer):
         self._build()
 
     def _build(self):
-        self.top_sc0 = StdConv(self.global_params, 512, strides=self.top_strides)
-
         self.dropout = tf.keras.layers.Dropout(0.25)
-        self.sc0 = StdConv(self.global_params, 256, strides=1)
+        self.sc0 = StdConv(self.global_params, 256, strides=1, dilation_rate=1/self.top_strides)
         self.sc1 = StdConv(self.global_params, 256, strides=1)
         self.out = OutConv(self.global_params, self.k, self.num_classes)
 
     def call(self, inputs, training=True):
         x = self.relu_fn(inputs)
-
-        x = self.top_sc0(x)
         x = self.dropout(x)
         x = self.sc0(x)
         x = self.sc1(x)

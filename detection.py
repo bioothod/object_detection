@@ -302,7 +302,9 @@ def train():
             distance_size_metric.update_state(y_true=z, y_pred=ds)
 
 
-            total_loss = ce_loss + dist_loss
+            reg_loss = tf.add_n(model.losses)
+
+            total_loss = ce_loss + dist_loss + reg_loss
             loss_metric.update_state(total_loss)
 
             return ce_loss, dist_loss, total_loss
@@ -326,7 +328,7 @@ def train():
                 if g is None:
                     logger.info('no gradients for variable: {}'.format(v))
                 else:
-                    g = tf.clip_by_value(g, -2, 2)
+                    g = tf.clip_by_value(g, -5, 5)
 
                 clip_gradients.append(g)
             opt.apply_gradients(zip(clip_gradients, variables))
