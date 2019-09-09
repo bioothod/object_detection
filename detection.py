@@ -283,13 +283,21 @@ def train():
             tcx, tcy, th, tw = tf.split(sampled_true_bboxes, num_or_size_splits=4, axis=1)
             pcx, pcy, ph, pw = tf.split(sampled_pred_coords, num_or_size_splits=4, axis=1)
 
-            dc = tf.math.abs(pcx - tcx) / tw + tf.math.abs(pcy - tcy) / th
-            ds = tf.math.abs(pw - tw) / tw + tf.math.abs(ph - th) / th
+            pw += 1e-10
+            ph += 1e-10
+
+            dc = tf.math.abs(pcx - tcx) / pw + tf.math.abs(pcy - tcy) / ph
+            dc *= 5
+
+            ds = tf.math.log(tw / pw) + tf.math.log(th / ph)
+            ds *= 10
 
             dist_loss = smooth_l1_loss(dc + ds)
             dist_loss = tf.nn.compute_average_loss(dist_loss, global_batch_size=FLAGS.batch_size)  / tf.cast(num_positives, tf.float32)
 
             z = tf.zeros_like(dc)
+            dc = tf.math.abs(pcx - tcx) / tw + tf.math.abs(pcy - tcy) / th
+            ds = tf.math.abs(pw - tw) / tw + tf.math.abs(ph - th) / th
             distance_center_metric.update_state(y_true=z, y_pred=dc)
             distance_size_metric.update_state(y_true=z, y_pred=ds)
 

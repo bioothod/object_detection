@@ -178,15 +178,15 @@ def create_base_model(dtype, model_name):
 
 def create_model(dtype, model_name, num_classes):
     cell_scales = [
-        [1.3],
-        [2, 3, 4.1, 4.6],
-        [1.3, 2, 3, 4.5, 5, 6, 7],
-        [1.3, 2, 3, 4.5, 5, 6, 7],
-        [1.3, 2, 3, 4.5, 5, 6, 7, 8],
+        [1.3, 2, 3, 4.1, 4.6],
+        [1.3, 2, 3, 4.5],
+        [1.3, 2, 3],
+        [1.3, 2, 3],
+        [1.3, 2, 3],
         [],
     ]
-    shifts = [0, 0.2]
-    shifts_square = [0.1]
+    shifts = [0]
+    shifts_square = []
 
     shifts2d = []
     for shx in shifts:
@@ -202,6 +202,10 @@ def create_model(dtype, model_name, num_classes):
     features = down_stack(inputs)
     features += [None] * 3
 
+    min_scale = 0.2
+    max_scale = 0.9
+    num_features = len(features)
+
     global_params = GlobalParams(
         data_format='channels_last',
         batch_norm_momentum=0.99,
@@ -215,6 +219,8 @@ def create_model(dtype, model_name, num_classes):
     last_good_features = None
     layer_index = 0
     for ft, cell_scales_for_layer in zip(features, cell_scales):
+        layer_scale = min_scale + (max_scale - min_scale) * (layer_index - 1) / (num_features - 1)
+
         if ft is None:
             ft = last_good_features
             top_strides *= 2
@@ -226,31 +232,16 @@ def create_model(dtype, model_name, num_classes):
             scale = np.sqrt(scale)
             aspect_ratios += [(scale, 1/scale), (1/scale, scale)]
 
-            scale *= 2
-            aspect_ratios += [(scale, 1/scale), (1/scale, scale)]
-
         aspect_ratios += [(1, 1)]
-        if layer_index >= 2:
-            li = np.sqrt(layer_index)
-            aspect_ratios += [(li, li)]
-
-        if layer_index >= 1:
-            x = 1.3
-            aspect_ratios += [(x, x)]
-            x = 1.7
-            aspect_ratios += [(x, x)]
-            x = 2
-            aspect_ratios += [(1, 1/x), (1/x, x)]
-            x = 3
-            aspect_ratios += [(1, 1/x), (1/x, x)]
 
         layer_index += 1
+
         num_anchors_per_output = len(aspect_ratios) * len(shifts2d)
         coords, classes = SSD_Head(global_params, num_anchors_per_output, num_classes, top_strides)(ft)
 
         layer_size = int(np.sqrt(classes.shape[1] / num_anchors_per_output))
 
-        anchor_boxes_for_layer, anchor_areas_for_layer = anchor.create_anchors_for_layer(image_size, layer_size, aspect_ratios, shifts2d)
+        anchor_boxes_for_layer, anchor_areas_for_layer = anchor.create_anchors_for_layer(image_size, layer_size, layer_scale, aspect_ratios, shifts2d)
 
         anchor_boxes += anchor_boxes_for_layer
         anchor_areas += anchor_areas_for_layer

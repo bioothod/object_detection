@@ -174,7 +174,7 @@ def get_training_augmentation(image_size, bbox_params):
 
         A.OneOf([
             A.Compose([
-                A.Resize(height=int(image_size*1.4), width=int(image_size*1.4), interpolation=cv2.INTER_LINEAR, always_apply=True),
+                A.Resize(height=int(image_size*1.4), width=int(image_size*1.4), interpolation=cv2.INTER_LANCZOS4, always_apply=True),
                 A.RandomCrop(height=image_size, width=image_size, always_apply=True),
 
                 A.IAAAdditiveGaussianNoise(p=0.1),
@@ -208,7 +208,7 @@ def get_training_augmentation(image_size, bbox_params):
             ]),
 
             A.Compose([
-                A.Resize(height=int(image_size*1.2), width=int(image_size*1.2), interpolation=cv2.INTER_LINEAR, always_apply=True),
+                A.Resize(height=int(image_size*1.2), width=int(image_size*1.2), interpolation=cv2.INTER_LANCZOS4, always_apply=True),
                 A.RandomCrop(height=image_size, width=image_size, always_apply=True),
                 A.OneOf(
                     [
@@ -221,7 +221,7 @@ def get_training_augmentation(image_size, bbox_params):
             ]),
 
             A.Compose([
-                A.Resize(height=int(image_size*1.1), width=int(image_size*1.1), interpolation=cv2.INTER_LINEAR, always_apply=True),
+                A.Resize(height=int(image_size*1.1), width=int(image_size*1.1), interpolation=cv2.INTER_LANCZOS4, always_apply=True),
                 A.RandomCrop(height=image_size, width=image_size, always_apply=True),
             ]),
         ], p=1.),
@@ -233,7 +233,7 @@ def get_training_augmentation(image_size, bbox_params):
 def get_validation_augmentation(image_size, bbox_params):
     test_transform = [
         A.PadIfNeeded(image_size, image_size),
-        A.Resize(height=image_size, width=image_size, interpolation=cv2.INTER_LINEAR, always_apply=True),
+        A.Resize(height=image_size, width=image_size, interpolation=cv2.INTER_LANCZOS4, always_apply=True),
     ]
     return A.Compose(test_transform, bbox_params)
 
@@ -346,6 +346,26 @@ class COCO_Iterable:
         bboxes = annotations['bboxes']
         cat_ids = annotations['category_id']
 
+        if False:
+            bboxes = np.array(bboxes)
+            x0 = np.array(bboxes[:, 0])
+            y0 = np.array(bboxes[:, 1])
+            w = np.array(bboxes[:, 2])
+            h = np.array(bboxes[:, 3])
+
+            cx = x0 + w/2
+            cy = y0 + h/2
+            true_bboxes = np.stack([cx, cy, h, w], axis=1)
+
+            #self.logger.info('x0: {}, y0: {}, cx: {}, cy: {}, true_bboxes: {}'.format(x0, y0, cx, cy, true_bboxes))
+            #exit(-1)
+
+            true_labels = np.array([self.cats[cat_id] for cat_id in cat_ids])
+            true_orig_labels = np.array(cat_ids)
+
+            #self.logger.info('{}: classes: {}\n{}'.format(filename, true_labels, true_bboxes))
+            return filename, image_id, image, true_bboxes, true_labels, true_orig_labels
+
         max_ious = np.zeros((self.np_anchor_boxes.shape[0]), dtype=np.float32)
         max_per_bbox_ious = np.zeros((self.np_anchor_boxes.shape[0]), dtype=np.float32)
 
@@ -390,12 +410,10 @@ class COCO_Iterable:
                 continue
 
             good_bboxes.append(bb)
-            x0, y0, x1, y1 = [bb[0], bb[1], bb[0]+bb[2], bb[1]+bb[3]]
+            x0, y0, w, h = bb
 
-            cx = (x1 + x0) / 2
-            cy = (y1 + y0) / 2
-            w = x1 - x0
-            h = y1 - y0
+            cx = x0 + w/2
+            cy = y0 + h/2
 
             box = np.array([cx, cy, h, w])
 
@@ -403,7 +421,7 @@ class COCO_Iterable:
 
             assert iou.shape == max_ious.shape
 
-            accepted_ious = [0.7, 0.6, 0.5]
+            accepted_ious = [0.5]
             for accepted_iou in accepted_ious:
                 num_p = update_true_arrays(filename, image_id, image, box, iou, cat_id, accepted_iou, accepted_iou == accepted_ious[-1])
                 if num_p != 0:
@@ -416,7 +434,7 @@ class COCO_Iterable:
         if len(good_bboxes) > 0:
             self.failed_bboxes += 1
 
-            if self.failed_bboxes % 100 == 0:
+            if self.failed_bboxes % 1000 == 0:
                 total_bboxes = self.good_bboxes + self.failed_bboxes
                 self.logger.info('good_bboxes: {}/{:.4f}, failed_bboxes: {}/{:.4f}, total_bboxes: {}'.format(
                     self.good_bboxes, self.good_bboxes/total_bboxes, self.failed_bboxes, self.failed_bboxes/total_bboxes, total_bboxes))

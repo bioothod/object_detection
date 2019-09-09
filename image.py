@@ -25,7 +25,7 @@ def draw_outline(o, lw):
     o.set_path_effects([patheffects.Stroke(linewidth=lw, foreground='black'), patheffects.Normal()])
 
 def draw_rect(ax, b, color):
-    patch = ax.add_patch(patches.Rectangle(b[:2], *b[-2:], color=color, fill=False, edgecolor='white', lw=1))
+    patch = ax.add_patch(patches.Rectangle(b[:2], *b[-2:], color=color, fill=False, edgecolor='white', lw=1, linestyle='--'))
     draw_outline(patch, 2)
 
 def draw_text(ax, xy, txt, sz=14):
