@@ -286,7 +286,7 @@ def train():
             pw += 1e-10
             ph += 1e-10
 
-            dc = tf.math.abs(pcx - tcx) / pw + tf.math.abs(pcy - tcy) / ph
+            dc = tf.math.abs(tcx - pcx) / pw + tf.math.abs(tcy - pcy) / ph
             dc *= 5
 
             ds = tf.math.log(tw / pw) + tf.math.log(th / ph)
