@@ -13,7 +13,7 @@ logger.setLevel(logging.INFO)
 
 GlobalParams = collections.namedtuple('GlobalParams', [
     'batch_norm_momentum', 'batch_norm_epsilon', 'dropout_rate', 'data_format',
-    'num_classes', 'relu_fn',
+    'num_classes', 'relu_fn', 'l2_reg_weight'
 ])
 GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
 
@@ -31,6 +31,7 @@ class StdConv(tf.keras.layers.Layer):
         self.strides = strides
         self.dropout_rate = dropout_rate
 
+        sellf.l2_reg_weight = global_params.l2_reg_weight
         self.batch_norm_momentum = global_params.batch_norm_momentum
         self.batch_norm_epsilon = global_params.batch_norm_epsilon
         self.data_format = global_params.data_format
@@ -50,8 +51,8 @@ class StdConv(tf.keras.layers.Layer):
             strides=self.strides,
             data_format=self.data_format,
             kernel_initializer=conv_kernel_initializer,
-            kernel_regularizer=tf.keras.regularizers.l2(),
-            bias_regularizer=tf.keras.regularizers.l2(),
+            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg_weight),
+            bias_regularizer=tf.keras.regularizers.l2(self.l2_reg_weight),
             padding='same',
             use_bias=False)
 
@@ -73,6 +74,7 @@ class OutConv(tf.keras.layers.Layer):
         self.num_classes = num_classes
 
         self.data_format = global_params.data_format
+        sellf.l2_reg_weight = global_params.l2_reg_weight
 
         self._build()
 
@@ -83,8 +85,8 @@ class OutConv(tf.keras.layers.Layer):
             strides=1,
             data_format=self.data_format,
             kernel_initializer=conv_kernel_initializer,
-            kernel_regularizer=tf.keras.regularizers.l2(),
-            bias_regularizer=tf.keras.regularizers.l2(),
+            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg_weight),
+            bias_regularizer=tf.keras.regularizers.l2(self.l2_reg_weight),
             padding='same')
 
         self.loc_out = tf.keras.layers.Conv2D(
@@ -93,8 +95,8 @@ class OutConv(tf.keras.layers.Layer):
             strides=1,
             data_format=self.data_format,
             kernel_initializer=conv_kernel_initializer,
-            kernel_regularizer=tf.keras.regularizers.l2(),
-            bias_regularizer=tf.keras.regularizers.l2(),
+            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg_weight),
+            bias_regularizer=tf.keras.regularizers.l2(self.l2_reg_weight),
             padding='same',
             activation='relu')
 
@@ -128,14 +130,12 @@ class SSD_Head(tf.keras.layers.Layer):
     def _build(self):
         self.dropout = tf.keras.layers.Dropout(0.25)
         self.sc0 = StdConv(self.global_params, 256, strides=1, dilation_rate=1/self.top_strides)
-        self.sc1 = StdConv(self.global_params, 256, strides=1)
         self.out = OutConv(self.global_params, self.k, self.num_classes)
 
     def call(self, inputs, training=True):
         x = self.relu_fn(inputs)
         x = self.dropout(x)
         x = self.sc0(x)
-        x = self.sc1(x)
         x = self.out(x)
 
         return x
@@ -211,6 +211,7 @@ def create_model(dtype, model_name, num_classes):
         batch_norm_momentum=0.99,
         batch_norm_epsilon=1e-8,
         relu_fn=tf.nn.swish,
+        l2_reg_weight=1e-4,
     )
 
     anchor_boxes, anchor_areas = [], []
