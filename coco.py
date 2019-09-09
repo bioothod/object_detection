@@ -403,7 +403,7 @@ class COCO_Iterable:
 
             assert iou.shape == max_ious.shape
 
-            accepted_ious = [0.7, 0.6, 0.5, 0.45]
+            accepted_ious = [0.7, 0.6, 0.5]
             for accepted_iou in accepted_ious:
                 num_p = update_true_arrays(filename, image_id, image, box, iou, cat_id, accepted_iou, accepted_iou == accepted_ious[-1])
                 if num_p != 0:
