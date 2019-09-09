@@ -9,7 +9,9 @@ import tensorflow as tf
 from collections import defaultdict
 
 import anchor
+import coco
 import image as image_draw
+import map_iter
 import preprocess
 import ssd
 
@@ -43,7 +45,45 @@ def tf_read_image(filename, image_size, dtype):
     image = tf.io.read_file(filename)
     image = tf.image.decode_jpeg(image, channels=3)
 
+    image = tf.image.resize(image, [image_size, image_size], preserve_aspect_ratio=True)
+    shape = tf.shape(image)
+
+    sxd = image_size - shape[1]
+    syd = iamge_size - shape[0]
+
+
     image = preprocess.prepare_image_for_evaluation(image, image_size, image_size, dtype)
+    return filename, image
+
+def tf_left_needed_dimensions(image_size, filename, image_id, image, true_bboxes, true_labels, true_orig_labels):
+    pos_indexes = tf.where(true_labels > 0)
+    pos_bboxes = tf.gather_nd(true_bboxes, pos_indexes)
+
+    cx = pos_bboxes[:, 0]
+    cy = pos_bboxes[:, 1]
+    h = pos_bboxes[:, 2]
+    w = pos_bboxes[:, 3]
+
+    x0 = cx - w/2
+    x1 = cx + w/2
+    y0 = cy - h/2
+    y1 = cy + h/2
+
+    x0 /= image_size
+    y0 /= image_size
+    x1 /= image_size
+    y1 /= image_size
+
+    boxes = tf.stack([y0, x0, y1, x1], axis=1)
+    boxes = tf.expand_dims(boxes, 0)
+
+    image = tf.expand_dims(image, 0)
+
+    colors = tf.random.uniform([1, tf.shape(pos_bboxes)[0], 4], minval=0, maxval=1, dtype=tf.dtypes.float32)
+
+    image = tf.image.draw_bounding_boxes(image,  boxes, colors)
+    image = tf.squeeze(image, 0)
+
     return filename, image
 
 def non_max_suppression(coords, scores, max_ret, iou_threshold):
@@ -227,19 +267,24 @@ def run_eval(model, dataset, num_images, num_classes, dst_dir):
 
                 coord = coord.numpy()
 
-                y0, x0, y1, x1 = coord
+                cx, cy, h, w = coord
+                x0 = cx - w/2
+                x1 = cx + w/2
+                y0 = cy - h/2
+                y1 = cy + h/2
+
                 bb = [x0, y0, x1, y1]
 
                 cat_id = cat_id.numpy()
-                area = (x1 - x0 + 1) * (y1 - y0 + 1)
+                area = h * w
 
                 prev = prev_bboxes_cat_ids[cat_id]
                 max_iou = 0
                 max_arg = 0
                 if len(prev) > 0:
                     prev_bboxes = np.array(prev)
-                    prev_areas = (prev_bboxes[:, 2] - prev_bboxes[:, 0] + 1) * (prev_bboxes[:, 3] - prev_bboxes[:, 1] + 1)
-                    ious = anchor.calc_iou(coord, area, prev_bboxes, prev_areas)
+                    prev_areas = prev_bboxes[:, 2] * prev_bboxes[:, 3]
+                    ious = anchor.calc_iou(coord, prev_bboxes, prev_areas)
                     max_arg = np.argmax(ious)
                     max_iou = ious[max_arg]
 
@@ -269,6 +314,7 @@ def train():
 
     dtype = tf.float32
     model, image_size, anchors_boxes, anchor_areas = ssd.create_model(dtype, FLAGS.model_name, num_classes)
+    num_anchors = anchors_boxes.shape[0]
 
     checkpoint = tf.train.Checkpoint(model=model)
 
@@ -282,13 +328,13 @@ def train():
     logger.info("Restored from external checkpoint {}".format(checkpoint_prefix))
 
     if FLAGS.eval_coco_annotations:
-        coco.complete_initialization(eval_base, image_size, anchors_boxes, anchor_areas, is_training)
+        coco.complete_initialization(eval_base, image_size, anchors_boxes, anchor_areas, False)
 
         num_images = len(eval_base)
         num_classes = eval_base.num_classes()
         cat_names = eval_base.cat_names()
 
-        ds = map_iter.from_indexable(base,
+        ds = map_iter.from_indexable(eval_base,
                 num_parallel_calls=FLAGS.num_cpus,
                 output_types=(tf.string, tf.int64, tf.float32, tf.float32, tf.int32, tf.int32),
                 output_shapes=(
@@ -299,6 +345,9 @@ def train():
                     tf.TensorShape([num_anchors]),
                     tf.TensorShape([num_anchors]),
                 ))
+        ds = ds.map(lambda filename, image_id, image, true_bboxes, true_labels, true_orig_labels:
+                    tf_left_needed_dimensions(image_size, filename, image_id, image, true_bboxes, true_labels, true_orig_labels),
+                num_parallel_calls=FLAGS.num_cpus)
     else:
         ds = tf.data.Dataset.from_tensor_slices((FLAGS.filenames))
         ds = ds.map(lambda fn: tf_read_image(fn, image_size, dtype), num_parallel_calls=FLAGS.num_cpus)
