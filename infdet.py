@@ -32,7 +32,7 @@ parser.add_argument('--min_score', type=float, default=0.7, help='Minimal class 
 parser.add_argument('--min_size', type=float, default=10, help='Minimal size of the bounding box')
 parser.add_argument('--iou_threshold', type=float, default=0.45, help='Minimal IoU threshold for non-maximum suppression')
 parser.add_argument('--output_dir', type=str, required=True, help='Path to directory, where images will be stored')
-parser.add_argument('--checkpoint', type=str, help='Load model weights from this file')parser.add_argument('--checkpoint', type=str, help='Load model weights from this file')
+parser.add_argument('--checkpoint', type=str, help='Load model weights from this file')
 parser.add_argument('--checkpoint_dir', type=str, help='Load model weights from the latest checkpoint in this directory')
 parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='Model name')
 parser.add_argument('--data_format', type=str, default='channels_last', choices=['channels_first', 'channels_last'], help='Data format: [channels_first, channels_last]')
