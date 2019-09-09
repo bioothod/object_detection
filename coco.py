@@ -379,7 +379,8 @@ class COCO_Iterable:
             # only select anchor index to update if appropriate anchors have large IoU and IoU for this anchor is larger than that for previous true boxes,
             # and if previous (smaller intersections) were not in fact maximum intersection
             idx = iou > max_iou_threshold
-            update_idx = idx & (iou > max_ious) & (max_per_bbox_ious == 0)
+            #update_idx = idx & (iou > max_ious) & (max_per_bbox_ious == 0)
+            update_idx = idx & (iou > max_ious)
             if last and False:
                 if update_idx.sum() == 0:
                     update_idx = idx & (iou > max_ious)
