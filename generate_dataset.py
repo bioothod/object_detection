@@ -63,7 +63,9 @@ def do_work(worker_id, num_images, image_size, anchors_boxes, anchor_areas):
         processed += 1
         bboxes += np.count_nonzero(true_labels)
 
-        image_enc = cv2.imencode('.jpg', image)[1].tostring()
+        image = image * 128 + 128
+        image = image.astype(np.uint8)
+        image_enc = cv2.imencode('.png', image)[1].tostring()
 
         example = tf.train.Example(features=tf.train.Features(feature={
             'image_id': _int64_feature(image_id),
