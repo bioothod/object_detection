@@ -29,6 +29,7 @@ class StdConv(tf.keras.layers.Layer):
 
         self.num_filters = num_filters
         self.strides = strides
+        self.dropout_rate = dropout_rate
 
         self.l2_reg_weight = global_params.l2_reg_weight
         self.batch_norm_momentum = global_params.batch_norm_momentum
@@ -206,7 +207,7 @@ def create_model(dtype, model_name, num_classes):
     features = down_stack(inputs)
     features += [None] * (len(cell_scales) - len(layer_names))
 
-    min_scale = image_size / 15
+    min_scale = 15 / image_size
     max_scale = 0.9
     num_features = len(features)
 
