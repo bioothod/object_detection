@@ -184,11 +184,11 @@ def create_model(dtype, model_name, num_classes):
     layer_names = ['block3a_expand_activation', 'block4a_expand_activation', 'block6a_expand_activation', 'top_activation']
 
     cell_scales = [
-        [1.3, 2, 3],
-        [1.3, 2, 3, 4.1],
         [1.3, 2, 3, 4.1, 4.6],
-        [1.3, 2, 3, 4.5],
-        [1.3, 2, 3],
+        [1.3, 2, 3, 4.1, 4.6],
+        [1.3, 2, 3, 4.1, 4.6],
+        [1.3, 2, 3, 4.1, 4.6],
+        [1.3, 2, 3, 4.1, 4.6],
     ]
     shifts = [0]
     shifts_square = []
