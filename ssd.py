@@ -29,9 +29,8 @@ class StdConv(tf.keras.layers.Layer):
 
         self.num_filters = num_filters
         self.strides = strides
-        self.dropout_rate = dropout_rate
 
-        sellf.l2_reg_weight = global_params.l2_reg_weight
+        self.l2_reg_weight = global_params.l2_reg_weight
         self.batch_norm_momentum = global_params.batch_norm_momentum
         self.batch_norm_epsilon = global_params.batch_norm_epsilon
         self.data_format = global_params.data_format
@@ -64,7 +63,11 @@ class StdConv(tf.keras.layers.Layer):
         self.dropout0 = tf.keras.layers.Dropout(self.dropout_rate)
 
     def call(self, inputs, training=True):
-        return self.dropout0(self.bn0(self.c0(inputs), training=training))
+        x = self.c0(inputs)
+        x = self.bn0(x, training=training)
+        x = self.dropout0(x)
+
+        return x
 
 class OutConv(tf.keras.layers.Layer):
     def __init__(self, global_params, k, num_classes):
@@ -74,7 +77,7 @@ class OutConv(tf.keras.layers.Layer):
         self.num_classes = num_classes
 
         self.data_format = global_params.data_format
-        sellf.l2_reg_weight = global_params.l2_reg_weight
+        self.l2_reg_weight = global_params.l2_reg_weight
 
         self._build()
 
@@ -130,6 +133,7 @@ class SSD_Head(tf.keras.layers.Layer):
     def _build(self):
         self.dropout = tf.keras.layers.Dropout(0.25)
         self.sc0 = StdConv(self.global_params, 256, strides=1, dilation_rate=1/self.top_strides)
+        self.sc1 = StdConv(self.global_params, 256, strides=1)
         self.out = OutConv(self.global_params, self.k, self.num_classes)
 
     def call(self, inputs, training=True):
@@ -140,7 +144,7 @@ class SSD_Head(tf.keras.layers.Layer):
 
         return x
 
-def create_base_model(dtype, model_name):
+def create_base_model(dtype, model_name, layer_names):
     model_map = {
         'efficientnet-b0': (efn.EfficientNetB0, 224),
         'efficientnet-b1': (efn.EfficientNetB1, 240),
@@ -156,7 +160,6 @@ def create_base_model(dtype, model_name):
     base_model = base_model(include_top=False)
     base_model.trainable = False
 
-    layer_names = ['block4a_expand_activation', 'block6a_expand_activation', 'top_activation']
     layers = [base_model.get_layer(name).output for name in layer_names]
     if len(layers) == 1:
         layers = [layers]
@@ -177,13 +180,14 @@ def create_base_model(dtype, model_name):
     return down_stack, image_size, feature_shapes
 
 def create_model(dtype, model_name, num_classes):
+    layer_names = ['block3a_expand_activation', 'block4a_expand_activation', 'block6a_expand_activation', 'top_activation']
+
     cell_scales = [
+        [1.3, 2, 3],
+        [1.3, 2, 3, 4.1],
         [1.3, 2, 3, 4.1, 4.6],
         [1.3, 2, 3, 4.5],
         [1.3, 2, 3],
-        [1.3, 2, 3],
-        [1.3, 2, 3],
-        [],
     ]
     shifts = [0]
     shifts_square = []
@@ -196,11 +200,11 @@ def create_model(dtype, model_name, num_classes):
     for sh in shifts_square:
         shifts2d.append((sh, sh))
 
-    down_stack, image_size, feature_shapes = create_base_model(dtype, model_name)
+    down_stack, image_size, feature_shapes = create_base_model(dtype, model_name, layer_names)
 
     inputs = tf.keras.layers.Input(shape=(image_size, image_size, 3))
     features = down_stack(inputs)
-    features += [None] * 3
+    features += [None] * (len(cell_scales) - len(layer_names))
 
     min_scale = 0.2
     max_scale = 0.9
