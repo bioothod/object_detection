@@ -62,12 +62,6 @@ def do_work(worker_id, num_images, image_size, anchors_boxes, anchor_areas):
 
         processed += 1
         bboxes += np.count_nonzero(true_labels)
-        dur = time.time() - start_time
-
-        if idx % 1000 == 0:
-            mean_time = dur / processed
-            logger.info('{}: {}: mean bboxes: {:.2f}, mean time: {:.1f} ms'.format(os.getpid(), filename, bboxes / processed, mean_time * 1000))
-            start_time = time.time()
 
         image_enc = cv2.imencode('.jpg', image)[1].tostring()
 
@@ -81,6 +75,12 @@ def do_work(worker_id, num_images, image_size, anchors_boxes, anchor_areas):
 
         data = bytes(example.SerializeToString())
         writer.write(data)
+
+        if idx % 1000 == 0:
+            dur = time.time() - start_time
+            mean_time = dur / processed
+            logger.info('{}: {}: mean bboxes: {:.2f}, mean time: {:.1f} ms'.format(os.getpid(), filename, bboxes / processed, mean_time * 1000))
+
 
     writer.close()
 
