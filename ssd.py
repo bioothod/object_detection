@@ -207,7 +207,7 @@ def create_model(dtype, model_name, num_classes):
     features = down_stack(inputs)
     features += [None] * (len(cell_scales) - len(layer_names))
 
-    min_scale = 0.2
+    min_scale = 16 / image_size
     max_scale = 0.9
     num_features = len(features)
 
