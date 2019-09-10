@@ -45,7 +45,29 @@ parser.add_argument('--min_eval_metric', default=0.75, type=float, help='Minimal
 parser.add_argument('--negative_positive_rate', default=2, type=float, help='Negative to positive anchors ratio')
 parser.add_argument('--epochs_lr_update', default=10, type=int, help='Maximum number of epochs without improvement used to reset or decrease learning rate')
 parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16 training/inference')
+parser.add_argument('--dataset', type=str, choices=['files', 'tfrecords'], default='tfrecords', help='Dataset type')
+parser.add_argument('--train_tfrecord_dir', type=str, help='Directory containing training TFRecords')
+parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
 FLAGS = parser.parse_args()
+
+def unpack_tfrecord(serialized_example):
+    features = tf.io.parse_single_example(serialized_example,
+            features={
+                'image_id': tf.FixedLenFeature([], tf.int64),
+                'filename': tf.FixedLenFeature([], tf.string),
+                'true_labels': tf.FixedLenFeature([], tf.string),
+                'true_bboxes': tf.FixedLenFeature([], tf.string),
+                'image': tf.FixedLenFeature([], tf.string),
+            })
+
+    label = features['label']
+    image_id = features['image_id']
+    image = tf.image.decode_jpeg(feature['image'], channels=3)
+    image = tf.cast(image, tf.float32)
+    image -= 128.
+    image /= 128.
+
+    return filename, image_id, image, true_bboxes, true_labels
 
 def calc_epoch_steps(num_files):
     return (num_files + FLAGS.batch_size - 1) // FLAGS.batch_size
@@ -115,7 +137,6 @@ def train():
                         tf.TensorShape([image_size, image_size, 3]),
                         tf.TensorShape([num_anchors, 4]),
                         tf.TensorShape([num_anchors]),
-                        tf.TensorShape([num_anchors]),
                     ))
 
             if is_training:
@@ -129,14 +150,35 @@ def train():
 
             return ds, num_images, num_classes, cat_names
 
-        train_dataset, train_num_images, train_num_classes, train_cat_names = create_dataset('train', train_base, is_training=True)
-        eval_dataset, eval_num_images, eval_num_classes, eval_cat_names = create_dataset('eval', eval_base, is_training=False)
+        def create_dataset_from_tfrecord(name, dataset_dir, is_training):
+            coco.complete_initialization(base, image_size, anchors_boxes, anchor_areas, is_training)
+
+            filenames = [os.path.join(dataset_dir, fn) for fn in os.listdir(dataset_dir)]
+            ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
+            ds = ds.map(unpack_tfrecord, num_parallel_reads=FLAGS.num_cpus)
+            if is_training:
+                ds = ds.shuffle(200)
+
+            ds = ds.batch(FLAGS.batch_size)
+            ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
+            ds = dstrategy.experimental_distribute_dataset(ds)
+
+            logger.info('{} dataset has been created, images: {}, classes: {}'.format(name, num_images, num_classes))
+
+            return ds, num_images, num_classes, cat_names
+
+        if FLAGS.dataset_type == 'files':
+            train_dataset, train_num_images, train_num_classes, train_cat_names = create_dataset('train', train_base, is_training=True)
+            eval_dataset, eval_num_images, eval_num_classes, eval_cat_names = create_dataset('eval', eval_base, is_training=False)
+        elif FLAGS.dataset_type == 'tfrecords':
+            train_dataset, train_num_images, train_num_classes, train_cat_names = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir, is_training=True)
+            eval_dataset, eval_num_images, eval_num_classes, eval_cat_names = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, is_training=False)
 
         if False:
             data_dir = os.path.join(FLAGS.train_dir, 'tmp')
             os.makedirs(data_dir, exist_ok=True)
 
-            for filename, image_id, image, true_bboxes, true_labels, true_orig_labels in train_dataset.unbatch().take(10):
+            for filename, image_id, image, true_bboxes, true_labels in train_dataset.unbatch().take(10):
                 filename = str(filename.numpy(), 'utf8')
 
                 dst = '{}/{}.png'.format(data_dir, image_id.numpy())
@@ -145,11 +187,11 @@ def train():
                 # true_orig_labels contain original category ids
                 non_background_index = np.where(true_labels.numpy() != 0)
 
-                for bb, nn_cat_id, orig_cat_id in zip(true_bboxes.numpy()[non_background_index], true_labels.numpy()[non_background_index], true_orig_labels.numpy()[non_background_index]):
+                for bb, cat_id in zip(true_bboxes.numpy()[non_background_index], true_labels.numpy()[non_background_index]):
                     y0, x0, y1, x1 = bb
 
                     bb = [x0, y0, x1, y1]
-                    new_anns.append((bb, orig_cat_id))
+                    new_anns.append((bb, cat_id))
 
                 logger.info('{}: true anchors: {}'.format(dst, len(new_anns)))
 
@@ -367,7 +409,7 @@ def train():
             accs = []
 
             step = 0
-            for filenames, image_ids, images, bboxes, true_labels, orig_true_labels in dataset:
+            for filenames, image_ids, images, bboxes, true_labels in dataset:
                 # In most cases, the default data format NCHW instead of NHWC should be
                 # used for a significant performance boost on GPU/TPU. NHWC should be used
                 # only if the network needs to be run on CPU since the pooling operations

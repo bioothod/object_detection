@@ -361,17 +361,15 @@ class COCO_Iterable:
             #exit(-1)
 
             true_labels = np.array([self.cats[cat_id] for cat_id in cat_ids])
-            true_orig_labels = np.array(cat_ids)
 
             #self.logger.info('{}: classes: {}\n{}'.format(filename, true_labels, true_bboxes))
-            return filename, image_id, image, true_bboxes, true_labels, true_orig_labels
+            return filename, image_id, image, true_bboxes, true_labels
 
         max_ious = np.zeros((self.np_anchor_boxes.shape[0]), dtype=np.float32)
         max_per_bbox_ious = np.zeros((self.np_anchor_boxes.shape[0]), dtype=np.float32)
 
         true_bboxes = self.np_anchor_boxes.copy()
         true_labels = np.zeros((self.np_anchor_boxes.shape[0]))
-        true_orig_labels = np.zeros((self.np_anchor_boxes.shape[0]))
 
         def update_true_arrays(filename, image_id, image, box, iou, cat_id, max_iou_threshold, last):
             converted_cat_id = self.cats[cat_id]
@@ -394,7 +392,6 @@ class COCO_Iterable:
 
             true_bboxes[update_idx] = box
             true_labels[update_idx] = converted_cat_id
-            true_orig_labels[update_idx] = cat_id
             num_p = update_idx.sum()
 
             self.logger.debug('{}: image_id: {}, image: {}, bbox: {}, threshold: {}, positive: {}, update: {}, max_iou: {}, max_saved_iou: {}'.format(
@@ -430,7 +427,7 @@ class COCO_Iterable:
 
         if true_labels.sum() != 0:
             self.good_bboxes += 1
-            return filename, image_id, image, true_bboxes, true_labels, true_orig_labels
+            return filename, image_id, image, true_bboxes, true_labels
 
         if len(good_bboxes) > 0:
             self.failed_bboxes += 1

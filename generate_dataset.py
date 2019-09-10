@@ -58,7 +58,7 @@ def do_work(worker_id, num_images, image_size, anchors_boxes, anchor_areas):
     for idx in range(num_images):
         idx = idx % num_images
 
-        filename, image_id, image, true_bboxes, true_labels, true_orig_labels = base[idx]
+        filename, image_id, image, true_bboxes, true_labels = base[idx]
 
         processed += 1
         bboxes += np.count_nonzero(true_labels)
@@ -91,6 +91,8 @@ def main():
         handler = logging.FileHandler(FLAGS.logfile, 'a')
         handler.setFormatter(__fmt)
         logger.addHandler(handler)
+
+    os.makedirs(FLAGS.output_dir, exist_ok=True)
 
     model, image_size, anchors_boxes, anchor_areas = ssd.create_model(float, FLAGS.model_name, FLAGS.num_classes)
     num_anchors = anchors_boxes.shape[0]
