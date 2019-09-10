@@ -207,7 +207,7 @@ def create_model(dtype, model_name, num_classes):
     features = down_stack(inputs)
     features += [None] * (len(cell_scales) - len(layer_names))
 
-    min_scale = 15 / image_size
+    min_scale = 0.2
     max_scale = 0.9
     num_features = len(features)
 
@@ -225,7 +225,9 @@ def create_model(dtype, model_name, num_classes):
     last_good_features = None
     layer_index = 0
     for ft, cell_scales_for_layer in zip(features, cell_scales):
-        layer_scale = min_scale + (max_scale - min_scale) * (layer_index - 1) / (num_features - 1)
+        layer_scale = 1.
+        if layer_index >= 1:
+            layer_scale = min_scale + (max_scale - min_scale) * (layer_index - 1) / (num_features - 1)
 
         if ft is None:
             ft = last_good_features
