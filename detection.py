@@ -20,7 +20,6 @@ import coco
 import image as image_draw
 import loss
 import map_iter
-import validate
 import ssd
 
 parser = argparse.ArgumentParser()
@@ -45,7 +44,7 @@ parser.add_argument('--min_eval_metric', default=0.75, type=float, help='Minimal
 parser.add_argument('--negative_positive_rate', default=2, type=float, help='Negative to positive anchors ratio')
 parser.add_argument('--epochs_lr_update', default=10, type=int, help='Maximum number of epochs without improvement used to reset or decrease learning rate')
 parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16 training/inference')
-parser.add_argument('--dataset', type=str, choices=['files', 'tfrecords'], default='tfrecords', help='Dataset type')
+parser.add_argument('--dataset_type', type=str, choices=['files', 'tfrecords'], default='tfrecords', help='Dataset type')
 parser.add_argument('--train_tfrecord_dir', type=str, help='Directory containing training TFRecords')
 parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
 FLAGS = parser.parse_args()
@@ -74,11 +73,6 @@ def calc_epoch_steps(num_files):
 
 def local_swish(x):
     return x * tf.nn.sigmoid(x)
-
-@tf.function
-def call_base_model(model, inputs):
-    #return model(inputs, training=True, features_only=True)
-    return model(inputs, training=True)
 
 @tf.function
 def call_model(model, inputs):
@@ -110,6 +104,9 @@ def train():
         FLAGS.initial_learning_rate *= num_replicas
         FLAGS.batch_size *= num_replicas
 
+        logdir = os.path.join(FLAGS.train_dir, 'logs')
+        writer = tf.summary.create_file_writer(logdir)
+
         dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
         global_step = tf.Variable(1, dtype=tf.int64, name='global_step', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
         learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
@@ -117,7 +114,8 @@ def train():
         train_base = coco.create_coco_iterable(FLAGS.train_coco_annotations, FLAGS.train_coco_data_dir, logger)
         eval_base = coco.create_coco_iterable(FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, logger)
 
-        model, image_size, anchors_boxes, anchor_areas = ssd.create_model(dtype, FLAGS.model_name, train_base.num_classes())
+        model, anchors_boxes, anchor_areas = ssd.create_model(dtype, FLAGS.model_name, train_base.num_classes())
+        image_size = model.image_size
         num_anchors = anchors_boxes.shape[0]
         logger.info('base_model: {}, num_anchors: {}, image_size: {}'.format(FLAGS.model_name, num_anchors, image_size))
 
@@ -130,7 +128,7 @@ def train():
 
             ds = map_iter.from_indexable(base,
                     num_parallel_calls=FLAGS.num_cpus,
-                    output_types=(tf.string, tf.int64, tf.float32, tf.float32, tf.int32, tf.int32),
+                    output_types=(tf.string, tf.int64, tf.float32, tf.float32, tf.int32),
                     output_shapes=(
                         tf.TensorShape([]),
                         tf.TensorShape([]),
@@ -151,8 +149,6 @@ def train():
             return ds, num_images, num_classes, cat_names
 
         def create_dataset_from_tfrecord(name, dataset_dir, is_training):
-            coco.complete_initialization(base, image_size, anchors_boxes, anchor_areas, is_training)
-
             filenames = [os.path.join(dataset_dir, fn) for fn in os.listdir(dataset_dir)]
             ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
             ds = ds.map(unpack_tfrecord, num_parallel_reads=FLAGS.num_cpus)
@@ -213,12 +209,7 @@ def train():
             steps_per_epoch, calc_epoch_steps(train_num_images), train_num_images,
             steps_per_eval, calc_epoch_steps(eval_num_images), eval_num_images))
 
-        dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
-        dstrategy.experimental_run_v2(call_model, args=(model, dummy_input))
-
-        num_vars_ssd = 0
         num_vars_ssd = len(model.trainable_variables)
-        num_params_ssd = 0
         num_params_ssd = np.sum([np.prod(v.shape) for v in model.trainable_variables])
 
         logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, ssd model trainable variables/params: {}/{}, dtype: {}'.format(
@@ -370,6 +361,7 @@ def train():
                 if g is None:
                     logger.info('no gradients for variable: {}'.format(v))
                 else:
+                    logger.info('have gradient: var: {}: grad shape: {}'.format(v, g.shape))
                     g = tf.clip_by_value(g, -5, 5)
 
                 clip_gradients.append(g)
@@ -435,6 +427,27 @@ def train():
         num_epochs_without_improvement = 0
         initial_learning_rate_multiplier = 0.2
         learning_rate_multiplier = initial_learning_rate_multiplier
+
+        if True:
+            with writer.as_default():
+                train_steps = run_epoch('train', train_dataset, distributed_train_step, 1)
+                from tensorflow.python.keras import backend as K
+                from tensorflow.python.ops import summary_ops_v2
+                from tensorflow.python.eager import context
+
+                with context.eager_mode():
+                    with summary_ops_v2.always_record_summaries():
+                        if not model.run_eagerly:
+                            summary_ops_v2.graph(K.get_graph(), step=0)
+
+                        summary_writable = (
+                                model._is_graph_network or  # pylint: disable=protected-access
+                                model.__class__.__name__ == 'Sequential')  # pylint: disable=protected-access
+                        if summary_writable:
+                            summary_ops_v2.keras_model('keras', model, step=0)
+
+                exit(0)
+
 
         if manager.latest_checkpoint:
             reset_metrics()
