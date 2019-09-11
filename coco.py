@@ -311,7 +311,7 @@ class COCO_Iterable:
     def __len__(self):
         return len(self.image_tuples)
 
-    def process_image(self, i, augmentation):
+    def process_image(self, i, augmentation, return_orig_format=False):
         start_time = time.time()
 
         filename, image_id, anns = self.image_tuples[i]
@@ -346,7 +346,10 @@ class COCO_Iterable:
         bboxes = annotations['bboxes']
         cat_ids = annotations['category_id']
 
-        if False:
+        if return_orig_format:
+            if len(bboxes) == 0:
+                raise ProcessingError('there are no bboxes after preprocessing')
+
             bboxes = np.array(bboxes)
             x0 = np.array(bboxes[:, 0])
             y0 = np.array(bboxes[:, 1])
