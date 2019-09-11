@@ -58,7 +58,10 @@ def do_work(worker_id, num_images, image_size, anchors_boxes, anchor_areas):
     for idx in range(num_images):
         idx = idx % num_images
 
-        filename, image_id, image, true_bboxes, true_labels = base[idx]
+        try:
+            filename, image_id, image, true_bboxes, true_labels = base.process_image(idx, base.train_augmentation, return_orig_format=True)
+        except coco.ProcessingError as e:
+            continue
 
         processed += 1
         bboxes += np.count_nonzero(true_labels)
