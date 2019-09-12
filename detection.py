@@ -32,7 +32,7 @@ parser.add_argument('--num_epochs', type=int, default=1000, help='Number of epoc
 parser.add_argument('--epoch', type=int, default=0, help='Initial epoch\'s number')
 parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel preprocessing jobs.')
 parser.add_argument('--train_dir', type=str, required=True, help='Path to train directory, where graph will be stored.')
-parser.add_argument('--checkpoint', type=str, help='Load model weights from this file')
+parser.add_argument('--base_checkpoint', type=str, help='Load base model weights from this file')
 parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='Model name')
 parser.add_argument('--data_format', type=str, default='channels_last', choices=['channels_first', 'channels_last'], help='Data format: [channels_first, channels_last]')
 parser.add_argument('--initial_learning_rate', default=1e-3, type=float, help='Initial learning rate (will be multiplied by the number of nodes in the distributed strategy)')
@@ -215,18 +215,19 @@ def train():
         checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model)
         manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=5)
 
-        if FLAGS.checkpoint:
-            status = checkpoint.restore(FLAGS.checkpoint)
-            status.expect_partial()
-
-            logger.info("Restored from external checkpoint {}".format(FLAGS.checkpoint))
-
         status = checkpoint.restore(manager.latest_checkpoint)
 
         if manager.latest_checkpoint:
             logger.info("Restored from {}, global step: {}".format(manager.latest_checkpoint, global_step.numpy()))
         else:
             logger.info("Initializing from scratch, no latest checkpoint")
+
+        if FLAGS.base_checkpoint:
+            base_checkpoint = tf.train.Checkpoint(model=model.base_model)
+            status = base_checkpoint.restore(FLAGS.base_checkpoint)
+            status.expect_partial()
+
+            logger.info("Restored base model from external checkpoint {}".format(FLAGS.base_checkpoint))
 
         loss_metric = tf.keras.metrics.Mean(name='train_loss')
         accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='train_accuracy')
