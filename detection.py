@@ -71,13 +71,6 @@ def unpack_tfrecord(serialized_example):
 def calc_epoch_steps(num_files):
     return (num_files + FLAGS.batch_size - 1) // FLAGS.batch_size
 
-def local_swish(x):
-    return x * tf.nn.sigmoid(x)
-
-@tf.function
-def call_model(model, inputs):
-    return model(inputs, training=True)
-
 def smooth_l1_loss(x):
     square_loss   = 0.5*x**2
     absolute_loss = tf.abs(x)
@@ -361,7 +354,6 @@ def train():
                 if g is None:
                     logger.info('no gradients for variable: {}'.format(v))
                 else:
-                    logger.info('have gradient: var: {}: grad shape: {}'.format(v, g.shape))
                     g = tf.clip_by_value(g, -5, 5)
 
                 clip_gradients.append(g)
@@ -428,7 +420,7 @@ def train():
         initial_learning_rate_multiplier = 0.2
         learning_rate_multiplier = initial_learning_rate_multiplier
 
-        if True:
+        if False:
             with writer.as_default():
                 train_steps = run_epoch('train', train_dataset, distributed_train_step, 1)
                 from tensorflow.python.keras import backend as K

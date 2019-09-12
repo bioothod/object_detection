@@ -11,6 +11,9 @@ import efficientnet as efn
 logger = logging.getLogger('detection')
 logger.setLevel(logging.INFO)
 
+def local_swish(x):
+    return x * tf.nn.sigmoid(x)
+
 class StdConv(tf.keras.layers.Layer):
     def __init__(self, global_params, num_filters, strides=2, dilation_rate=1, dropout_rate=0.1, **kwargs):
         super(StdConv, self).__init__(**kwargs)
@@ -92,7 +95,7 @@ class OutConv(tf.keras.layers.Layer):
             activation='relu')
 
     def flatten_anchors(self, x):
-        return tf.reshape(x, [-1, x.shape[1] * x.shape[2] * self.k, x.shape[3] // self.k])
+        return tf.reshape(x, [-1, x.shape[1] * x.shape[2] * self.k, int(x.shape[3] / self.k)])
 
     def call(self, inputs, training=True):
         coords = self.loc_out(inputs)
@@ -111,7 +114,6 @@ class TopLayer(tf.keras.layers.Layer):
         self.global_params = global_params
 
     def build(self, input_shape):
-        logger.info('{}: build top: input_shape: {}'.format(self.name, input_shape))
         self.out = tf.keras.layers.Conv2D(
             input_shape=input_shape,
             filters=input_shape[-1],
@@ -137,7 +139,6 @@ class SSDHead(tf.keras.layers.Layer):
         self.relu_fn = global_params.relu_fn or tf.nn.swish
 
     def build(self, input_shape):
-        logger.info('{}: build ssd: input_shape: {}'.format(self.name, input_shape))
         self.dropout = tf.keras.layers.Dropout(0.25)
         self.sc0 = StdConv(self.global_params, 256, strides=1)
         self.sc1 = StdConv(self.global_params, 256, strides=1)
@@ -160,6 +161,7 @@ class EfficientNetSSD(tf.keras.Model):
             'data_format': 'channels_last',
             'l2_reg_weight': 1e-4,
             'num_classes': None,
+            'relu_fn': local_swish,
         }
         blocks_args, global_params, image_size = efn.get_model_params(model_name, override_params)
         self.base_model = efn.Model(blocks_args, global_params)
@@ -274,7 +276,6 @@ class EfficientNetSSD(tf.keras.Model):
 
             ssd_head = self.ssd_heads.get(reduction_idx)
             if ssd_head is not None:
-                logger.info('reduction_idx: {}, endpoint: {}'.format(reduction_idx, endpoint))
                 coords, classes = ssd_head(endpoint, training=training)
 
                 ssd_stack_coords.append(coords)
@@ -290,7 +291,6 @@ class EfficientNetSSD(tf.keras.Model):
 
             ssd_head = self.ssd_heads.get(top_idx)
             if ssd_head is not None:
-                logger.info('top: last_reduction_idx: {}, index: {}, outputs: {}'.format(last_reduction_idx, top_idx, outputs))
                 coords, classes = ssd_head(outputs, training=training)
 
                 ssd_stack_coords.append(coords)
