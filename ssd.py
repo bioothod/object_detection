@@ -109,7 +109,7 @@ class OutConv(tf.keras.layers.Layer):
         return [flatten_coords, flatten_classes]
 
 class TopLayer(tf.keras.layers.Layer):
-    def __init__(self, global_params, num_features, **kwargs):
+    def __init__(self, global_params, **kwargs):
         super(TopLayer, self).__init__(**kwargs)
         self.global_params = global_params
 
@@ -174,14 +174,7 @@ class EfficientNetSSD(tf.keras.Model):
         self.image_size = image_size
         self.num_classes = num_classes
 
-        self.cell_scales = [
-            [1.3, 2, 3, 4.1, 4.6],
-            [1.3, 2, 3, 4.1, 4.6],
-            [1.3, 2, 3, 4.1, 4.6],
-            [1.3, 2, 3, 4.1, 4.6],
-            [1.3, 2, 3, 4.1],
-            [1.3, 2],
-        ]
+        self.cell_scales = [1.3, 2, 3, 4.1, 4.6]
 
         self.ssd_heads = {}
         self.ssd_meta = {}
@@ -194,35 +187,29 @@ class EfficientNetSSD(tf.keras.Model):
         self.build_ssd()
 
     def build_ssd_head(self):
-        min_scale = 16 / self.image_size
-        max_scale = 0.9
-        num_features = len(self.cell_scales)
-
-        layer_scale = 1.
         layer_idx = len(self.ssd_heads)
-        if layer_idx >= 1:
-            layer_scale = min_scale + (max_scale - min_scale) * (layer_idx - 1) / (num_features - 1)
 
-        cell_scales_for_layer = self.cell_scales[layer_idx]
         aspect_ratios = []
-        for scale in cell_scales_for_layer:
+        for scale in self.cell_scales:
             scale = np.sqrt(scale)
             aspect_ratios += [(scale, 1/scale), (1/scale, scale)]
 
-        aspect_ratios += [(1, 1)]
+        square_scales = [1, 2, 0.5]
+        for scale in square_scales:
+            scale = np.sqrt(scale)
+            aspect_ratios += [(scale, scale)]
 
         shifts2d = [(0, 0)]
 
         num_anchors_per_output = len(aspect_ratios) * len(shifts2d)
-        logger.info('ssd_head: layer_scale: {:.2f}, num_anchors_per_output: {}'.format(layer_scale, num_anchors_per_output))
 
         ssd_head = SSDHead(self.global_params, num_anchors_per_output, self.num_classes)
-        return ssd_head, (num_anchors_per_output, layer_scale, aspect_ratios, shifts2d)
+        return ssd_head, (num_anchors_per_output, aspect_ratios, shifts2d)
 
     def build_ssd(self):
         reduction_idx = 0
         reduction_blocks = {}
-        reduction_skip = 1
+        reduction_skip = 2
 
         for idx, block in enumerate(self.base_model._blocks):
             if ((idx == len(self.base_model._blocks) - 1) or self.base_model._blocks[idx + 1].block_args().strides[0] > 1):
@@ -245,10 +232,10 @@ class EfficientNetSSD(tf.keras.Model):
 
             last_reduction_idx = reduction_idx
 
-        for top_idx in range(len(self.cell_scales) - len(self.ssd_heads)):
+        for top_idx in range(3):
             last_reduction_idx += 1
 
-            top_layer = TopLayer(self.global_params, int(256 / (top_idx + 1)))
+            top_layer = TopLayer(self.global_params)
             self.top_layers.append(top_layer)
 
             ssd_head, meta = self.build_ssd_head()
@@ -319,16 +306,16 @@ def create_model(dtype, model_name, num_classes):
         coords, classes = endpoint
 
         m = model.ssd_meta.get(reduction_idx)
-        num_anchors_per_output, layer_scale, aspect_ratios, shifts2d = m
+        num_anchors_per_output, aspect_ratios, shifts2d = m
 
         layer_size = int(np.sqrt(classes.shape[1] / num_anchors_per_output))
 
-        anchor_boxes_for_layer, anchor_areas_for_layer = anchor.create_anchors_for_layer(model.image_size, layer_size, layer_scale, aspect_ratios, shifts2d)
+        anchor_boxes_for_layer, anchor_areas_for_layer = anchor.create_anchors_for_layer(model.image_size, layer_size, aspect_ratios, shifts2d)
         anchor_boxes += anchor_boxes_for_layer
         anchor_areas += anchor_areas_for_layer
 
-        logger.info('ssd_head: num_anchors_per_output: {}, layer_size: {}, layer_scale: {:.2f} anchors: {}/{}'.format(
-            num_anchors_per_output, layer_size, layer_scale, len(anchor_boxes_for_layer), len(anchor_boxes)))
+        logger.info('ssd_head: num_anchors_per_output: {}, layer_size: {}, anchors: {}/{}'.format(
+            num_anchors_per_output, layer_size, len(anchor_boxes_for_layer), len(anchor_boxes)))
 
     anchor_boxes = np.array(anchor_boxes)
     anchor_areas = np.array(anchor_areas)
