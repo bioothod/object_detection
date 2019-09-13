@@ -63,11 +63,9 @@ def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas):
                 'image': tf.io.FixedLenFeature([], tf.string),
             })
 
-    orig_bboxes = tf.io.decode_raw(features['true_bboxes'], tf.float64)
-    orig_bboxes = tf.cast(orig_bboxes, tf.float32)
+    orig_bboxes = tf.io.decode_raw(features['true_bboxes'], tf.float32)
     orig_bboxes = tf.reshape(orig_bboxes, [-1, 4])
-    orig_labels = tf.io.decode_raw(features['true_labels'], tf.int64)
-    orig_labels = tf.cast(orig_labels, tf.int32)
+    orig_labels = tf.io.decode_raw(features['true_labels'], tf.int32)
     filename = features['filename']
     image_id = features['image_id']
     image = tf.image.decode_jpeg(features['image'], channels=3)
@@ -165,7 +163,12 @@ def train():
             return ds, num_images, num_classes, cat_names
 
         def create_dataset_from_tfrecord(name, dataset_dir, is_training):
-            filenames = [os.path.join(dataset_dir, fn) for fn in os.listdir(dataset_dir)]
+            filenames = []
+            for fn in os.listdir(dataset_dir):
+                fn = os.path.join(dataset_dir, fn)
+                if os.path.isfile(fn):
+                    filenames.append(fn)
+
             ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
             ds = ds.map(lambda record: unpack_tfrecord(record, np_anchor_boxes, np_anchor_areas), num_parallel_calls=FLAGS.num_cpus)
             if is_training:
@@ -191,12 +194,11 @@ def train():
             train_num_classes = FLAGS.num_classes
             train_cat_names = {}
 
-        if False:
-            data_dir = os.path.join(FLAGS.train_dir, 'tmp')
+        if e            data_dir = os.path.join(FLAGS.train_dir, 'tmp')
             os.makedirs(data_dir, exist_ok=True)
 
-            #for filename, image_id, image, true_bboxes, true_labels in train_dataset.unbatch().take(10):
-            for filename, image_id, image, true_bboxes, true_labels in train_dataset.take(10):
+            for filename, image_id, image, true_bboxes, true_labels in train_dataset.unbatch().take(10):
+            #for filename, image_id, image, true_bboxes, true_labels in train_dataset.take(10):
                 filename = str(filename.numpy(), 'utf8')
                 true_labels = true_labels.numpy()
                 true_bboxes = true_bboxes.numpy()
@@ -219,7 +221,8 @@ def train():
                     bb = [x0, y0, x1, y1]
                     new_anns.append((bb, cat_id))
 
-                logger.info('{}: true anchors: {}'.format(dst, new_anns))
+                #logger.info('{}: true anchors: {}'.format(dst, new_anns))
+                logger.info('{}: true anchors: {}'.format(dst, len(new_anns)))
 
                 image = image.numpy() * 128. + 128
                 image = image.astype(np.uint8)
