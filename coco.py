@@ -171,60 +171,34 @@ def get_training_augmentation(image_size, bbox_params):
     train_transform = [
         A.HorizontalFlip(p=0.5),
         A.PadIfNeeded(min_height=image_size, min_width=image_size, always_apply=True, border_mode=0),
+        A.OneOf(
+            [
+                A.RandomScale(scale_limit=0.3, interpolation=cv2.INTER_LANCZOS4),
+                A.RandomCrop(height=image_size, width=image_size),
+        ], p=0.5),
 
         A.OneOf([
             A.Compose([
-                A.Resize(height=int(image_size*1.4), width=int(image_size*1.4), interpolation=cv2.INTER_LANCZOS4, always_apply=True),
-                A.RandomCrop(height=image_size, width=image_size, always_apply=True),
-
-                A.IAAAdditiveGaussianNoise(p=0.1),
-
-                A.OneOf(
-                    [
                         A.CLAHE(p=1),
-                        A.RandomBrightness(p=1),
-                        A.RandomGamma(p=1),
-                    ],
-                    p=0.5,
-                ),
-
-                A.OneOf(
-                    [
-                        A.IAASharpen(p=1),
-                        A.Blur(blur_limit=3, p=1),
-                        A.MotionBlur(blur_limit=3, p=1),
-                    ],
-                    p=0.5,
-                ),
-
-                A.OneOf(
-                    [
-                        A.RandomContrast(p=1),
-                        A.HueSaturationValue(p=1),
-                    ],
-                    p=0.5,
-                ),
-                A.Lambda(mask=round_clip_0_1),
-            ]),
+                        A.RandomBrightness(limit=0.05, p=1),
+                        A.RandomGamma(gamma_limit=(40, 60), p=1),
+            ], bbox_params),
 
             A.Compose([
-                A.Resize(height=int(image_size*1.2), width=int(image_size*1.2), interpolation=cv2.INTER_LANCZOS4, always_apply=True),
-                A.RandomCrop(height=image_size, width=image_size, always_apply=True),
-                A.OneOf(
-                    [
-                        A.IAASharpen(p=1),
-                        A.Blur(blur_limit=3, p=1),
-                        A.MotionBlur(blur_limit=3, p=1),
-                    ],
-                    p=0.5,
-                ),
-            ]),
+                        A.Blur(blur_limit=5, p=1),
+                        A.MotionBlur(blur_limit=5, p=1),
+                        A.MedianBlur(blur_limit=5, p=1),
+            ], bbox_params),
 
             A.Compose([
-                A.Resize(height=int(image_size*1.1), width=int(image_size*1.1), interpolation=cv2.INTER_LANCZOS4, always_apply=True),
-                A.RandomCrop(height=image_size, width=image_size, always_apply=True),
-            ]),
-        ], p=1.),
+                        A.RandomContrast(limit=0.05, p=1),
+                        A.HueSaturationValue(hue_shift_limit=7, sat_shift_limit=10, val_shift_limit=7, p=1),
+            ], bbox_params),
+        ], p=0.5),
+
+        A.PadIfNeeded(min_height=image_size, min_width=image_size, always_apply=True, border_mode=0),
+        A.LongestMaxSize(max_size=image_size, interpolation=cv2.INTER_LANCZOS4, always_apply=True),
+        A.PadIfNeeded(min_height=image_size, min_width=image_size, always_apply=True, border_mode=0),
     ]
 
     return A.Compose(train_transform, bbox_params)
@@ -351,10 +325,10 @@ class COCO_Iterable:
                 raise ProcessingError('there are no bboxes after preprocessing')
 
             bboxes = np.array(bboxes)
-            x0 = np.array(bboxes[:, 0])
-            y0 = np.array(bboxes[:, 1])
-            w = np.array(bboxes[:, 2])
-            h = np.array(bboxes[:, 3])
+            x0 = np.array(bboxes[:, 0], dtype=np.float32)
+            y0 = np.array(bboxes[:, 1], dtype=np.float32)
+            w = np.array(bboxes[:, 2], dtype=np.float32)
+            h = np.array(bboxes[:, 3], dtype=np.float32)
 
             cx = x0 + w/2
             cy = y0 + h/2
@@ -363,7 +337,7 @@ class COCO_Iterable:
             #self.logger.info('x0: {}, y0: {}, cx: {}, cy: {}, true_bboxes: {}'.format(x0, y0, cx, cy, true_bboxes))
             #exit(-1)
 
-            true_labels = np.array([self.cats[cat_id] for cat_id in cat_ids])
+            true_labels = np.array([self.cats[cat_id] for cat_id in cat_ids], dtype=np.int32)
 
             #self.logger.info('{}: classes: {}\n{}'.format(filename, true_labels, true_bboxes))
             return filename, image_id, image, true_bboxes, true_labels
@@ -479,7 +453,7 @@ def complete_initialization(coco_base, image_size, np_anchor_boxes, np_anchor_ar
     bbox_params = A.BboxParams(
             format='coco',
             min_area=0,
-            min_visibility=0.3,
+            min_visibility=0.6,
             label_fields=['category_id'])
 
     if is_training:
