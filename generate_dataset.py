@@ -18,7 +18,8 @@ __handler.setFormatter(__fmt)
 logger.addHandler(__handler)
 
 import coco
-import ssd
+import efficientnet
+import image as image_draw
 import tfrecord_writer
 
 parser = argparse.ArgumentParser()
@@ -40,14 +41,17 @@ def _int64_feature(value):
 def _bytes_feature(value):
     return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
 
-def do_work(worker_id, num_images, image_size, anchors_boxes, anchor_areas):
+def do_work(worker_id, num_images, image_size):
     base = coco.create_coco_iterable(FLAGS.coco_annotations, FLAGS.coco_data_dir, logger)
 
-    coco.complete_initialization(base, image_size, anchors_boxes, anchor_areas, FLAGS.is_training)
+    coco.complete_initialization(base, image_size, [], [], FLAGS.is_training)
 
     num_images = len(base)
     num_classes = base.num_classes()
     cat_names = base.cat_names()
+
+    images_dir = os.path.join(FLAGS.output_dir, 'images')
+    os.makedirs(images_dir, exist_ok=True)
 
     writer = tfrecord_writer.tf_records_writer('{}/worker{:02d}'.format(FLAGS.output_dir, worker_id), 0, FLAGS.num_images_per_tfrecord)
 
@@ -70,6 +74,24 @@ def do_work(worker_id, num_images, image_size, anchors_boxes, anchor_areas):
         image = image.astype(np.uint8)
         image_enc = cv2.imencode('.png', image)[1].tostring()
 
+        if processed <= 10:
+            new_anns = []
+            for bb, cat_id in zip(true_bboxes, true_labels):
+                cx, cy, h, w = bb
+                x0 = cx - w/2
+                x1 = cx + w/2
+                y0 = cy - h/2
+                y1 = cy + h/2
+
+                bb = [x0, y0, x1, y1]
+                new_anns.append((bb, cat_id))
+
+            dst = '{}/{:02d}_{}_{}.png'.format(images_dir, worker_id, image_id, processed)
+            logger.info('{}: true anchors: {}'.format(dst, new_anns))
+
+            image_draw.draw_im(image, new_anns, dst, {})
+
+
         example = tf.train.Example(features=tf.train.Features(feature={
             'image_id': _int64_feature(image_id),
             'image': _bytes_feature(bytes(image_enc)),
@@ -84,7 +106,8 @@ def do_work(worker_id, num_images, image_size, anchors_boxes, anchor_areas):
         if idx % 1000 == 0:
             dur = time.time() - start_time
             mean_time = dur / processed
-            logger.info('{}: {}: mean bboxes: {:.2f}, mean time: {:.1f} ms'.format(os.getpid(), filename, bboxes / processed, mean_time * 1000))
+            logger.info('{}: {}: mean bboxes: {:.2f}, mean time: {:.1f} ms, bboxes.dtype: {}, labels.dtype: {}'.format(
+                os.getpid(), filename, bboxes / processed, mean_time * 1000, true_bboxes.dtype, true_labels.dtype))
 
 
     writer.close()
@@ -97,15 +120,14 @@ def main():
 
     os.makedirs(FLAGS.output_dir, exist_ok=True)
 
-    model, image_size, anchors_boxes, anchor_areas = ssd.create_model(float, FLAGS.model_name, FLAGS.num_classes)
-    num_anchors = anchors_boxes.shape[0]
-    logger.info('base_model: {}, num_anchors: {}, image_size: {}'.format(FLAGS.model_name, num_anchors, image_size))
+    image_size = efficientnet.efficientnet_params(FLAGS.model_name)[2]
+    logger.info('base_model: {}, image_size: {}'.format(FLAGS.model_name, image_size))
 
     mp.set_start_method('spawn')
 
     processes = []
     for i in range(FLAGS.num_cpus):
-        p = mp.Process(target=do_work, args=(i, FLAGS.num_images / FLAGS.num_cpus, image_size, anchors_boxes, anchor_areas))
+        p = mp.Process(target=do_work, args=(i, FLAGS.num_images / FLAGS.num_cpus, image_size))
         p.start()
         processes.append(p)
 
