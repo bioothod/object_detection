@@ -30,15 +30,16 @@ def calc_iou(box, boxes, area):
     ovr = inter / (box_area + area - inter)
     return ovr
 
-def create_anchors_for_layer(image_size, layer_size, cell_scales, shifts):
+def create_anchors_for_layer(image_size, layer_size, layer_scale, cell_scales, shifts):
     anchor_boxes, anchor_areas = [], []
 
-    cell_size = image_size / layer_size
+    cell_size = image_size * layer_scale
+    grid_cell_size = image_size / layer_size
 
     for x in range(layer_size):
         for y in range(layer_size):
-            orig_xc = (x + 0.5) * cell_size
-            orig_yc = (y + 0.5) * cell_size
+            orig_xc = (x + 0.5) * grid_cell_size
+            orig_yc = (y + 0.5) * grid_cell_size
 
             for scale_h, scale_w in cell_scales:
                 w = cell_size * scale_w

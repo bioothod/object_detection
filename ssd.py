@@ -174,7 +174,7 @@ class EfficientNetSSD(tf.keras.Model):
         self.image_size = image_size
         self.num_classes = num_classes
 
-        self.cell_scales = [1.3, 2, 3, 4.1, 4.6]
+        self.cell_scales = [1.3, 2, 3, 4.1]
 
         self.ssd_heads = {}
         self.ssd_meta = {}
@@ -187,14 +187,12 @@ class EfficientNetSSD(tf.keras.Model):
         self.build_ssd()
 
     def build_ssd_head(self):
-        layer_idx = len(self.ssd_heads)
-
         aspect_ratios = []
         for scale in self.cell_scales:
             scale = np.sqrt(scale)
             aspect_ratios += [(scale, 1/scale), (1/scale, scale)]
 
-        square_scales = [1, 2, 0.5]
+        square_scales = [1]
         for scale in square_scales:
             scale = np.sqrt(scale)
             aspect_ratios += [(scale, scale)]
@@ -210,6 +208,7 @@ class EfficientNetSSD(tf.keras.Model):
         reduction_idx = 0
         reduction_blocks = {}
         reduction_skip = 1
+        top_layers = 3
 
         for idx, block in enumerate(self.base_model._blocks):
             if ((idx == len(self.base_model._blocks) - 1) or self.base_model._blocks[idx + 1].block_args().strides[0] > 1):
@@ -232,7 +231,7 @@ class EfficientNetSSD(tf.keras.Model):
 
             last_reduction_idx = reduction_idx
 
-        for top_idx in range(3):
+        for top_idx in range(top_layers):
             last_reduction_idx += 1
 
             top_layer = TopLayer(self.global_params)
@@ -302,6 +301,9 @@ def create_model(dtype, model_name, num_classes):
     anchor_boxes = []
     anchor_areas = []
 
+    layer_idx = 0
+    num_layers = len(model.output_layer_idxs)
+
     for reduction_idx, endpoint in zip(model.output_layer_idxs, model.endpoints):
         coords, classes = endpoint
 
@@ -310,12 +312,19 @@ def create_model(dtype, model_name, num_classes):
 
         layer_size = int(np.sqrt(classes.shape[1] / num_anchors_per_output))
 
-        anchor_boxes_for_layer, anchor_areas_for_layer = anchor.create_anchors_for_layer(model.image_size, layer_size, aspect_ratios, shifts2d)
+        min_scale = 16 / model.image_size
+        max_scale = 0.9
+
+        layer_scale = min_scale + (max_scale - min_scale) * layer_idx / (num_layers - 1)
+
+        anchor_boxes_for_layer, anchor_areas_for_layer = anchor.create_anchors_for_layer(model.image_size, layer_size, layer_scale, aspect_ratios, shifts2d)
         anchor_boxes += anchor_boxes_for_layer
         anchor_areas += anchor_areas_for_layer
 
-        logger.info('ssd_head: num_anchors_per_output: {}, layer_size: {}, anchors: {}/{}'.format(
-            num_anchors_per_output, layer_size, len(anchor_boxes_for_layer), len(anchor_boxes)))
+        logger.info('ssd_head: num_anchors_per_output: {}, layer_size: {}, layer_idx: {}, layer_scale: {:.2f}, anchors: {}/{}'.format(
+            num_anchors_per_output, layer_size, layer_idx, layer_scale, len(anchor_boxes_for_layer), len(anchor_boxes)))
+
+        layer_idx += 1
 
     anchor_boxes = np.array(anchor_boxes)
     anchor_areas = np.array(anchor_areas)
