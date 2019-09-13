@@ -15,7 +15,7 @@ __handler = logging.StreamHandler()
 __handler.setFormatter(__fmt)
 logger.addHandler(__handler)
 
-import anchor_gen
+import anchors_gen
 import coco
 import image as image_draw
 import loss
@@ -40,7 +40,7 @@ parser.add_argument('--min_learning_rate', default=1e-6, type=float, help='Minim
 parser.add_argument('--steps_per_eval', default=-1, type=int, help='Number of steps per evaluation run')
 parser.add_argument('--print_per_train_steps', default=100, type=int, help='Print train stats per this number of steps(batches)')
 parser.add_argument('--steps_per_epoch', default=-1, type=int, help='Number of steps per training run')
-parser.add_argument('--min_eval_metric', default=0.75, type=float, help='Minimal evaluation metric to start saving models')
+parser.add_argument('--min_eval_metric', default=0.2, type=float, help='Minimal evaluation metric to start saving models')
 parser.add_argument('--negative_positive_rate', default=2, type=float, help='Negative to positive anchors ratio')
 parser.add_argument('--epochs_lr_update', default=10, type=int, help='Maximum number of epochs without improvement used to reset or decrease learning rate')
 parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16 training/inference')
@@ -73,7 +73,7 @@ def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas):
     image -= 128.
     image /= 128.
 
-    true_bboxes, true_labels = anchor_gen.generate_true_labels_for_anchors(orig_bboxes, orig_labels, np_anchor_boxes, np_anchor_areas)
+    true_bboxes, true_labels = anchors_gen.generate_true_labels_for_anchors(orig_bboxes, orig_labels, np_anchor_boxes, np_anchor_areas)
 
     return filename, image_id, image, true_bboxes, true_labels
     #return filename, image_id, image, orig_bboxes, orig_labels
@@ -94,9 +94,9 @@ def train():
     handler.setFormatter(__fmt)
     logger.addHandler(handler)
 
-    logger.info('threads: inter(between): {}, intra(within): {}'.format(tf.config.threading.get_inter_op_parallelism_threads(), tf.config.threading.get_intra_op_parallelism_threads()))
-    tf.config.threading.set_inter_op_parallelism_threads(10)
-    tf.config.threading.set_intra_op_parallelism_threads(10)
+    #logger.info('threads: inter(between): {}, intra(within): {}'.format(tf.config.threading.get_inter_op_parallelism_threads(), tf.config.threading.get_intra_op_parallelism_threads()))
+    #tf.config.threading.set_inter_op_parallelism_threads(10)
+    #tf.config.threading.set_intra_op_parallelism_threads(10)
 
     num_replicas = 1
     #dstrategy = None
@@ -169,7 +169,7 @@ def train():
                 if os.path.isfile(fn):
                     filenames.append(fn)
 
-            ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
+            ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=32)
             ds = ds.map(lambda record: unpack_tfrecord(record, np_anchor_boxes, np_anchor_areas), num_parallel_calls=FLAGS.num_cpus)
             if is_training:
                 ds = ds.shuffle(200)
@@ -198,7 +198,7 @@ def train():
             data_dir = os.path.join(FLAGS.train_dir, 'tmp')
             os.makedirs(data_dir, exist_ok=True)
 
-            for filename, image_id, image, true_bboxes, true_labels in train_dataset.unbatch().take(10):
+            for filename, image_id, image, true_bboxes, true_labels in train_dataset.unbatch().take(20):
             #for filename, image_id, image, true_bboxes, true_labels in train_dataset.take(10):
                 filename = str(filename.numpy(), 'utf8')
                 true_labels = true_labels.numpy()
@@ -315,77 +315,77 @@ def train():
             positive_indexes = tf.where(true_labels > 0)
             num_positives = tf.shape(positive_indexes)[0]
 
-            num_negatives = tf.cast(FLAGS.negative_positive_rate * tf.cast(num_positives, tf.float32), tf.int32)
+            ce_loss, dist_loss, total_loss = 0., 0., 0.
 
-            # because 'x == 0' condition yields (none, 0) tensor, and ' < 1' yields (none, 2) shape, the same as aboe positive index selection
-            negative_indexes = tf.where(true_labels < 1)
-            # selecting scores for background class among true backgrounds (true_label == 0)
-            #negative_pred_background = tf.gather_nd(classes, negative_indexes)[:, 0]
+            if num_positives > 0:
+                num_negatives = tf.cast(FLAGS.negative_positive_rate * tf.cast(num_positives, tf.float32), tf.int32)
 
-            negative_true = tf.gather_nd(true_labels, negative_indexes)
-            negative_pred = tf.gather_nd(classes, negative_indexes)
-            negative_ce = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=negative_true, logits=negative_pred)
+                # because 'x == 0' condition yields (none, 0) tensor, and ' < 1' yields (none, 2) shape, the same as aboe positive index selection
+                negative_indexes = tf.where(true_labels < 1)
+                # selecting scores for background class among true backgrounds (true_label == 0)
+                #negative_pred_background = tf.gather_nd(classes, negative_indexes)[:, 0]
 
-            num_negatives_to_sample = tf.minimum(num_negatives, tf.shape(negative_indexes)[0])
-            #sampled_negative_pred_background, sampled_negative_indexes = tf.math.top_k(negative_pred_background, num_negatives_to_sample)
-            sorted_negative_indexes = tf.argsort(negative_ce, direction='ASCENDING')
-            sampled_negative_indexes = sorted_negative_indexes[:num_negatives_to_sample]
+                negative_true = tf.gather_nd(true_labels, negative_indexes)
+                negative_pred = tf.gather_nd(classes, negative_indexes)
+                negative_ce = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=negative_true, logits=negative_pred)
 
-            negative_indexes = tf.gather(negative_indexes, sampled_negative_indexes)
+                num_negatives_to_sample = tf.minimum(num_negatives, tf.shape(negative_indexes)[0])
+                #sampled_negative_pred_background, sampled_negative_indexes = tf.math.top_k(negative_pred_background, num_negatives_to_sample)
+                sorted_negative_indexes = tf.argsort(negative_ce, direction='ASCENDING')
+                sampled_negative_indexes = sorted_negative_indexes[:num_negatives_to_sample]
 
-
-            num_negative_worst_to_sample = tf.minimum(tf.cast(num_positives/4, tf.int32), tf.shape(negative_ce)[0])
-            sampled_negative_worst_ce, sampled_negative_worst_indexes = tf.math.top_k(negative_ce, num_negative_worst_to_sample)
-            negative_worst_indexes = tf.gather(negative_indexes, sampled_negative_worst_indexes)
+                negative_indexes = tf.gather(negative_indexes, sampled_negative_indexes)
 
 
-            new_indexes = tf.concat([positive_indexes, negative_indexes, negative_worst_indexes], axis=0)
-            #new_indexes = tf.concat([positive_indexes, negative_indexes], axis=0)
-
-            sampled_true_labels = tf.gather_nd(true_labels, new_indexes)
-            sampled_true_labels_one_hot = tf.one_hot(sampled_true_labels, train_num_classes, axis=-1)
-            sampled_pred_classes = tf.gather_nd(classes, new_indexes)
-
-            ce_loss = ce_loss_object(y_true=sampled_true_labels_one_hot, y_pred=sampled_pred_classes)
-            ce_loss = tf.nn.compute_average_loss(ce_loss, global_batch_size=FLAGS.batch_size) / tf.cast(num_positives, tf.float32)
-
-            full_accuracy_metric.update_state(y_true=sampled_true_labels, y_pred=sampled_pred_classes)
-            sampled_true_labels = tf.gather_nd(true_labels, positive_indexes)
-            sampled_pred_classes = tf.gather_nd(classes, positive_indexes)
-            accuracy_metric.update_state(y_true=sampled_true_labels, y_pred=sampled_pred_classes)
+                num_negative_worst_to_sample = tf.minimum(tf.cast(num_positives/4, tf.int32), tf.shape(negative_ce)[0])
+                sampled_negative_worst_ce, sampled_negative_worst_indexes = tf.math.top_k(negative_ce, num_negative_worst_to_sample)
+                negative_worst_indexes = tf.gather(negative_indexes, sampled_negative_worst_indexes)
 
 
+                new_indexes = tf.concat([positive_indexes, negative_indexes, negative_worst_indexes], axis=0)
+                #new_indexes = tf.concat([positive_indexes, negative_indexes], axis=0)
 
-            sampled_true_bboxes = tf.gather_nd(bboxes, positive_indexes)
-            sampled_pred_coords = tf.gather_nd(coords, positive_indexes)
+                sampled_true_labels = tf.gather_nd(true_labels, new_indexes)
+                sampled_true_labels_one_hot = tf.one_hot(sampled_true_labels, train_num_classes, axis=-1)
+                sampled_pred_classes = tf.gather_nd(classes, new_indexes)
 
-            tcx, tcy, th, tw = tf.split(sampled_true_bboxes, num_or_size_splits=4, axis=1)
-            pcx, pcy, ph, pw = tf.split(sampled_pred_coords, num_or_size_splits=4, axis=1)
+                ce_loss = ce_loss_object(y_true=sampled_true_labels_one_hot, y_pred=sampled_pred_classes)
+                ce_loss = tf.nn.compute_average_loss(ce_loss, global_batch_size=FLAGS.batch_size)
 
-            pw += 1e-10
-            ph += 1e-10
-
-            dc = tf.math.abs(tcx - pcx) / pw + tf.math.abs(tcy - pcy) / ph
-            dc *= 5
-
-            ds = tf.math.log(tw / pw) + tf.math.log(th / ph)
-            ds *= 10
-
-            dist_loss = smooth_l1_loss(dc + ds)
-            dist_loss = tf.nn.compute_average_loss(dist_loss, global_batch_size=FLAGS.batch_size)  / tf.cast(num_positives, tf.float32)
-
-            z = tf.zeros_like(dc)
-            dc = tf.math.abs(pcx - tcx) / tw + tf.math.abs(pcy - tcy) / th
-            ds = tf.math.abs(pw - tw) / tw + tf.math.abs(ph - th) / th
-            distance_center_metric.update_state(y_true=z, y_pred=dc)
-            distance_size_metric.update_state(y_true=z, y_pred=ds)
+                full_accuracy_metric.update_state(y_true=sampled_true_labels, y_pred=sampled_pred_classes)
+                sampled_true_labels = tf.gather_nd(true_labels, positive_indexes)
+                sampled_pred_classes = tf.gather_nd(classes, positive_indexes)
+                accuracy_metric.update_state(y_true=sampled_true_labels, y_pred=sampled_pred_classes)
 
 
-            reg_loss = tf.add_n(model.losses)
 
-            #total_loss = ce_loss + dist_loss + reg_loss
-            total_loss = ce_loss + dist_loss
-            loss_metric.update_state(total_loss)
+                sampled_true_bboxes = tf.gather_nd(bboxes, positive_indexes)
+                sampled_pred_coords = tf.gather_nd(coords, positive_indexes)
+
+                tcx, tcy, th, tw = tf.split(sampled_true_bboxes, num_or_size_splits=4, axis=1)
+                pcx, pcy, ph, pw = tf.split(sampled_pred_coords, num_or_size_splits=4, axis=1)
+
+                pw += 1e-10
+                ph += 1e-10
+
+                dc = tf.math.abs(tcx - pcx) / pw + tf.math.abs(tcy - pcy) / ph
+                dc *= 5
+
+                ds = tf.math.log(tw / pw) + tf.math.log(th / ph)
+                ds *= 10
+
+                dist_loss = smooth_l1_loss(dc + ds)
+                dist_loss = tf.nn.compute_average_loss(dist_loss, global_batch_size=FLAGS.batch_size)
+
+                z = tf.zeros_like(dc)
+                dc = tf.math.abs(pcx - tcx) / tw + tf.math.abs(pcy - tcy) / th
+                ds = tf.math.abs(pw - tw) / tw + tf.math.abs(ph - th) / th
+                distance_center_metric.update_state(y_true=z, y_pred=dc)
+                distance_size_metric.update_state(y_true=z, y_pred=ds)
+
+
+                total_loss = ce_loss + dist_loss
+                loss_metric.update_state(total_loss)
 
             return ce_loss, dist_loss, total_loss
 
@@ -408,7 +408,8 @@ def train():
                 if g is None:
                     logger.info('no gradients for variable: {}'.format(v))
                 else:
-                    g = tf.clip_by_value(g, -5, 5)
+                    pass
+                    #g = tf.clip_by_value(g, -5, 5)
 
                 clip_gradients.append(g)
             opt.apply_gradients(zip(clip_gradients, variables))
@@ -520,10 +521,14 @@ def train():
                 learning_rate.numpy()))
 
             eval_acc = eval_accuracy_metric.result()
-            if eval_acc > min_metric:
+            eval_center = eval_distance_center_metric.result()
+            eval_size = eval_distance_size_metric.result()
+            metric = eval_acc * 20 - (eval_center + eval_size)
+            if metric > min_metric:
                 save_path = manager.save()
-                logger.info("epoch: {}, saved checkpoint: {}, eval accuracy: {:.5f} -> {:.5f}".format(epoch, save_path, min_metric, eval_acc))
-                min_metric = eval_acc
+                logger.info("epoch: {}, saved checkpoint: {}, eval metric: {:.4f} -> {:.4f}, accuracy: {:.4f}, center: {:.4f}, size: {:.4f}".format(
+                    epoch, save_path, min_metric, metric, eval_acc, eval_center, eval_size))
+                min_metric = metric
                 num_epochs_without_improvement = 0
                 learning_rate_multiplier = initial_learning_rate_multiplier
             else:
