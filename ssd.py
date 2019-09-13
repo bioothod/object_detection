@@ -122,22 +122,77 @@ class OutConv(tf.keras.layers.Layer):
 
         return [flatten_coords, flatten_classes]
 
+class Attention(tf.keras.layers.Layer):
+    def __init__(self, global_params, dense_units, name=None):
+        super(Attention, self).__init__(name=name)
+
+        self.dense_units = dense_units
+
+        self.global_params = global_params
+        self.relu_fn = global_params.relu_fn or tf.nn.swish
+
+        self.batch_norm_momentum = global_params.batch_norm_momentum
+        self.batch_norm_epsilon = global_params.batch_norm_epsilon
+        self.data_format = global_params.data_format
+        if self.data_format == 'channels_first':
+            self.channel_axis = 1
+            self.spatial_dims = [2, 3]
+        else:
+            self.channel_axis = -1
+            self.spatial_dims = [1, 2]
+
+        self._build()
+
+    def _build(self):
+        self.bn_query = tf.keras.layers.BatchNormalization(
+            axis=self.channel_axis,
+            momentum=self.batch_norm_momentum,
+            epsilon=self.batch_norm_epsilon)
+        self.bn_values = tf.keras.layers.BatchNormalization(
+            axis=self.channel_axis,
+            momentum=self.batch_norm_momentum,
+            epsilon=self.batch_norm_epsilon)
+
+        self.dq = tf.keras.layers.Dense(self.dense_units)
+        self.dv = tf.keras.layers.Dense(self.dense_units)
+
+        self.score = tf.keras.layers.Dense(1)
+
+    def call(self, inputs, training=True):
+        query = self.bn_query(inputs)
+        q = self.dq(query)
+
+        values = self.bn_values(inputs)
+        v = self.dq(values)
+
+        th = tf.nn.tanh(q + v)
+
+        score = self.score(th)
+        attention_weights = tf.nn.softmax(score, axis=-1)
+
+        context_vector = attention_weights * values
+
+        logger.debug('attention: query: {}, values: {}, score: {}, attention_weights: {}, context_vector: {}'.format(
+            query, values, score, attention_weights, context_vector))
+
+        return context_vector
+
 class FeatureLayer(tf.keras.layers.Layer):
-    def __init__(self, global_params, **kwargs):
+    def __init__(self, global_params, num_features, **kwargs):
         super(FeatureLayer, self).__init__(**kwargs)
         self.global_params = global_params
         self.relu_fn = global_params.relu_fn or tf.nn.swish
 
+        self.num_features = num_features
+
     def build(self, input_shape):
-        self.dropout = tf.keras.layers.Dropout(0.25)
-        self.sc0 = StdConv(self.global_params, 512, strides=2)
-        self.sc1 = StdConv(self.global_params, 256, strides=1)
+        self.dropout = tf.keras.layers.Dropout(0.1)
+        self.sc0 = StdConv(self.global_params, self.num_features, strides=2)
 
     def call(self, inputs, training=True):
         x = self.relu_fn(inputs)
         x = self.dropout(x, training)
         x = self.sc0(x)
-        x = self.sc1(x)
         return x
 
 class SSDHead(tf.keras.layers.Layer):
@@ -258,7 +313,11 @@ class EfficientNetSSD(tf.keras.Model):
             layer_idx = len(self.ssd_heads)
             last_reduction_idx += 1
 
-            top_layer = FeatureLayer(self.global_params)
+            num_features = 512
+            if top_idx >= 2:
+                num_features = 256
+
+            top_layer = FeatureLayer(self.global_params, num_features)
             self.top_layers.append(top_layer)
 
             head, meta = self.build_ssd_head(layer_idx)
