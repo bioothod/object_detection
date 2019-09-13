@@ -15,7 +15,7 @@ __handler = logging.StreamHandler()
 __handler.setFormatter(__fmt)
 logger.addHandler(__handler)
 
-
+import anchor_gen
 import coco
 import image as image_draw
 import loss
@@ -47,26 +47,38 @@ parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16
 parser.add_argument('--dataset_type', type=str, choices=['files', 'tfrecords'], default='tfrecords', help='Dataset type')
 parser.add_argument('--train_tfrecord_dir', type=str, help='Directory containing training TFRecords')
 parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
+parser.add_argument('--num_classes', type=int, help='Number of classes in the dataset')
+parser.add_argument('--train_num_images', type=int, help='Number of images in train epoch')
+parser.add_argument('--eval_num_images', type=int, help='Number of images in eval epoch')
 FLAGS = parser.parse_args()
 
-def unpack_tfrecord(serialized_example):
+
+def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas):
     features = tf.io.parse_single_example(serialized_example,
             features={
-                'image_id': tf.FixedLenFeature([], tf.int64),
-                'filename': tf.FixedLenFeature([], tf.string),
-                'true_labels': tf.FixedLenFeature([], tf.string),
-                'true_bboxes': tf.FixedLenFeature([], tf.string),
-                'image': tf.FixedLenFeature([], tf.string),
+                'image_id': tf.io.FixedLenFeature([], tf.int64),
+                'filename': tf.io.FixedLenFeature([], tf.string),
+                'true_labels': tf.io.FixedLenFeature([], tf.string),
+                'true_bboxes': tf.io.FixedLenFeature([], tf.string),
+                'image': tf.io.FixedLenFeature([], tf.string),
             })
 
-    label = features['label']
+    orig_bboxes = tf.io.decode_raw(features['true_bboxes'], tf.float64)
+    orig_bboxes = tf.cast(orig_bboxes, tf.float32)
+    orig_bboxes = tf.reshape(orig_bboxes, [-1, 4])
+    orig_labels = tf.io.decode_raw(features['true_labels'], tf.int64)
+    orig_labels = tf.cast(orig_labels, tf.int32)
+    filename = features['filename']
     image_id = features['image_id']
-    image = tf.image.decode_jpeg(feature['image'], channels=3)
+    image = tf.image.decode_jpeg(features['image'], channels=3)
     image = tf.cast(image, tf.float32)
     image -= 128.
     image /= 128.
 
+    true_bboxes, true_labels = anchor_gen.generate_true_labels_for_anchors(orig_bboxes, orig_labels, np_anchor_boxes, np_anchor_areas)
+
     return filename, image_id, image, true_bboxes, true_labels
+    #return filename, image_id, image, orig_bboxes, orig_labels
 
 def calc_epoch_steps(num_files):
     return (num_files + FLAGS.batch_size - 1) // FLAGS.batch_size
@@ -107,13 +119,24 @@ def train():
         train_base = coco.create_coco_iterable(FLAGS.train_coco_annotations, FLAGS.train_coco_data_dir, logger)
         eval_base = coco.create_coco_iterable(FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, logger)
 
-        model, anchors_boxes, anchor_areas = ssd.create_model(dtype, FLAGS.model_name, train_base.num_classes())
+        model, np_anchor_boxes, np_anchor_areas = ssd.create_model(dtype, FLAGS.model_name, train_base.num_classes())
         image_size = model.image_size
-        num_anchors = anchors_boxes.shape[0]
+        num_anchors = np_anchor_boxes.shape[0]
         logger.info('base_model: {}, num_anchors: {}, image_size: {}'.format(FLAGS.model_name, num_anchors, image_size))
 
+        if False:
+            import pickle
+            d = {
+                'np_anchor_boxes': np_anchor_boxes,
+                'np_anchor_areas': np_anchor_areas,
+            }
+
+            with open(os.path.join(logdir, 'dump.pickle'), 'wb') as f:
+                pickle.dump(d, f, protocol=4)
+            exit(0)
+
         def create_dataset(name, base, is_training):
-            coco.complete_initialization(base, image_size, anchors_boxes, anchor_areas, is_training)
+            coco.complete_initialization(base, image_size, np_anchor_boxes, np_anchor_areas, is_training)
 
             num_images = len(base)
             num_classes = base.num_classes()
@@ -144,7 +167,7 @@ def train():
         def create_dataset_from_tfrecord(name, dataset_dir, is_training):
             filenames = [os.path.join(dataset_dir, fn) for fn in os.listdir(dataset_dir)]
             ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
-            ds = ds.map(unpack_tfrecord, num_parallel_reads=FLAGS.num_cpus)
+            ds = ds.map(lambda record: unpack_tfrecord(record, np_anchor_boxes, np_anchor_areas), num_parallel_calls=FLAGS.num_cpus)
             if is_training:
                 ds = ds.shuffle(200)
 
@@ -152,37 +175,51 @@ def train():
             ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
             ds = dstrategy.experimental_distribute_dataset(ds)
 
-            logger.info('{} dataset has been created, images: {}, classes: {}'.format(name, num_images, num_classes))
+            logger.info('{} dataset has been created, tfrecords: {}'.format(name, len(filenames)))
 
-            return ds, num_images, num_classes, cat_names
+            return ds
 
         if FLAGS.dataset_type == 'files':
             train_dataset, train_num_images, train_num_classes, train_cat_names = create_dataset('train', train_base, is_training=True)
             eval_dataset, eval_num_images, eval_num_classes, eval_cat_names = create_dataset('eval', eval_base, is_training=False)
         elif FLAGS.dataset_type == 'tfrecords':
-            train_dataset, train_num_images, train_num_classes, train_cat_names = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir, is_training=True)
-            eval_dataset, eval_num_images, eval_num_classes, eval_cat_names = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, is_training=False)
+            train_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir, is_training=True)
+            eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, is_training=False)
+
+            train_num_images = FLAGS.train_num_images
+            eval_num_images = FLAGS.eval_num_images
+            train_num_classes = FLAGS.num_classes
+            train_cat_names = {}
 
         if False:
             data_dir = os.path.join(FLAGS.train_dir, 'tmp')
             os.makedirs(data_dir, exist_ok=True)
 
-            for filename, image_id, image, true_bboxes, true_labels in train_dataset.unbatch().take(10):
+            #for filename, image_id, image, true_bboxes, true_labels in train_dataset.unbatch().take(10):
+            for filename, image_id, image, true_bboxes, true_labels in train_dataset.take(10):
                 filename = str(filename.numpy(), 'utf8')
+                true_labels = true_labels.numpy()
+                true_bboxes = true_bboxes.numpy()
 
                 dst = '{}/{}.png'.format(data_dir, image_id.numpy())
                 new_anns = []
                 # category ID in true_labels does not match train_cat_names here, this is converted category_id into range [0, num_categories], where 0 is background class
                 # true_orig_labels contain original category ids
-                non_background_index = np.where(true_labels.numpy() != 0)
+                non_background_index = np.where(true_labels != 0)
 
-                for bb, cat_id in zip(true_bboxes.numpy()[non_background_index], true_labels.numpy()[non_background_index]):
-                    y0, x0, y1, x1 = bb
+                #logger.info('{}: true_labels: {}, true_bboxes: {}, non_background_index: {}'.format(filename, true_labels, true_bboxes, non_background_index))
+
+                for bb, cat_id in zip(true_bboxes[non_background_index], true_labels[non_background_index]):
+                    cx, cy, h, w = bb
+                    x0 = cx - w/2
+                    x1 = cx + w/2
+                    y0 = cy - h/2
+                    y1 = cy + h/2
 
                     bb = [x0, y0, x1, y1]
                     new_anns.append((bb, cat_id))
 
-                logger.info('{}: true anchors: {}'.format(dst, len(new_anns)))
+                logger.info('{}: true anchors: {}'.format(dst, new_anns))
 
                 image = image.numpy() * 128. + 128
                 image = image.astype(np.uint8)
@@ -190,15 +227,26 @@ def train():
 
             exit(0)
 
+        if train_num_classes is None:
+            logger.error('If there is no train_num_classes (tfrecord dataset), you must provide --num_classes')
+            exit(-1)
+
+        if train_num_images is None:
+            logger.error('If there is no train_num_images (tfrecord dataset), you must provide --117266,')
+            exit(-1)
+        if eval_num_images is None:
+            logger.error('If there is no eval_num_images (tfrecord dataset), you must provide --steps_per_eval')
+            exit(-1)
 
         steps_per_epoch = calc_epoch_steps(train_num_images)
         if FLAGS.steps_per_epoch > 0:
             steps_per_epoch = FLAGS.steps_per_epoch
+
         steps_per_eval = calc_epoch_steps(eval_num_images)
         if FLAGS.steps_per_eval > 0:
             steps_per_eval = FLAGS.steps_per_eval
 
-        logger.info('steps_per_epoch: {}/{}, train images: {}, steps_per_eval: {}/{}, eval images: {}'.format(
+        logger.info('steps_per_epoch (used/calc): {}/{}, train images: {}, steps_per_eval (used/calc): {}/{}, eval images: {}'.format(
             steps_per_epoch, calc_epoch_steps(train_num_images), train_num_images,
             steps_per_eval, calc_epoch_steps(eval_num_images), eval_num_images))
 
