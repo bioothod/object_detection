@@ -194,7 +194,8 @@ def train():
             train_num_classes = FLAGS.num_classes
             train_cat_names = {}
 
-        if e            data_dir = os.path.join(FLAGS.train_dir, 'tmp')
+        if False:
+            data_dir = os.path.join(FLAGS.train_dir, 'tmp')
             os.makedirs(data_dir, exist_ok=True)
 
             for filename, image_id, image, true_bboxes, true_labels in train_dataset.unbatch().take(10):
