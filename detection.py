@@ -383,7 +383,8 @@ def train():
 
             reg_loss = tf.add_n(model.losses)
 
-            total_loss = ce_loss + dist_loss + reg_loss
+            #total_loss = ce_loss + dist_loss + reg_loss
+            total_loss = ce_loss + dist_loss
             loss_metric.update_state(total_loss)
 
             return ce_loss, dist_loss, total_loss
