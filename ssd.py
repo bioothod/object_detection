@@ -209,7 +209,7 @@ class EfficientNetSSD(tf.keras.Model):
     def build_ssd(self):
         reduction_idx = 0
         reduction_blocks = {}
-        reduction_skip = 2
+        reduction_skip = 1
 
         for idx, block in enumerate(self.base_model._blocks):
             if ((idx == len(self.base_model._blocks) - 1) or self.base_model._blocks[idx + 1].block_args().strides[0] > 1):
