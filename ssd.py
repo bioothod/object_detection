@@ -15,7 +15,7 @@ def local_swish(x):
     return x * tf.nn.sigmoid(x)
 
 class StdConv(tf.keras.layers.Layer):
-    def __init__(self, global_params, num_filters, strides=2, dilation_rate=1, dropout_rate=0.2, padding='same', **kwargs):
+    def __init__(self, global_params, num_filters, strides=2, dilation_rate=1, dropout_rate=0.1, padding='same', **kwargs):
         super(StdConv, self).__init__(**kwargs)
 
         self.num_filters = num_filters
@@ -178,21 +178,19 @@ class Attention(tf.keras.layers.Layer):
         return context_vector
 
 class FeatureLayer(tf.keras.layers.Layer):
-    def __init__(self, global_params, num_features, **kwargs):
+    def __init__(self, global_params, num_features, strides, **kwargs):
         super(FeatureLayer, self).__init__(**kwargs)
         self.global_params = global_params
         self.relu_fn = global_params.relu_fn or tf.nn.swish
 
         self.num_features = num_features
+        self.strides = strides
 
     def build(self, input_shape):
-        self.dropout = tf.keras.layers.Dropout(0.1)
-        self.sc0 = StdConv(self.global_params, self.num_features, strides=2)
+        self.sc0 = StdConv(self.global_params, self.num_features, strides=self.strides, dropout_rate=0)
 
     def call(self, inputs, training=True):
-        x = self.relu_fn(inputs)
-        x = self.dropout(x, training)
-        x = self.sc0(x)
+        x = self.sc0(inputs)
         return x
 
 class SSDHead(tf.keras.layers.Layer):
@@ -205,12 +203,10 @@ class SSDHead(tf.keras.layers.Layer):
         self.global_params = global_params
 
     def build(self, input_shape):
-        self.sc1 = StdConv(self.global_params, 512, strides=1)
         self.out = OutConv(self.global_params, self.k, self.num_classes)
 
     def call(self, inputs, training=True):
-        x = self.sc1(inputs)
-        x = self.out(x)
+        x = self.out(inputs)
 
         return x
 
@@ -244,13 +240,13 @@ class EfficientNetSSD(tf.keras.Model):
         ]
         self.square_scales = [1, 0.5, 0.75]
 
-        self.ssd_heads = {}
-        self.ssd_meta = {}
-        self.output_layer_idxs = []
+        self.ssd_heads = []
+        self.ssd_meta = []
 
         self.top_layers = []
 
         self.endpoints = None
+        self.reduction_range = [4, 5]
 
         self.build_ssd()
 
@@ -278,34 +274,22 @@ class EfficientNetSSD(tf.keras.Model):
     def build_ssd(self):
         reduction_idx = 0
         reduction_blocks = {}
-        reduction_skip = 2
-        top_layers = 3
+        top_layers = 4
 
-        for idx, block in enumerate(self.base_model._blocks):
-            if ((idx == len(self.base_model._blocks) - 1) or self.base_model._blocks[idx + 1].block_args().strides[0] > 1):
-                reduction_idx += 1
-
-                if reduction_idx <= reduction_skip:
-                    continue
-                reduction_blocks[reduction_idx] = block
-
-        logger.info('reduction blocks: {}, reduction_skip: {}, reduction indexes: {}'.format(len(reduction_blocks), reduction_skip, reduction_blocks.keys()))
-
-        if top_layers + len(reduction_blocks) != len(self.cell_ratios_for_layers):
-            logger.critical('incorrect number of blocks: cell ratios: {}, must be equal to sum: reduction_blocks: {}, top_layers: {}'.format(
+        if top_layers + len(self.reduction_range) != len(self.cell_ratios_for_layers):
+            logger.critical('incorrect number of blocks: cell ratios: {}, must be equal to sum: reduction_range: {}, top_layers: {}'.format(
                 len(self.cell_ratios_for_layers),
-                len(reduction_blocks), top_layers))
+                len(self.reduction_range), top_layers))
             exit(-1)
 
         last_reduction_idx = None
-        for reduction_idx, block in reduction_blocks.items():
+        for reduction_idx in self.reduction_range:
             layer_idx = len(self.ssd_heads)
 
             head, meta = self.build_ssd_head(layer_idx)
-            self.ssd_heads[reduction_idx] = head
-            self.ssd_meta[reduction_idx] = meta
 
-            self.output_layer_idxs.append(reduction_idx)
+            self.ssd_heads.append(head)
+            self.ssd_meta.append(meta)
 
             last_reduction_idx = reduction_idx
 
@@ -313,18 +297,18 @@ class EfficientNetSSD(tf.keras.Model):
             layer_idx = len(self.ssd_heads)
             last_reduction_idx += 1
 
-            num_features = 512
+            num_features = 256
+            strides = 2
             if top_idx >= 2:
-                num_features = 256
+                num_features = 128
+                strides = 1
 
-            top_layer = FeatureLayer(self.global_params, num_features)
+            top_layer = FeatureLayer(self.global_params, num_features, strides)
             self.top_layers.append(top_layer)
 
             head, meta = self.build_ssd_head(layer_idx)
-            self.ssd_heads[last_reduction_idx] = head
-            self.ssd_meta[last_reduction_idx] = meta
-
-            self.output_layer_idxs.append(last_reduction_idx)
+            self.ssd_heads.append(head)
+            self.ssd_meta.append(meta)
 
 
     def call(self, inputs, training=True):
@@ -336,36 +320,27 @@ class EfficientNetSSD(tf.keras.Model):
         outputs = self.base_model(inputs, training=training, features_only=True)
 
         last_reduction_idx = None
-        for ename, endpoint in self.base_model.endpoints.items():
-            m = re.match('reduction_(\d+)$', ename)
-            if m is None:
-                continue
+        for reduction_idx, ssd_head in zip(self.reduction_range, self.ssd_heads[:len(self.reduction_range)]):
+            endpoint = self.base_model.endpoints['reduction_{}'.format(reduction_idx)]
 
-            reduction_idx = int(m.group(1))
+            coords, classes = ssd_head(endpoint, training=training)
 
-            ssd_head = self.ssd_heads.get(reduction_idx)
-            if ssd_head is not None:
-                coords, classes = ssd_head(endpoint, training=training)
+            ssd_stack_coords.append(coords)
+            ssd_stack_classes.append(classes)
 
-                ssd_stack_coords.append(coords)
-                ssd_stack_classes.append(classes)
+            self.endpoints.append((coords, classes))
+            last_reduction_idx = reduction_idx
 
-                self.endpoints.append((coords, classes))
-                last_reduction_idx = reduction_idx
-
-        for top_idx, top_block in enumerate(self.top_layers):
-            top_idx += last_reduction_idx + 1
+        for top_idx, (top_block, ssd_head) in enumerate(zip(self.top_layers, self.ssd_heads[len(self.reduction_range):])):
+            reduction_idx = last_reduction_idx + 1 + top_idx
 
             outputs = top_block(outputs, training=training)
+            coords, classes = ssd_head(outputs, training=training)
 
-            ssd_head = self.ssd_heads.get(top_idx)
-            if ssd_head is not None:
-                coords, classes = ssd_head(outputs, training=training)
+            ssd_stack_coords.append(coords)
+            ssd_stack_classes.append(classes)
 
-                ssd_stack_coords.append(coords)
-                ssd_stack_classes.append(classes)
-
-                self.endpoints.append((coords, classes))
+            self.endpoints.append((coords, classes))
 
         output_classes = tf.concat(ssd_stack_classes, axis=1)
         output_coords = tf.concat(ssd_stack_coords, axis=1)
@@ -384,20 +359,19 @@ def create_model(dtype, model_name, num_classes):
     anchor_boxes = []
     anchor_areas = []
 
-    num_layers = len(model.output_layer_idxs)
+    num_layers = len(model.endpoints)
 
-    for layer_idx, (reduction_idx, endpoint) in enumerate(zip(model.output_layer_idxs, model.endpoints)):
+    for layer_idx, (endpoint, meta) in enumerate(zip(model.endpoints, model.ssd_meta)):
         coords, classes = endpoint
 
-        m = model.ssd_meta.get(reduction_idx)
-        num_anchors_per_output, aspect_ratios, shifts2d = m
+        num_anchors_per_output, aspect_ratios, shifts2d = meta
 
         layer_size = int(np.sqrt(classes.shape[1] / num_anchors_per_output))
 
         min_scale = 0.1
         max_scale = 0.9
 
-        layer_scale = min_scale + (max_scale - min_scale) * layer_idx / (len(model.output_layer_idxs) - 1)
+        layer_scale = min_scale + (max_scale - min_scale) * layer_idx / (num_layers - 1)
 
         anchor_boxes_for_layer, anchor_areas_for_layer = anchor.create_anchors_for_layer(model.image_size, layer_size, layer_scale, aspect_ratios, shifts2d)
         anchor_boxes += anchor_boxes_for_layer
