@@ -398,14 +398,14 @@ def train():
 
             return ce_loss, dist_loss, total_loss
 
-        def eval_step(filenames, images, bboxes, true_labels):
+        def eval_step(epoch, filenames, images, bboxes, true_labels):
             logits = model(images, training=False)
             ce_loss, dist_loss, total_loss = calculate_metrics(logits, bboxes, true_labels,
                     eval_loss_metric, eval_accuracy_metric, eval_full_accuracy_metric, eval_iou_metric,
                     eval_num_good_ious_metric, eval_num_positive_labels_metric)
             return ce_loss, dist_loss, total_loss
 
-        def train_step(filenames, images, bboxes, true_labels):
+        def train_step(epoch, filenames, images, bboxes, true_labels):
             with tf.GradientTape() as tape:
                 logits = model(images, training=True)
                 ce_loss, dist_loss, total_loss = calculate_metrics(logits, bboxes, true_labels,
@@ -414,12 +414,16 @@ def train():
 
             variables = model.trainable_variables
             gradients = tape.gradient(total_loss, variables)
+
+            stddev = 1 / ((1 + epoch)**0.55)
+
             clip_gradients = []
             for g, v in zip(gradients, variables):
                 if g is None:
                     logger.info('no gradients for variable: {}'.format(v))
                 else:
-                    g = tf.clip_by_value(g, -5, 5)
+                    g += tf.random.normal(stddev=stddev, mean=0., shape=g.shape)
+                    #g = tf.clip_by_value(g, -5, 5)
 
                 clip_gradients.append(g)
             opt.apply_gradients(zip(clip_gradients, variables))
@@ -427,15 +431,6 @@ def train():
             global_step.assign_add(1)
 
             return ce_loss, dist_loss, total_loss
-
-        @tf.function
-        def distributed_train_step_dummy(args):
-            ret = []
-            for x in dstrategy.experimental_run_v2(train_step, args=args):
-                x = dstrategy.reduce(tf.distribute.ReduceOp.SUM, x, axis=None)
-                ret.append(x)
-
-            return ret
 
         @tf.function
         def distributed_train_step(args):
@@ -453,7 +448,7 @@ def train():
             total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_total_losses, axis=None)
             return ce_loss, dist_loss, total_loss
 
-        def run_epoch(name, dataset, step_func, max_steps):
+        def run_epoch(name, epoch, dataset, step_func, max_steps):
             losses = []
             accs = []
 
@@ -467,10 +462,10 @@ def train():
                     images = tf.transpose(images, [0, 3, 1, 2])
 
 
-                ce_loss, dist_loss, total_loss = step_func(args=(filenames, images, bboxes, true_labels))
+                ce_loss, dist_loss, total_loss = step_func(args=(epoch, filenames, images, bboxes, true_labels))
                 if name == 'train' and step % FLAGS.print_per_train_steps == 0:
-                    logger.info('{}: step: {}/{}, ce_loss: {:.2e}, dist_loss: {:.2e}, total_loss: {:.2e}, accuracy: {:.3f}/{:.3f}, iou: {:.2f}, good_ios/pos: {}/{}'.format(
-                        name, step, max_steps, ce_loss, dist_loss, total_loss,
+                    logger.info('{}: {}: step: {}/{}, ce_loss: {:.2e}, dist_loss: {:.2e}, total_loss: {:.2e}, accuracy: {:.3f}/{:.3f}, iou: {:.2f}, good_ios/pos: {}/{}'.format(
+                        name, epoch, step, max_steps, ce_loss, dist_loss, total_loss,
                         accuracy_metric.result(), full_accuracy_metric.result(),
                         iou_metric.result(),
                         int(num_good_ious_metric.result()), int(num_positive_labels_metric.result()),
@@ -489,7 +484,7 @@ def train():
 
         if False:
             with writer.as_default():
-                train_steps = run_epoch('train', train_dataset, distributed_train_step, 1)
+                train_steps = run_epoch('train', 0, train_dataset, distributed_train_step, 1)
                 from tensorflow.python.keras import backend as K
                 from tensorflow.python.ops import summary_ops_v2
                 from tensorflow.python.eager import context
@@ -518,7 +513,7 @@ def train():
             reset_metrics()
             logger.info('there is a checkpoint {}, running initial validation'.format(manager.latest_checkpoint))
 
-            eval_steps = run_epoch('eval', eval_dataset, distributed_eval_step, steps_per_eval)
+            eval_steps = run_epoch('eval', 0, eval_dataset, distributed_eval_step, steps_per_eval)
             min_metric = validation_metric()
             logger.info('initial validation metric: {:.3f}'.format(min_metric))
 
@@ -529,8 +524,8 @@ def train():
         for epoch in range(FLAGS.epoch, FLAGS.num_epochs):
             reset_metrics()
 
-            train_steps = run_epoch('train', train_dataset, distributed_train_step, steps_per_epoch)
-            eval_steps = run_epoch('eval', eval_dataset, distributed_eval_step, steps_per_eval)
+            train_steps = run_epoch('train', epoch, train_dataset, distributed_train_step, steps_per_epoch)
+            eval_steps = run_epoch('eval', epoch, eval_dataset, distributed_eval_step, steps_per_eval)
 
             metric = validation_metric()
 
