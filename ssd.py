@@ -232,13 +232,13 @@ class EfficientNetSSD(tf.keras.Model):
 
         self.cell_ratios_for_layers = [
             [1.3, 2, 3, 4.1],
-            [1.3, 2, 3, 4.1],
-            [1.3, 2, 3, 4.1],
-            [1.3, 2, 3, 4.1],
-            [1.3, 2, 3, 4.1],
-            [1.3, 2, 3, 4.1],
+            [1.3, 2, 3, 4.1, 4.4, 5.1],
+            [1.3, 2, 3, 4.1, 4.4, 5.1],
+            [1.3, 2, 3, 4.1, 4.4, 5.1],
+            [1.3, 2, 3, 4.1, 4.4, 5.1],
+            [1.3, 2, 3, 4.1, 4.4, 5.1],
         ]
-        self.square_scales = [1, 0.5, 0.75]
+        self.square_scales = [1, 0.5, 0.75, 1.2, 1.4]
 
         self.ssd_heads = []
         self.ssd_meta = []
@@ -297,11 +297,12 @@ class EfficientNetSSD(tf.keras.Model):
             layer_idx = len(self.ssd_heads)
             last_reduction_idx += 1
 
-            num_features = 256
             strides = 2
+            num_features = 512
+            if top_idx == 1:
+                num_features = 256
             if top_idx >= 2:
                 num_features = 128
-                strides = 1
 
             top_layer = FeatureLayer(self.global_params, num_features, strides)
             self.top_layers.append(top_layer)
