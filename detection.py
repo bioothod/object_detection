@@ -464,7 +464,7 @@ def train():
 
                 ce_loss, dist_loss, total_loss = step_func(args=(epoch, filenames, images, bboxes, true_labels))
                 if name == 'train' and step % FLAGS.print_per_train_steps == 0:
-                    logger.info('{}: {}: step: {}/{}, ce_loss: {:.2e}, dist_loss: {:.2e}, total_loss: {:.2e}, accuracy: {:.3f}/{:.3f}, iou: {:.2f}, good_ios/pos: {}/{}'.format(
+                    logger.info('{}: {}: step: {}/{}, ce_loss: {:.2e}, dist_loss: {:.2e}, total_loss: {:.2e}, accuracy: {:.3f}/{:.3f}, iou: {:.3f}, good_ios/pos: {}/{}'.format(
                         name, epoch, step, max_steps, ce_loss, dist_loss, total_loss,
                         accuracy_metric.result(), full_accuracy_metric.result(),
                         iou_metric.result(),
@@ -529,7 +529,7 @@ def train():
 
             metric = validation_metric()
 
-            logger.info('epoch: {}, train: steps: {}, accuracy: {:.3f}/{:.3f}, iou: {:.2f}, good_ios/pos: {}/{}, loss: {:.2e}, eval: accuracy: {:.3f}/{:.3f}, iou: {:.2f}, good_ios/pos: {}/{}, loss: {:.2e}, lr: {:.2e}, val_metric: {:.3f}'.format(
+            logger.info('epoch: {}, train: steps: {}, accuracy: {:.3f}/{:.3f}, iou: {:.3f}, good_ios/pos: {}/{}, loss: {:.2e}, eval: accuracy: {:.3f}/{:.3f}, iou: {:.3f}, good_ios/pos: {}/{}, loss: {:.2e}, lr: {:.2e}, val_metric: {:.3f}'.format(
                 epoch, global_step.numpy(),
                 accuracy_metric.result(), full_accuracy_metric.result(), iou_metric.result(),
                 int(num_good_ious_metric.result()), int(num_positive_labels_metric.result()),
@@ -542,7 +542,7 @@ def train():
 
             if metric > min_metric:
                 save_path = manager.save()
-                logger.info("epoch: {}, saved checkpoint: {}, eval metric: {:.4f} -> {:.4f}, accuracy: {:.3f}/{:.3f}, iou: {:.2f}, good_ios/positive: {}/{}".format(
+                logger.info("epoch: {}, saved checkpoint: {}, eval metric: {:.4f} -> {:.4f}, accuracy: {:.3f}/{:.3f}, iou: {:.3f}, good_ios/positive: {}/{}".format(
                     epoch, save_path, min_metric, metric, 
                     eval_accuracy_metric.result(), eval_full_accuracy_metric.result(), eval_iou_metric.result(),
                     int(eval_num_good_ious_metric.result()), int(eval_num_positive_labels_metric.result())))
