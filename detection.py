@@ -336,14 +336,7 @@ def train():
 
                 negative_indexes = tf.gather(negative_indexes, sampled_negative_indexes)
 
-
-                num_negative_worst_to_sample = tf.minimum(tf.cast(num_positives/4, tf.int32), tf.shape(negative_ce)[0])
-                sampled_negative_worst_ce, sampled_negative_worst_indexes = tf.math.top_k(negative_ce, num_negative_worst_to_sample)
-                negative_worst_indexes = tf.gather(negative_indexes, sampled_negative_worst_indexes)
-
-
-                new_indexes = tf.concat([positive_indexes, negative_indexes, negative_worst_indexes], axis=0)
-                #new_indexes = tf.concat([positive_indexes, negative_indexes], axis=0)
+                new_indexes = tf.concat([positive_indexes, negative_indexes], axis=0)
 
                 sampled_true_labels = tf.gather_nd(true_labels, new_indexes)
                 sampled_true_labels_one_hot = tf.one_hot(sampled_true_labels, train_num_classes, axis=-1)
