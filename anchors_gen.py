@@ -33,6 +33,32 @@ def calc_ious(orig_bboxes, boxes, areas):
     ious = tf.map_fn(lambda box: calc_iou_for_single_box(box, bx0, by0, bx1, by1, areas), orig_bboxes, parallel_iterations=32)
     return ious
 
+def calc_ious_one_to_one(pred_bboxes, true_bboxes):
+    px0 = pred_bboxes[0] - pred_bboxes[3]/2
+    px1 = pred_bboxes[0] + pred_bboxes[3]/2
+    py0 = pred_bboxes[1] - pred_bboxes[2]/2
+    py1 = pred_bboxes[1] + pred_bboxes[2]/2
+    pareas = pred_bboxes[2] * pred_bboxes[3]
+
+    tx0 = true_bboxes[0] - true_bboxes[3]/2
+    tx1 = true_bboxes[0] + true_bboxes[3]/2
+    ty0 = true_bboxes[1] - true_bboxes[2]/2
+    ty1 = true_bboxes[1] + true_bboxes[2]/2
+    tareas = true_bboxes[2] * true_bboxes[3]
+
+    xx0 = tf.maximum(px0, tx0)
+    yy0 = tf.maximum(py0, ty0)
+    xx1 = tf.minimum(px1, tx1)
+    yy1 = tf.minimum(py1, ty1)
+
+    w = tf.maximum(0., xx1 - xx0 + 1)
+    h = tf.maximum(0., yy1 - yy0 + 1)
+
+    inter = w * h
+    iou = inter / (pareas + tareas - inter)
+    return iou
+
+
 def generate_true_labels_for_anchors(orig_bboxes, orig_labels, np_anchor_boxes, np_anchor_areas):
     num_anchors = np_anchor_boxes.shape[0]
 

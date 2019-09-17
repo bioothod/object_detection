@@ -49,7 +49,7 @@ def tf_read_image(filename, image_size, dtype):
     shape = tf.shape(image)
 
     sxd = image_size - shape[1]
-    syd = iamge_size - shape[0]
+    syd = image_size - shape[0]
 
 
     image = preprocess.prepare_image_for_evaluation(image, image_size, image_size, dtype)
@@ -87,18 +87,13 @@ def tf_left_needed_dimensions(image_size, filename, image_id, image, true_bboxes
     return filename, image
 
 def non_max_suppression(coords, scores, max_ret, iou_threshold):
-    ymin, xmin, ymax, xmax = tf.split(coords, num_or_size_splits=4, axis=1)
-
-    xmin = tf.squeeze(xmin, 1)
-    ymin = tf.squeeze(ymin, 1)
-    xmax = tf.squeeze(xmax, 1)
+    ymax, xmax, ymin, xmin = tf.split(coords, num_or_size_splits=4, axis=1)
     ymax = tf.squeeze(ymax, 1)
+    xmax = tf.squeeze(xmax, 1)
+    ymin = tf.squeeze(ymin, 1)
+    xmin = tf.squeeze(xmin, 1)
 
-    #---------------------------------------------------------------------------
-    # Compute the area of each box and sort the indices by confidence level
-    # (lowest confidence first first).
-    #---------------------------------------------------------------------------
-    area = (xmax-xmin+1) * (ymax-ymin+1)
+    area = (xmax - xmin) * (ymax - ymin)
 
     idxs = tf.argsort(scores, direction='ASCENDING', stable=False)
 
@@ -185,21 +180,37 @@ def per_image_supression(anchors, num_classes):
         selected_coords = tf.gather(coords, index)
         selected_coords = tf.squeeze(selected_coords, 1)
 
-        y0, x0, y1, x1 = tf.split(selected_coords, num_or_size_splits=4, axis=1)
-        x0 = tf.squeeze(x0, 1)
-        y0 = tf.squeeze(y0, 1)
-        x1 = tf.squeeze(x1, 1)
-        y1 = tf.squeeze(y1, 1)
+        cx, cy, h, w = tf.split(selected_coords, num_or_size_splits=4, axis=1)
+        cx = tf.squeeze(cx, 1)
+        cy = tf.squeeze(cy, 1)
+        h = tf.squeeze(h, 1)
+        w = tf.squeeze(w, 1)
 
-        index = tf.where(tf.logical_and((y1 - y0) >= FLAGS.min_size, (x1 - x0) >= FLAGS.min_size))
+        index = tf.where(tf.logical_and(h >= FLAGS.min_size, w >= FLAGS.min_size))
         selected_scores = tf.gather(selected_scores, index)
         selected_scores = tf.squeeze(selected_scores, 1)
         selected_coords = tf.gather(selected_coords, index)
         selected_coords = tf.squeeze(selected_coords, 1)
 
-        #selected_indexes = tf.image.non_max_suppression(selected_coords, selected_scores, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
+        cx, cy, h, w = tf.split(selected_coords, num_or_size_splits=4, axis=1)
+        cx = tf.squeeze(cx, 1)
+        cy = tf.squeeze(cy, 1)
+        h = tf.squeeze(h, 1)
+        w = tf.squeeze(w, 1)
 
-        selected_indexes = non_max_suppression(selected_coords, selected_scores, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
+        xmin = cx - w/2
+        xmax = cx + w/2
+        ymin = cy - h/2
+        ymax = cy + h/2
+
+        coords_yx = tf.stack([ymin, xmin, ymax, xmax], axis=1)
+
+        if False:
+            selected_indexes = tf.image.non_max_suppression(coords_yx, selected_scores, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
+        else:
+            selected_indexes = non_max_suppression(coords_yx, selected_scores, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
+
+        #logger.info('selected_indexes: {}, selected_coords: {}, selected_scores: {}'.format(selected_indexes, selected_coords, selected_scores))
         selected_coords = tf.gather(selected_coords, selected_indexes)
         selected_scores = tf.gather(selected_scores, selected_indexes)
 
@@ -214,13 +225,16 @@ def per_image_supression(anchors, num_classes):
     ret_scores = tf.concat(ret_scores, 0)
     ret_cat_ids = tf.concat(ret_cat_ids, 0)
 
+    logger.info('ret_coords: {}, ret_scores: {}, ret_cat_ids: {}'.format(ret_coords, ret_scores, ret_cat_ids))
+
     best_scores, best_index = tf.math.top_k(ret_scores, tf.minimum(FLAGS.max_ret, tf.shape(ret_scores)[0]), sorted=True)
 
     best_coords = tf.gather(ret_coords, best_index)
     best_cat_ids = tf.gather(ret_cat_ids, best_index)
 
-    to_add = tf.maximum(FLAGS.max_ret - tf.shape(best_scores)[0], 0)
+    logger.info('best_coords: {}, best_scores: {}, best_cat_ids: {}'.format(best_coords, best_scores, best_cat_ids))
 
+    to_add = tf.maximum(FLAGS.max_ret - tf.shape(best_scores)[0], 0)
     best_coords = tf.pad(best_coords, [[0, to_add], [0, 0]] , 'CONSTANT')
     best_scores = tf.pad(best_scores, [[0, to_add]], 'CONSTANT')
     best_cat_ids = tf.pad(best_cat_ids, [[0, to_add]], 'CONSTANT')
@@ -233,7 +247,7 @@ def per_image_supression(anchors, num_classes):
 
 @tf.function
 def eval_step_logits(model, images, num_classes):
-    logits = model(images, training=False)
+    logits = model(images, training=True)
     coords, classes = logits
     classes = tf.nn.softmax(classes, axis=-1)
 
@@ -291,7 +305,9 @@ def run_eval(model, dataset, num_images, num_classes, dst_dir):
 
                 prev.append(coord)
 
-                logger.info('{}: bbox: {}, score: {:.3f}, area: {:.1f}, cat_id: {}, max_iou_with_prev: {:.3f}, iou_idx: {}'.format(filename, bb, score, area, cat_id, max_iou, max_arg))
+                logger.info('{}: bbox: {} -> {}, score: {:.3f}, area: {:.1f}, cat_id: {}, max_iou_with_prev: {:.3f}, iou_idx: {}'.format(
+                    filename,
+                    coord, bb, score, area, cat_id, max_iou, max_arg))
 
                 anns.append((bb, cat_id))
 

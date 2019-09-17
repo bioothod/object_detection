@@ -58,7 +58,12 @@ class StdConv(tf.keras.layers.Layer):
             kernel_initializer=efn.conv_kernel_initializer,
             padding=self.padding)
 
-        self.bn = tf.keras.layers.BatchNormalization(
+        self.bn0 = tf.keras.layers.BatchNormalization(
+            axis=self.channel_axis,
+            momentum=self.batch_norm_momentum,
+            epsilon=self.batch_norm_epsilon)
+
+        self.bn1 = tf.keras.layers.BatchNormalization(
             axis=self.channel_axis,
             momentum=self.batch_norm_momentum,
             epsilon=self.batch_norm_epsilon)
@@ -66,9 +71,10 @@ class StdConv(tf.keras.layers.Layer):
         self.dropout = tf.keras.layers.Dropout(self.dropout_rate)
 
     def call(self, inputs, training=True):
-        x = self.c0(inputs)
+        x = self.bn0(inputs, training=training)
+        x = self.c0(x)
         x = self.c1(x)
-        x = self.bn(x, training=training)
+        x = self.bn1(x, training=training)
         x = self.dropout(x, training)
 
         return x
@@ -81,7 +87,17 @@ class OutConv(tf.keras.layers.Layer):
         self.num_classes = num_classes
 
         self.data_format = global_params.data_format
-        self.relu_fn = global_params.relu_fn or tf.nn.swish
+        self.relu_fn = global_params.relu_fn or local_swish
+
+        self.batch_norm_momentum = global_params.batch_norm_momentum
+        self.batch_norm_epsilon = global_params.batch_norm_epsilon
+        self.data_format = global_params.data_format
+        if self.data_format == 'channels_first':
+            self.channel_axis = 1
+            self.spatial_dims = [2, 3]
+        else:
+            self.channel_axis = -1
+            self.spatial_dims = [1, 2]
 
     def build(self, input_shape):
         self.class_out = tf.keras.layers.Conv2D(
@@ -108,12 +124,19 @@ class OutConv(tf.keras.layers.Layer):
             padding='same',
             activation='relu')
 
+        self.bn = tf.keras.layers.BatchNormalization(
+            axis=self.channel_axis,
+            momentum=self.batch_norm_momentum,
+            epsilon=self.batch_norm_epsilon)
+
     def flatten_anchors(self, x):
         return tf.reshape(x, [-1, x.shape[1] * x.shape[2] * self.k, int(x.shape[3] / self.k)])
 
     def call(self, inputs, training=True):
-        coords = self.loc_out(inputs)
-        classes = self.class_out(inputs)
+        x = self.bn(inputs, training)
+
+        coords = self.loc_out(x)
+        classes = self.class_out(x)
 
         flatten_coords = self.flatten_anchors(coords)
         flatten_classes = self.flatten_anchors(classes)
@@ -181,16 +204,31 @@ class FeatureLayer(tf.keras.layers.Layer):
     def __init__(self, global_params, num_features, strides, **kwargs):
         super(FeatureLayer, self).__init__(**kwargs)
         self.global_params = global_params
-        self.relu_fn = global_params.relu_fn or tf.nn.swish
+        self.relu_fn = global_params.relu_fn or local_swish
 
         self.num_features = num_features
         self.strides = strides
 
+        self.batch_norm_momentum = global_params.batch_norm_momentum
+        self.batch_norm_epsilon = global_params.batch_norm_epsilon
+        self.data_format = global_params.data_format
+        if self.data_format == 'channels_first':
+            self.channel_axis = 1
+            self.spatial_dims = [2, 3]
+        else:
+            self.channel_axis = -1
+            self.spatial_dims = [1, 2]
+
     def build(self, input_shape):
         self.sc0 = StdConv(self.global_params, self.num_features, strides=self.strides, dropout_rate=0)
+        self.bn = tf.keras.layers.BatchNormalization(
+            axis=self.channel_axis,
+            momentum=self.batch_norm_momentum,
+            epsilon=self.batch_norm_epsilon)
 
     def call(self, inputs, training=True):
-        x = self.sc0(inputs)
+        x = self.bn(inputs, training)
+        x = self.sc0(x)
         return x
 
 class SSDHead(tf.keras.layers.Layer):
@@ -232,13 +270,13 @@ class EfficientNetSSD(tf.keras.Model):
 
         self.cell_ratios_for_layers = [
             [1.3, 2, 3, 4.1],
-            [1.3, 2, 3, 4.1],
-            [1.3, 2, 3, 4.1],
-            [1.3, 2, 3, 4.1],
-            [1.3, 2, 3, 4.1],
-            [1.3, 2, 3, 4.1],
+            [1.3, 2, 3, 4.1, 4.4, 5.1],
+            [1.3, 2, 3, 4.1, 4.4, 5.1],
+            [1.3, 2, 3, 4.1, 4.4, 5.1],
+            [1.3, 2, 3, 4.1, 4.4, 5.1],
+            [1.3, 2, 3, 4.1, 4.4, 5.1],
         ]
-        self.square_scales = [1, 0.5, 0.75]
+        self.square_scales = [1, 0.5, 0.75, 1.2, 1.4]
 
         self.ssd_heads = []
         self.ssd_meta = []
@@ -297,11 +335,12 @@ class EfficientNetSSD(tf.keras.Model):
             layer_idx = len(self.ssd_heads)
             last_reduction_idx += 1
 
-            num_features = 256
             strides = 2
+            num_features = 512
+            if top_idx == 1:
+                num_features = 256
             if top_idx >= 2:
                 num_features = 128
-                strides = 1
 
             top_layer = FeatureLayer(self.global_params, num_features, strides)
             self.top_layers.append(top_layer)

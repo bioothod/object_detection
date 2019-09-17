@@ -27,7 +27,6 @@ def pad_resize_image(image, dims, fill_constant=0):
 # do not use padded resize, since bbox scaling does not yet support this
 def simple_resize_image(image, dims):
     image = tf.image.resize(image, dims)
-    image = tf.cast(image, dtype=tf.uint8)
     return image
 
 def try_resize(image, output_height, output_width):
@@ -35,8 +34,8 @@ def try_resize(image, output_height, output_width):
     image = tf.cond(tf.logical_and(tf.equal(shape[0], output_height),
                                    tf.equal(shape[1], output_width)),
                     lambda: image,
-                    #lambda: pad_resize_image(image, [output_height, output_width]))
-                    lambda: simple_resize_image(image, [output_height, output_width]))
+                    lambda: pad_resize_image(image, [output_height, output_width]))
+                    #lambda: simple_resize_image(image, [output_height, output_width]))
     return image
 
 def normalize(image, dtype):
