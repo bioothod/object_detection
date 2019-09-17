@@ -4,7 +4,7 @@ import tensorflow as tf
 
 import autoaugment
 
-logger = logging.getLogger('vggface_emotions')
+logger = logging.getLogger('detection')
 
 def pad_resize_image(image, dims, fill_constant=0):
     orig_dtype = image.dtype
