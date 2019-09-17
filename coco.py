@@ -291,7 +291,12 @@ class COCO_Iterable:
         filename, image_id, anns = self.image_tuples[i]
 
         orig_image = cv2.imread(filename)
-        orig_image = cv2.cvtColor(orig_image, cv2.COLOR_BGR2RGB)
+        if orig_image is None:
+            self.logger.error('filename: {}, image is none'.format(filename))
+            exit(-1)
+
+        if orig_image.shape[-1] > 1:
+            orig_image = cv2.cvtColor(orig_image, cv2.COLOR_BGR2RGB)
         orig_image = orig_image.astype(np.uint8)
 
         orig_bboxes = []
@@ -313,8 +318,10 @@ class COCO_Iterable:
             'category_id': orig_cat_ids,
         }
 
-        annotations = augmentation(**annotations)
-        annotations = self.preprocessing(**annotations)
+        if augmentation:
+            annotations = augmentation(**annotations)
+        if self.preprocessing:
+            annotations = self.preprocessing(**annotations)
 
         image = annotations['image']
         bboxes = annotations['bboxes']
