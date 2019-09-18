@@ -20,6 +20,7 @@ import coco
 import image as image_draw
 import loss
 import map_iter
+import preprocess_ssd
 import ssd
 
 parser = argparse.ArgumentParser()
@@ -48,12 +49,13 @@ parser.add_argument('--dataset_type', type=str, choices=['files', 'tfrecords'], 
 parser.add_argument('--train_tfrecord_dir', type=str, help='Directory containing training TFRecords')
 parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
 parser.add_argument('--num_classes', type=int, help='Number of classes in the dataset')
+parser.add_argument('--orig_images', action='store_true', help='Whether tfrecords contain original unscaled images')
 parser.add_argument('--train_num_images', type=int, help='Number of images in train epoch')
 parser.add_argument('--eval_num_images', type=int, help='Number of images in eval epoch')
 FLAGS = parser.parse_args()
 
 
-def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas):
+def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas, image_size, is_training):
     features = tf.io.parse_single_example(serialized_example,
             features={
                 'image_id': tf.io.FixedLenFeature([], tf.int64),
@@ -65,12 +67,48 @@ def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas):
 
     orig_bboxes = tf.io.decode_raw(features['true_bboxes'], tf.float32)
     orig_bboxes = tf.reshape(orig_bboxes, [-1, 4])
+
     orig_labels = tf.io.decode_raw(features['true_labels'], tf.int32)
     filename = features['filename']
     image_id = features['image_id']
     image = tf.image.decode_jpeg(features['image'], channels=3)
-    image = tf.cast(image, tf.float32)
-    image -= 128.
+
+    if FLAGS.orig_images:
+        cx, cy, h, w = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
+        cx = tf.squeeze(cx, 1)
+        cy = tf.squeeze(cy, 1)
+        h = tf.squeeze(h, 1)
+        w = tf.squeeze(w, 1)
+
+        image_height = tf.cast(tf.shape(image)[0], tf.float32)
+        image_width = tf.cast(tf.shape(image)[1], tf.float32)
+
+        xmin = (cx - w/2) / image_width
+        xmax = (cx + w/2) / image_width
+        ymin = (cy - h/2) / image_height
+        ymax = (cy + h/2) / image_height
+
+        coords_yx = tf.stack([ymin, xmin, ymax, xmax], axis=1)
+
+        if is_training:
+            image, orig_labels, orig_bboxes = preprocess_ssd.preprocess_for_train(image, orig_labels, coords_yx, [image_size, image_size], data_format=FLAGS.data_format)
+
+            xminf, yminf, xmaxf, ymaxf = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
+            #xminf = tf.squeeze(xminf, 1)
+            #yminf = tf.squeeze(yminf, 1)
+            #xmaxf = tf.squeeze(xaxnf, 1)
+            #ymaxf = tf.squeeze(ymaxf, 1)
+            cx = (xminf + xmaxf) * image_size / 2
+            cy = (yminf + ymaxf) * image_size / 2
+            h = (ymaxf - yminf) * image_size / 2
+            w = (xmaxf - xminf) * image_size / 2
+
+            orig_bboxes = tf.concat([cx, cy, h, w], axis=1)
+        else:
+            image = preprocess_ssd.preprocess_for_eval(image, [image_size, image_size], data_format=FLAGS.data_format)
+    else:
+        image -= 128.
+
     image /= 128.
 
     true_bboxes, true_labels = anchors_gen.generate_true_labels_for_anchors(orig_bboxes, orig_labels, np_anchor_boxes, np_anchor_areas)
@@ -170,7 +208,7 @@ def train():
                     filenames.append(fn)
 
             ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=2)
-            ds = ds.map(lambda record: unpack_tfrecord(record, np_anchor_boxes, np_anchor_areas), num_parallel_calls=FLAGS.num_cpus)
+            ds = ds.map(lambda record: unpack_tfrecord(record, np_anchor_boxes, np_anchor_areas, image_size, is_training), num_parallel_calls=FLAGS.num_cpus)
             if is_training:
                 ds = ds.shuffle(200)
 
@@ -388,24 +426,18 @@ def train():
                 iou_metric.update_state(ious)
                 num_good_ious_metric.update_state(num_good_ious)
 
-
-                max_probs = tf.reduce_max(classes, axis=1)
-                sampled_index_sure = tf.where(max_probs > 0.7)
-                sampled_true_sure = tf.gather(true_labels, sampled_index_sure)
-                sampled_pred_sure = tf.gather(classes, sampled_index_sure)
-
-
-
             return ce_loss, dist_loss, total_loss
 
-        def eval_step(epoch, filenames, images, bboxes, true_labels):
+        epoch_var = tf.Variable(0, dtype=tf.float32, name='epoch_number', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
+
+        def eval_step(filenames, images, bboxes, true_labels):
             logits = model(images, training=False)
             ce_loss, dist_loss, total_loss = calculate_metrics(logits, bboxes, true_labels,
                     eval_loss_metric, eval_accuracy_metric, eval_full_accuracy_metric, eval_iou_metric,
                     eval_num_good_ious_metric, eval_num_positive_labels_metric)
             return ce_loss, dist_loss, total_loss
 
-        def train_step(epoch, filenames, images, bboxes, true_labels):
+        def train_step(filenames, images, bboxes, true_labels):
             with tf.GradientTape() as tape:
                 logits = model(images, training=True)
                 ce_loss, dist_loss, total_loss = calculate_metrics(logits, bboxes, true_labels,
@@ -415,7 +447,7 @@ def train():
             variables = model.trainable_variables
             gradients = tape.gradient(total_loss, variables)
 
-            stddev = 1 / ((1 + epoch)**0.55)
+            stddev = 1 / ((1 + epoch_var)**0.55)
 
             clip_gradients = []
             for g, v in zip(gradients, variables):
@@ -448,7 +480,7 @@ def train():
             total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_total_losses, axis=None)
             return ce_loss, dist_loss, total_loss
 
-        def run_epoch(name, epoch, dataset, step_func, max_steps):
+        def run_epoch(name, dataset, step_func, max_steps):
             losses = []
             accs = []
 
@@ -462,10 +494,10 @@ def train():
                     images = tf.transpose(images, [0, 3, 1, 2])
 
 
-                ce_loss, dist_loss, total_loss = step_func(args=(epoch, filenames, images, bboxes, true_labels))
+                ce_loss, dist_loss, total_loss = step_func(args=(filenames, images, bboxes, true_labels))
                 if name == 'train' and step % FLAGS.print_per_train_steps == 0:
                     logger.info('{}: {}: step: {}/{}, ce_loss: {:.2e}, dist_loss: {:.2e}, total_loss: {:.2e}, accuracy: {:.3f}/{:.3f}, iou: {:.3f}, good_ios/pos: {}/{}'.format(
-                        name, epoch, step, max_steps, ce_loss, dist_loss, total_loss,
+                        name, epoch_var.numpy(), step, max_steps, ce_loss, dist_loss, total_loss,
                         accuracy_metric.result(), full_accuracy_metric.result(),
                         iou_metric.result(),
                         int(num_good_ious_metric.result()), int(num_positive_labels_metric.result()),
@@ -484,7 +516,7 @@ def train():
 
         if False:
             with writer.as_default():
-                train_steps = run_epoch('train', 0, train_dataset, distributed_train_step, 1)
+                train_steps = run_epoch('train', train_dataset, distributed_train_step, 1)
                 from tensorflow.python.keras import backend as K
                 from tensorflow.python.ops import summary_ops_v2
                 from tensorflow.python.eager import context
@@ -513,7 +545,7 @@ def train():
             reset_metrics()
             logger.info('there is a checkpoint {}, running initial validation'.format(manager.latest_checkpoint))
 
-            eval_steps = run_epoch('eval', 0, eval_dataset, distributed_eval_step, steps_per_eval)
+            eval_steps = run_epoch('eval', eval_dataset, distributed_eval_step, steps_per_eval)
             min_metric = validation_metric()
             logger.info('initial validation metric: {:.3f}'.format(min_metric))
 
@@ -522,10 +554,12 @@ def train():
             min_metric = FLAGS.min_eval_metric
 
         for epoch in range(FLAGS.epoch, FLAGS.num_epochs):
+            epoch_var.assign(epoch)
+
             reset_metrics()
 
-            train_steps = run_epoch('train', epoch, train_dataset, distributed_train_step, steps_per_epoch)
-            eval_steps = run_epoch('eval', epoch, eval_dataset, distributed_eval_step, steps_per_eval)
+            train_steps = run_epoch('train', train_dataset, distributed_train_step, steps_per_epoch)
+            eval_steps = run_epoch('eval', eval_dataset, distributed_eval_step, steps_per_eval)
 
             metric = validation_metric()
 
