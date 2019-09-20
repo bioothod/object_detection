@@ -107,6 +107,7 @@ def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas, image_
         else:
             image = preprocess_ssd.preprocess_for_eval(image, [image_size, image_size], data_format=FLAGS.data_format)
     else:
+        image = tf.cast(image, tf.float32)
         image -= 128.
 
     image /= 128.
