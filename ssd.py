@@ -23,7 +23,7 @@ class StdConv(tf.keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.padding = padding
 
-        self.relu_fn = global_params.relu_fn or tf.nn.swish
+        self.relu_fn = global_params.relu_fn or local_swish
         self.batch_norm_momentum = global_params.batch_norm_momentum
         self.batch_norm_epsilon = global_params.batch_norm_epsilon
         self.data_format = global_params.data_format
@@ -152,7 +152,6 @@ class Attention(tf.keras.layers.Layer):
         self.dense_units = dense_units
 
         self.global_params = global_params
-        self.relu_fn = global_params.relu_fn or tf.nn.swish
 
         self.batch_norm_momentum = global_params.batch_norm_momentum
         self.batch_norm_epsilon = global_params.batch_norm_epsilon
@@ -204,7 +203,6 @@ class FeatureLayer(tf.keras.layers.Layer):
     def __init__(self, global_params, num_features, strides, **kwargs):
         super(FeatureLayer, self).__init__(**kwargs)
         self.global_params = global_params
-        self.relu_fn = global_params.relu_fn or local_swish
 
         self.num_features = num_features
         self.strides = strides
@@ -220,15 +218,12 @@ class FeatureLayer(tf.keras.layers.Layer):
             self.spatial_dims = [1, 2]
 
     def build(self, input_shape):
-        self.sc0 = StdConv(self.global_params, self.num_features, strides=self.strides, dropout_rate=0)
-        self.bn = tf.keras.layers.BatchNormalization(
-            axis=self.channel_axis,
-            momentum=self.batch_norm_momentum,
-            epsilon=self.batch_norm_epsilon)
+        self.sc0 = StdConv(self.global_params, 512, strides=1, dropout_rate=0.1)
+        self.sc1 = StdConv(self.global_params, self.num_features, strides=self.strides, dropout_rate=0)
 
     def call(self, inputs, training=True):
-        x = self.bn(inputs, training)
-        x = self.sc0(x)
+        x = self.sc0(inputs)
+        x = self.sc1(x)
         return x
 
 class SSDHead(tf.keras.layers.Layer):
@@ -241,10 +236,14 @@ class SSDHead(tf.keras.layers.Layer):
         self.global_params = global_params
 
     def build(self, input_shape):
+        self.sc0 = StdConv(self.global_params, 512, strides=1, dropout_rate=0.1)
+        self.sc1 = StdConv(self.global_params, 256, strides=1, dropout_rate=0)
         self.out = OutConv(self.global_params, self.k, self.num_classes)
 
     def call(self, inputs, training=True):
-        x = self.out(inputs)
+        x = self.sc0(inputs)
+        x = self.sc1(x)
+        x = self.out(x)
 
         return x
 
@@ -263,7 +262,6 @@ class EfficientNetSSD(tf.keras.Model):
 
         self.global_params = global_params
         self.blocks_args = blocks_args
-        self.relu_fn = global_params.relu_fn or tf.nn.swish
 
         self.image_size = image_size
         self.num_classes = num_classes
