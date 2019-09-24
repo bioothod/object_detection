@@ -1,4 +1,5 @@
 import argparse
+import cv2
 import logging
 import os
 import sys
@@ -20,8 +21,9 @@ import coco
 import image as image_draw
 import loss
 import map_iter
+import preprocess
 import preprocess_ssd
-import ssd
+import yolo
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--train_coco_annotations', type=str, required=True, help='Path to MS COCO dataset: annotations json file')
@@ -55,7 +57,7 @@ parser.add_argument('--eval_num_images', type=int, help='Number of images in eva
 FLAGS = parser.parse_args()
 
 
-def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas, image_size, is_training):
+def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas, image_size, num_classes, is_training):
     features = tf.io.parse_single_example(serialized_example,
             features={
                 'image_id': tf.io.FixedLenFeature([], tf.int64),
@@ -73,49 +75,64 @@ def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas, image_
     image_id = features['image_id']
     image = tf.image.decode_jpeg(features['image'], channels=3)
 
+    cx, cy, h, w = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
+
+    orig_image_height = tf.cast(tf.shape(image)[0], tf.float32)
+    orig_image_width = tf.cast(tf.shape(image)[1], tf.float32)
+
+    mx = tf.maximum(orig_image_height, orig_image_width)
+    mx_int = tf.cast(mx, tf.int32)
+    image = tf.image.pad_to_bounding_box(image, tf.cast((mx - orig_image_height) / 2, tf.int32), tf.cast((mx - orig_image_width) / 2, tf.int32), mx_int, mx_int)
+    cx += (mx - orig_image_width) / 2
+    cy += (mx - orig_image_height) / 2
+
+    orig_bboxes = tf.concat([cx, cy, h, w], axis=1)
+
+    image_height = tf.cast(tf.shape(image)[0], tf.float32)
+    image_width = tf.cast(tf.shape(image)[1], tf.float32)
+
+    xminf = (cx - w/2) / image_width
+    xmaxf = (cx + w/2) / image_width
+    yminf = (cy - h/2) / image_height
+    ymaxf = (cy + h/2) / image_height
+
+    image = tf.cast(image, tf.float32)
+    image -= 128.
+    image /= 128.
+
     if FLAGS.orig_images:
-        cx, cy, h, w = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
-        cx = tf.squeeze(cx, 1)
-        cy = tf.squeeze(cy, 1)
-        h = tf.squeeze(h, 1)
-        w = tf.squeeze(w, 1)
-
-        image_height = tf.cast(tf.shape(image)[0], tf.float32)
-        image_width = tf.cast(tf.shape(image)[1], tf.float32)
-
-        xmin = (cx - w/2) / image_width
-        xmax = (cx + w/2) / image_width
-        ymin = (cy - h/2) / image_height
-        ymax = (cy + h/2) / image_height
-
-        coords_yx = tf.stack([ymin, xmin, ymax, xmax], axis=1)
+        coords_yx = tf.concat([yminf, xminf, ymaxf, xmaxf], axis=1)
 
         if is_training:
-            image, orig_labels, orig_bboxes = preprocess_ssd.preprocess_for_train(image, orig_labels, coords_yx, [image_size, image_size], data_format=FLAGS.data_format)
+            image, new_labels, new_bboxes = preprocess_ssd.preprocess_for_train(image, orig_labels, coords_yx, [image_size, image_size], data_format=FLAGS.data_format)
 
-            xminf, yminf, xmaxf, ymaxf = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
-            #xminf = tf.squeeze(xminf, 1)
-            #yminf = tf.squeeze(yminf, 1)
-            #xmaxf = tf.squeeze(xaxnf, 1)
-            #ymaxf = tf.squeeze(ymaxf, 1)
+            yminf, xminf, ymaxf, xmaxf = tf.split(new_bboxes, num_or_size_splits=4, axis=1)
             cx = (xminf + xmaxf) * image_size / 2
             cy = (yminf + ymaxf) * image_size / 2
-            h = (ymaxf - yminf) * image_size / 2
-            w = (xmaxf - xminf) * image_size / 2
+            h = (ymaxf - yminf) * image_size
+            w = (xmaxf - xminf) * image_size
 
             orig_bboxes = tf.concat([cx, cy, h, w], axis=1)
+            orig_labels = new_labels
         else:
             image = preprocess_ssd.preprocess_for_eval(image, [image_size, image_size], data_format=FLAGS.data_format)
     else:
-        image = tf.cast(image, tf.float32)
-        image -= 128.
+        image = tf.image.resize_with_pad(image, image_size, image_size)
 
-    image /= 128.
+        cx = (xminf + xmaxf) * image_size / 2
+        cy = (yminf + ymaxf) * image_size / 2
+        h = (ymaxf - yminf) * image_size
+        w = (xmaxf - xminf) * image_size
 
-    true_bboxes, true_labels = anchors_gen.generate_true_labels_for_anchors(orig_bboxes, orig_labels, np_anchor_boxes, np_anchor_areas)
+        orig_bboxes = tf.concat([cx, cy, h, w], axis=1)
 
-    return filename, image_id, image, true_bboxes, true_labels
-    #return filename, image_id, image, orig_bboxes, orig_labels
+    #orig_labels_one_hot = tf.one_hot(orig_labels, num_classes, dtype=tf.float32)
+    #obj = tf.ones((tf.shape(orig_bboxes)[0], 1), dtype=tf.float32)
+    #true_values = tf.concat([orig_bboxes, obj, orig_labels_one_hot], axis=1)
+
+    true_values = anchors_gen.generate_true_labels_for_anchors(orig_bboxes, orig_labels, np_anchor_boxes, np_anchor_areas, image_size, num_classes)
+
+    return filename, image_id, image, true_values
 
 def calc_epoch_steps(num_files):
     return (num_files + FLAGS.batch_size - 1) // FLAGS.batch_size
@@ -156,21 +173,9 @@ def train():
         train_base = coco.create_coco_iterable(FLAGS.train_coco_annotations, FLAGS.train_coco_data_dir, logger)
         eval_base = coco.create_coco_iterable(FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, logger)
 
-        model, np_anchor_boxes, np_anchor_areas = ssd.create_model(dtype, FLAGS.model_name, train_base.num_classes())
-        image_size = model.image_size
-        num_anchors = np_anchor_boxes.shape[0]
-        logger.info('base_model: {}, num_anchors: {}, image_size: {}'.format(FLAGS.model_name, num_anchors, image_size))
-
-        if False:
-            import pickle
-            d = {
-                'np_anchor_boxes': np_anchor_boxes,
-                'np_anchor_areas': np_anchor_areas,
-            }
-
-            with open(os.path.join(logdir, 'dump.pickle'), 'wb') as f:
-                pickle.dump(d, f, protocol=4)
-            exit(0)
+        num_classes = train_base.num_classes()
+        #model = yolo.create_model(num_classes)
+        np_anchor_boxes, np_anchor_areas, image_size = yolo.create_anchors()
 
         def create_dataset(name, base, is_training):
             coco.complete_initialization(base, image_size, np_anchor_boxes, np_anchor_areas, is_training)
@@ -201,7 +206,7 @@ def train():
 
             return ds, num_images, num_classes, cat_names
 
-        def create_dataset_from_tfrecord(name, dataset_dir, is_training):
+        def create_dataset_from_tfrecord(name, dataset_dir, image_size, num_classes, is_training):
             filenames = []
             for fn in os.listdir(dataset_dir):
                 fn = os.path.join(dataset_dir, fn)
@@ -209,13 +214,13 @@ def train():
                     filenames.append(fn)
 
             ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=2)
-            ds = ds.map(lambda record: unpack_tfrecord(record, np_anchor_boxes, np_anchor_areas, image_size, is_training), num_parallel_calls=FLAGS.num_cpus)
+            ds = ds.map(lambda record: unpack_tfrecord(record, np_anchor_boxes, np_anchor_areas, image_size, num_classes, is_training), num_parallel_calls=FLAGS.num_cpus)
             if is_training:
                 ds = ds.shuffle(200)
 
-            ds = ds.batch(FLAGS.batch_size)
+            #ds = ds.batch(FLAGS.batch_size)
             ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
-            ds = dstrategy.experimental_distribute_dataset(ds)
+            #ds = dstrategy.experimental_distribute_dataset(ds)
 
             logger.info('{} dataset has been created, tfrecords: {}'.format(name, len(filenames)))
 
@@ -225,48 +230,110 @@ def train():
             train_dataset, train_num_images, train_num_classes, train_cat_names = create_dataset('train', train_base, is_training=True)
             eval_dataset, eval_num_images, eval_num_classes, eval_cat_names = create_dataset('eval', eval_base, is_training=False)
         elif FLAGS.dataset_type == 'tfrecords':
-            train_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir, is_training=True)
-            eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, is_training=False)
-
             train_num_images = FLAGS.train_num_images
             eval_num_images = FLAGS.eval_num_images
             train_num_classes = FLAGS.num_classes
             train_cat_names = {}
 
-        if False:
+            train_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir, image_size, train_num_classes, is_training=True)
+            eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, image_size, train_num_classes, is_training=False)
+
+
+        if True:
             data_dir = os.path.join(FLAGS.train_dir, 'tmp')
             os.makedirs(data_dir, exist_ok=True)
 
-            for filename, image_id, image, true_bboxes, true_labels in train_dataset.unbatch().take(20):
-            #for filename, image_id, image, true_bboxes, true_labels in train_dataset.take(10):
-                filename = str(filename.numpy(), 'utf8')
-                true_labels = true_labels.numpy()
-                true_bboxes = true_bboxes.numpy()
+            scaled_size = image_size / anchors_gen.DOWNSAMPLE_RATIO
+            output_splits = []
+            output_sizes = []
+            offset = 0
+            for base_scale in reversed(range(3)):
+                output_size = scaled_size * np.math.pow(2, base_scale)
+                output_sizes.append(output_size)
+                offset += int(output_size * output_size)
+                output_splits.append(offset)
 
-                dst = '{}/{}.png'.format(data_dir, image_id.numpy())
-                new_anns = []
-                # category ID in true_labels does not match train_cat_names here, this is converted category_id into range [0, num_categories], where 0 is background class
-                # true_orig_labels contain original category ids
-                non_background_index = np.where(true_labels != 0)
+            if False:
+                for filename, image_id, image, true_values in train_dataset.take(20):
+                    filename = str(filename.numpy(), 'utf8')
 
-                #logger.info('{}: true_labels: {}, true_bboxes: {}, non_background_index: {}'.format(filename, true_labels, true_bboxes, non_background_index))
+                    dst = '{}/{}.png'.format(data_dir, image_id.numpy())
+                    new_anns = []
 
-                for bb, cat_id in zip(true_bboxes[non_background_index], true_labels[non_background_index]):
-                    cx, cy, h, w = bb
-                    x0 = cx - w/2
-                    x1 = cx + w/2
-                    y0 = cy - h/2
-                    y1 = cy + h/2
+                    true_values_combined = true_values.numpy()
 
-                    bb = [x0, y0, x1, y1]
-                    new_anns.append((bb, cat_id))
+                    bboxes = true_values[:, 0:4]
+                    labels = true_values[:, 5:]
+                    labels = np.argmax(labels, axis=1)
 
-                #logger.info('{}: true anchors: {}'.format(dst, new_anns))
-                logger.info('{}: true anchors: {}'.format(dst, len(new_anns)))
+                    for bb, cat_id in zip(bboxes, labels):
+                        cx, cy, h, w = bb
+                        x0 = cx - w/2
+                        x1 = cx + w/2
+                        y0 = cy - h/2
+                        y1 = cy + h/2
 
-                image = image.numpy() * 128. + 128
-                image = image.astype(np.uint8)
-                image_draw.draw_im(image, new_anns, dst, train_cat_names)
+                        bb = [x0, y0, x1, y1]
+                        new_anns.append((bb, cat_id))
+
+                    #logger.info('{}: true anchors: {}'.format(dst, new_anns))
+                    logger.info('{}: true anchors: {}'.format(dst, len(new_anns)))
+
+                    image = image.numpy() * 128. + 128
+                    image = image.astype(np.uint8)
+                    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                    image_draw.draw_im(image, new_anns, dst, train_cat_names)
+
+            if True:
+                #for filename, image_id, image, true_values in train_dataset.unbatch().take(20):
+                for filename, image_id, image, true_values in train_dataset.take(20):
+                    filename = str(filename.numpy(), 'utf8')
+
+                    dst = '{}/{}.png'.format(data_dir, image_id.numpy())
+                    new_anns = []
+
+                    true_values_combined = true_values.numpy()
+                    for idx, (true_values, output_size) in enumerate(zip(np.split(true_values_combined, output_splits), output_sizes)):
+                        for box_idx_num in range(3):
+                            non_background_index = np.where(true_values[:, box_idx_num, 4] != 0)[0]
+                            logger.info('{}: true_values: {}, non_background_index: {}'.format(filename, true_values.shape, non_background_index))
+
+                            if len(non_background_index) == 0:
+                                continue
+
+                            bboxes = true_values[non_background_index, box_idx_num, 0:4]
+                            labels = true_values[non_background_index, box_idx_num, 5:]
+                            labels = np.argmax(labels, axis=1)
+
+                            anchor_box_idx = idx * 3 + box_idx_num
+                            anchor = np_anchor_boxes[anchor_box_idx]
+                            _, _, anchor_h, anchor_w = anchor
+
+                            logger.info('{}: true_values: {}, bboxes: {}, non_background_index: {}, labels: {}'.format(filename, true_values.shape, bboxes, non_background_index, labels))
+
+                            for bb, cat_id in zip(bboxes, labels):
+                                cx, cy, h, w = bb
+                                cx = cx / output_size * image_size
+                                cy = cy / output_size * image_size
+
+                                h = np.math.exp(h) * anchor_h
+                                w = np.math.exp(w) * anchor_w
+
+                                x0 = cx - w/2
+                                x1 = cx + w/2
+                                y0 = cy - h/2
+                                y1 = cy + h/2
+
+                                bb = [x0, y0, x1, y1]
+                                new_anns.append((bb, cat_id))
+
+                    #logger.info('{}: true anchors: {}'.format(dst, new_anns))
+                    logger.info('{}: true anchors: {}'.format(dst, len(new_anns)))
+
+                    image = image.numpy() * 128. + 128
+                    image = image.astype(np.uint8)
+                    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                    image_draw.draw_im(image, new_anns, dst, train_cat_names)
 
             exit(0)
 
@@ -293,12 +360,12 @@ def train():
             steps_per_epoch, calc_epoch_steps(train_num_images), train_num_images,
             steps_per_eval, calc_epoch_steps(eval_num_images), eval_num_images))
 
-        num_vars_ssd = len(model.trainable_variables)
-        num_params_ssd = np.sum([np.prod(v.shape) for v in model.trainable_variables])
+        num_vars = len(model.trainable_variables)
+        num_params = np.sum([np.prod(v.shape) for v in model.trainable_variables])
 
-        logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, ssd model trainable variables/params: {}/{}, dtype: {}'.format(
+        logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, model trainable variables/params: {}/{}, dtype: {}'.format(
             num_replicas, checkpoint_dir, FLAGS.model_name, image_size,
-            num_vars_ssd, int(num_params_ssd),
+            num_vars, int(num_params),
             dtype))
 
         opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
@@ -351,83 +418,13 @@ def train():
             eval_num_good_ious_metric.reset_states()
             eval_num_positive_labels_metric.reset_states()
 
-        ce_loss_object = loss.CategoricalFocalLoss(reduction=tf.keras.losses.Reduction.NONE)
+        yolo_loss_object = loss.YOLOLoss(image_size, reduction=tf.keras.losses.Reduction.NONE)
 
         def calculate_metrics(logits, bboxes, true_labels, loss_metric, accuracy_metric, full_accuracy_metric, iou_metric, num_good_ious_metric, num_positive_labels_metric):
-            coords, classes = logits
-            classes = tf.nn.softmax(classes, -1)
 
-            positive_indexes = tf.where(true_labels > 0)
-            num_positives = tf.shape(positive_indexes)[0]
-            num_positive_labels_metric.update_state(num_positives)
+            yolo_loss = yolo_loss_object(logits)
 
-            ce_loss, dist_loss, total_loss = 0., 0., 0.
-
-            if num_positives > 0:
-                num_negatives = tf.cast(FLAGS.negative_positive_rate * tf.cast(num_positives, tf.float32), tf.int32)
-
-                # because 'x == 0' condition yields (none, 0) tensor, and ' < 1' yields (none, 2) shape, the same as aboe positive index selection
-                negative_indexes = tf.where(true_labels < 1)
-                # selecting scores for background class among true backgrounds (true_label == 0)
-                #negative_pred_background = tf.gather_nd(classes, negative_indexes)[:, 0]
-
-                negative_true = tf.gather_nd(true_labels, negative_indexes)
-                negative_pred = tf.gather_nd(classes, negative_indexes)
-                negative_ce = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=negative_true, logits=negative_pred)
-
-                num_negatives_to_sample = tf.minimum(num_negatives, tf.shape(negative_indexes)[0])
-                #sampled_negative_pred_background, sampled_negative_indexes = tf.math.top_k(negative_pred_background, num_negatives_to_sample)
-                sorted_negative_indexes = tf.argsort(negative_ce, direction='ASCENDING')
-                sampled_negative_indexes = sorted_negative_indexes[:num_negatives_to_sample]
-
-                negative_indexes = tf.gather(negative_indexes, sampled_negative_indexes)
-
-                new_indexes = tf.concat([positive_indexes, negative_indexes], axis=0)
-
-                sampled_true_labels_full = tf.gather_nd(true_labels, new_indexes)
-                sampled_true_labels_one_hot = tf.one_hot(sampled_true_labels_full, train_num_classes, axis=-1)
-                sampled_pred_classes_full = tf.gather_nd(classes, new_indexes)
-
-                ce_loss = ce_loss_object(y_true=sampled_true_labels_one_hot, y_pred=sampled_pred_classes_full)
-                ce_loss = tf.nn.compute_average_loss(ce_loss, global_batch_size=FLAGS.batch_size)
-
-                sampled_true_labels_pos = tf.gather_nd(true_labels, positive_indexes)
-                sampled_pred_classes_pos = tf.gather_nd(classes, positive_indexes)
-
-                sampled_true_bboxes_pos = tf.gather_nd(bboxes, positive_indexes)
-                sampled_pred_coords_pos = tf.gather_nd(coords, positive_indexes)
-
-                tcx, tcy, th, tw = tf.split(sampled_true_bboxes_pos, num_or_size_splits=4, axis=1)
-                pcx, pcy, ph, pw = tf.split(sampled_pred_coords_pos, num_or_size_splits=4, axis=1)
-
-                pw += 1e-10
-                ph += 1e-10
-
-                dc = tf.math.abs(tcx - pcx) / pw + tf.math.abs(tcy - pcy) / ph
-                dc *= 5
-
-                ds = tf.math.log(tw / pw) + tf.math.log(th / ph)
-                ds *= 10
-
-                dist_loss = smooth_l1_loss(dc + ds)
-                dist_loss = tf.nn.compute_average_loss(dist_loss, global_batch_size=FLAGS.batch_size)
-
-                total_loss = ce_loss + dist_loss
-                loss_metric.update_state(total_loss)
-
-                # metrics update
-
-                full_accuracy_metric.update_state(y_true=sampled_true_labels_full, y_pred=sampled_pred_classes_full)
-                accuracy_metric.update_state(y_true=sampled_true_labels_pos, y_pred=sampled_pred_classes_pos)
-
-                ious = anchors_gen.calc_ious_one_to_one(sampled_pred_coords_pos, sampled_true_bboxes_pos)
-                good_iou_index = tf.where(ious > 0.5)
-                num_good_ious = tf.shape(good_iou_index)[0]
-
-                iou_metric.update_state(ious)
-                num_good_ious_metric.update_state(num_good_ious)
-
-            return ce_loss, dist_loss, total_loss
+            return total_loss
 
         epoch_var = tf.Variable(0, dtype=tf.float32, name='epoch_number', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
 
