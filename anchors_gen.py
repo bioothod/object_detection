@@ -58,8 +58,9 @@ def calc_ious_one_to_one(pred_bboxes, true_bboxes):
     iou = inter / (pareas + tareas - inter)
     return iou
 
+DOWNSAMPLE_RATIO = 32
 
-def generate_true_labels_for_anchors(orig_bboxes, orig_labels, np_anchor_boxes, np_anchor_areas):
+def generate_true_labels_for_anchors(orig_bboxes, orig_labels, np_anchor_boxes, np_anchor_areas, image_size, num_classes):
     num_anchors = np_anchor_boxes.shape[0]
 
     orig_bboxes = tf.convert_to_tensor(orig_bboxes, dtype=tf.float32)
@@ -68,24 +69,77 @@ def generate_true_labels_for_anchors(orig_bboxes, orig_labels, np_anchor_boxes, 
     true_bboxes = tf.convert_to_tensor(np_anchor_boxes.copy(), dtype=tf.float32)
     true_labels = tf.zeros((num_anchors,), dtype=tf.int32)
 
-    ious = calc_ious(orig_bboxes, np_anchor_boxes, np_anchor_areas)
-    orig_dim_idx = tf.argmax(ious, axis=0)
-    orig_dim_idx = tf.cast(orig_dim_idx, tf.int64)
-    orig_dim_idx_range = tf.stack([orig_dim_idx, tf.range(num_anchors, dtype=tf.int64)], axis=1)
+    _, _, h, w = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
+    shifted_orig_bboxes = tf.concat([tf.zeros_like(h), tf.zeros_like(w), h, w], axis=1)
 
-    max_ious = tf.gather_nd(ious, orig_dim_idx_range)
+    num_scales = 3
 
-    max_iou_threshold = 0.5
-    update_idx = tf.where(max_ious > max_iou_threshold)
-    update_idx = tf.squeeze(update_idx, 1)
+    ious = calc_ious(shifted_orig_bboxes, np_anchor_boxes, np_anchor_areas)
+    anchor_idx = tf.argmax(ious, axis=1)
+    box_idx = tf.math.floormod(anchor_idx, num_scales)
+    scale_idx = tf.math.floordiv(anchor_idx, num_scales)
 
-    orig_idx = tf.gather(orig_dim_idx, update_idx)
-    labels_to_set = tf.gather(orig_labels, orig_idx)
-    bboxes_to_set = tf.gather(orig_bboxes, orig_idx)
-    update_idx = update_idx
-    update_idx = tf.expand_dims(update_idx, 1)
+    #tf.print('bboxes:', orig_bboxes, 'ious:', ious, 'anchor_idx:', anchor_idx, 'box_idx:', box_idx, 'scale_idx', scale_idx)
 
-    true_labels = tf.tensor_scatter_nd_update(true_labels, update_idx, labels_to_set)
-    true_bboxes = tf.tensor_scatter_nd_update(true_bboxes, update_idx, bboxes_to_set)
+    #anchor_idx = tf.cast(anchor_idx, tf.int64)
+    #anchor_idx_range = tf.stack([anchor_idx, tf.range(num_anchors, dtype=tf.int64)], axis=1)
 
-    return true_bboxes, true_labels
+
+    matched_anchor_boxes = tf.gather(np_anchor_boxes, anchor_idx)
+
+
+    scaled_size = tf.math.floordiv(image_size, DOWNSAMPLE_RATIO)
+
+    ret = []
+    for base_scale in reversed(range(num_scales)):
+        output_size = scaled_size * tf.math.pow(2, base_scale)
+        output_size_float = tf.cast(output_size, tf.float32)
+
+        scale_match_idx_orig = tf.where(tf.equal(scale_idx, base_scale))
+        scale_match_idx = tf.squeeze(scale_match_idx_orig, 1)
+        orig_bboxes_matched_scale = tf.gather(orig_bboxes, scale_match_idx)
+        orig_labels_matched_scale = tf.gather(orig_labels, scale_match_idx)
+
+        logger.info('base_scale: {}, orig_bboxes: {}, anchor_idx: {}, scale_idx: {}, scale_match_idx: {}, orig_bboxes_matched_scale: {}'.format(
+            base_scale, orig_bboxes.shape, anchor_idx.shape, scale_idx.shape, scale_match_idx.shape, orig_bboxes_matched_scale.shape))
+
+        cx, cy, h, w = tf.split(orig_bboxes_matched_scale, num_or_size_splits=4, axis=1)
+
+        out_cx = cx / float(image_size) * output_size_float
+        out_cy = cy / float(image_size) * output_size_float
+
+        anchors_for_scale = tf.gather(matched_anchor_boxes, scale_match_idx)
+        _, _, anchor_h, anchor_w = tf.split(anchors_for_scale, num_or_size_splits=4, axis=1)
+
+        #tf.print('anchor_idx:', tf.shape(anchor_idx), 'h:', tf.shape(h), 'ah:', tf.shape(anchor_h))
+        out_w = tf.math.log(tf.maximum(w, 1) / anchor_w)
+        out_h = tf.math.log(tf.maximum(h, 1) / anchor_h)
+
+        bboxes_to_set = tf.concat([out_cx, out_cy, out_h, out_w], axis=1)
+        #bboxes_to_set = tf.concat([cx, cy, h, w], axis=1)
+        #bboxes_to_set = tf.concat([out_cx, out_cy, h, w], axis=1)
+        obj_to_set = tf.ones_like(cx)
+        labels_to_set = tf.one_hot(orig_labels_matched_scale, num_classes, dtype=tf.float32)
+
+        values_to_set = tf.concat([bboxes_to_set, obj_to_set, labels_to_set], axis=1)
+        logger.info('base_scale: {}, concat: bboxes: {}, obj: {}, labels: {}, values: {}'.format(base_scale, bboxes_to_set, obj_to_set, labels_to_set, values_to_set))
+
+        icx = tf.cast(tf.floor(out_cx), tf.int64)
+        icy = tf.cast(tf.floor(out_cy), tf.int64)
+
+        box_match_idx = tf.gather(box_idx, scale_match_idx_orig)
+
+        update_idx = tf.concat([icy, icx, box_match_idx], axis=1)
+
+        #tf.print('update_idx:', update_idx, 'values_to_set:', values_to_set)
+
+        output = tf.zeros((output_size, output_size, num_scales, 4+1+num_classes), dtype=tf.float32)
+
+        logger.info('base_scale: {}, output: {}, update_idx: {}, values_to_set: {}'.format(base_scale, output.shape, update_idx.shape, values_to_set.shape))
+        output = tf.tensor_scatter_nd_update(output, update_idx, values_to_set)
+
+        output = tf.reshape(output, [output.shape[0] * output.shape[1], output.shape[2], output.shape[3]])
+        ret.append(output)
+
+    ret = tf.concat(ret, axis=0)
+    return ret
