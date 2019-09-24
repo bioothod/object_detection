@@ -126,10 +126,6 @@ def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas, image_
 
         orig_bboxes = tf.concat([cx, cy, h, w], axis=1)
 
-    #orig_labels_one_hot = tf.one_hot(orig_labels, num_classes, dtype=tf.float32)
-    #obj = tf.ones((tf.shape(orig_bboxes)[0], 1), dtype=tf.float32)
-    #true_values = tf.concat([orig_bboxes, obj, orig_labels_one_hot], axis=1)
-
     true_values = anchors_gen.generate_true_labels_for_anchors(orig_bboxes, orig_labels, np_anchor_boxes, np_anchor_areas, image_size, num_classes)
 
     return filename, image_id, image, true_values
@@ -141,6 +137,108 @@ def smooth_l1_loss(x):
     square_loss   = 0.5*x**2
     absolute_loss = tf.abs(x)
     return tf.where(tf.less(absolute_loss, 1), square_loss, absolute_loss-0.5)
+
+def draw_bboxes(image_size, train_dataset, train_cat_names, np_anchor_boxes):
+    data_dir = os.path.join(FLAGS.train_dir, 'tmp')
+    os.makedirs(data_dir, exist_ok=True)
+
+    if False:
+        for filename, image_id, image, true_values in train_dataset.take(20):
+            filename = str(filename.numpy(), 'utf8')
+
+            dst = '{}/{}.png'.format(data_dir, image_id.numpy())
+            new_anns = []
+
+            true_values_combined = true_values.numpy()
+
+            bboxes = true_values[:, 0:4]
+            labels = true_values[:, 5:]
+            labels = np.argmax(labels, axis=1)
+
+            for bb, cat_id in zip(bboxes, labels):
+                cx, cy, h, w = bb
+                x0 = cx - w/2
+                x1 = cx + w/2
+                y0 = cy - h/2
+                y1 = cy + h/2
+
+                bb = [x0, y0, x1, y1]
+                new_anns.append((bb, cat_id))
+
+            #logger.info('{}: true anchors: {}'.format(dst, new_anns))
+            logger.info('{}: true anchors: {}'.format(dst, len(new_anns)))
+
+            image = image.numpy() * 128. + 128
+            image = image.astype(np.uint8)
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            image_draw.draw_im(image, new_anns, dst, train_cat_names)
+
+    if True:
+        scaled_size = image_size / anchors_gen.DOWNSAMPLE_RATIO
+        output_splits = []
+        output_sizes = []
+        output_indexes = []
+        offset = 0
+        for base_scale in reversed(range(3)):
+            output_indexes.append(base_scale)
+            output_size = scaled_size * np.math.pow(2, base_scale)
+            output_sizes.append(output_size)
+            offset += int(output_size * output_size)
+            output_splits.append(offset)
+
+        for filename, image_id, image, true_values in train_dataset.unbatch().take(20):
+            filename = str(filename.numpy(), 'utf8')
+
+            dst = '{}/{}.png'.format(data_dir, image_id.numpy())
+            new_anns = []
+
+            true_values_combined = true_values.numpy()
+            for true_values, output_size, output_idx in zip(np.split(true_values_combined, output_splits), output_sizes, output_indexes):
+                non_background_index_tuple = np.where(true_values[:, :, 4] != 0)
+                logger.info('{}: true_values: {}, non_background_index_tuple: {}'.format(filename, true_values.shape, non_background_index_tuple))
+
+                anchor_loc_index = non_background_index_tuple[0]
+                box_index = non_background_index_tuple[1]
+                if len(anchor_loc_index) == 0:
+                    continue
+
+                logger.info('{}: true_values: {}, anchor_loc_index: {}, box_index: {}'.format(filename, true_values.shape, anchor_loc_index, box_index))
+
+                bboxes = true_values[anchor_loc_index, box_index, 0:4]
+                labels = true_values[anchor_loc_index, box_index, 5:]
+                labels = np.argmax(labels, axis=1)
+
+                logger.info('{}: true_values: {}, bboxes: {}, anchor_loc_index: {}, box_index: {}, labels: {}'.format(
+                    filename, true_values.shape, bboxes, anchor_loc_index, box_index, labels))
+
+
+                for bb, cat_id, bidx in zip(bboxes, labels, box_index):
+                    cx, cy, h, w = bb
+                    cx = cx / output_size * image_size
+                    cy = cy / output_size * image_size
+
+                    anchor_box_idx = output_idx * 3 + bidx
+                    anchor = np_anchor_boxes[anchor_box_idx]
+                    _, _, anchor_h, anchor_w = anchor
+
+                    h = np.math.exp(h) * anchor_h
+                    w = np.math.exp(w) * anchor_w
+
+                    x0 = cx - w/2
+                    x1 = cx + w/2
+                    y0 = cy - h/2
+                    y1 = cy + h/2
+
+                    bb = [x0, y0, x1, y1]
+                    new_anns.append((bb, cat_id))
+
+            #logger.info('{}: true anchors: {}'.format(dst, new_anns))
+            logger.info('{}: true anchors: {}'.format(dst, len(new_anns)))
+
+            image = image.numpy() * 128. + 128
+            image = image.astype(np.uint8)
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            image_draw.draw_im(image, new_anns, dst, train_cat_names)
 
 def train():
     checkpoint_dir = os.path.join(FLAGS.train_dir, 'checkpoints')
@@ -218,7 +316,7 @@ def train():
             if is_training:
                 ds = ds.shuffle(200)
 
-            #ds = ds.batch(FLAGS.batch_size)
+            ds = ds.batch(FLAGS.batch_size)
             ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
             #ds = dstrategy.experimental_distribute_dataset(ds)
 
@@ -240,108 +338,7 @@ def train():
 
 
         if True:
-            data_dir = os.path.join(FLAGS.train_dir, 'tmp')
-            os.makedirs(data_dir, exist_ok=True)
-
-            if False:
-                for filename, image_id, image, true_values in train_dataset.take(20):
-                    filename = str(filename.numpy(), 'utf8')
-
-                    dst = '{}/{}.png'.format(data_dir, image_id.numpy())
-                    new_anns = []
-
-                    true_values_combined = true_values.numpy()
-
-                    bboxes = true_values[:, 0:4]
-                    labels = true_values[:, 5:]
-                    labels = np.argmax(labels, axis=1)
-
-                    for bb, cat_id in zip(bboxes, labels):
-                        cx, cy, h, w = bb
-                        x0 = cx - w/2
-                        x1 = cx + w/2
-                        y0 = cy - h/2
-                        y1 = cy + h/2
-
-                        bb = [x0, y0, x1, y1]
-                        new_anns.append((bb, cat_id))
-
-                    #logger.info('{}: true anchors: {}'.format(dst, new_anns))
-                    logger.info('{}: true anchors: {}'.format(dst, len(new_anns)))
-
-                    image = image.numpy() * 128. + 128
-                    image = image.astype(np.uint8)
-                    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-                    image_draw.draw_im(image, new_anns, dst, train_cat_names)
-
-            if True:
-                scaled_size = image_size / anchors_gen.DOWNSAMPLE_RATIO
-                output_splits = []
-                output_sizes = []
-                output_indexes = []
-                offset = 0
-                for base_scale in reversed(range(3)):
-                    output_indexes.append(base_scale)
-                    output_size = scaled_size * np.math.pow(2, base_scale)
-                    output_sizes.append(output_size)
-                    offset += int(output_size * output_size)
-                    output_splits.append(offset)
-
-                #for filename, image_id, image, true_values in train_dataset.unbatch().take(20):
-                for filename, image_id, image, true_values in train_dataset.take(20):
-                    filename = str(filename.numpy(), 'utf8')
-
-                    dst = '{}/{}.png'.format(data_dir, image_id.numpy())
-                    new_anns = []
-
-                    true_values_combined = true_values.numpy()
-                    for true_values, output_size, output_idx in zip(np.split(true_values_combined, output_splits), output_sizes, output_indexes):
-                        non_background_index_tuple = np.where(true_values[:, :, 4] != 0)
-                        logger.info('{}: true_values: {}, non_background_index_tuple: {}'.format(filename, true_values.shape, non_background_index_tuple))
-
-                        anchor_loc_index = non_background_index_tuple[0]
-                        box_index = non_background_index_tuple[1]
-                        if len(anchor_loc_index) == 0:
-                            continue
-
-                        logger.info('{}: true_values: {}, anchor_loc_index: {}, box_index: {}'.format(filename, true_values.shape, anchor_loc_index, box_index))
-
-                        bboxes = true_values[anchor_loc_index, box_index, 0:4]
-                        labels = true_values[anchor_loc_index, box_index, 5:]
-                        labels = np.argmax(labels, axis=1)
-
-                        logger.info('{}: true_values: {}, bboxes: {}, anchor_loc_index: {}, box_index: {}, labels: {}'.format(
-                            filename, true_values.shape, bboxes, anchor_loc_index, box_index, labels))
-
-
-                        for bb, cat_id, bidx in zip(bboxes, labels, box_index):
-                            cx, cy, h, w = bb
-                            cx = cx / output_size * image_size
-                            cy = cy / output_size * image_size
-
-                            anchor_box_idx = output_idx * 3 + bidx
-                            anchor = np_anchor_boxes[anchor_box_idx]
-                            _, _, anchor_h, anchor_w = anchor
-
-                            h = np.math.exp(h) * anchor_h
-                            w = np.math.exp(w) * anchor_w
-
-                            x0 = cx - w/2
-                            x1 = cx + w/2
-                            y0 = cy - h/2
-                            y1 = cy + h/2
-
-                            bb = [x0, y0, x1, y1]
-                            new_anns.append((bb, cat_id))
-
-                    #logger.info('{}: true anchors: {}'.format(dst, new_anns))
-                    logger.info('{}: true anchors: {}'.format(dst, len(new_anns)))
-
-                    image = image.numpy() * 128. + 128
-                    image = image.astype(np.uint8)
-                    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-                    image_draw.draw_im(image, new_anns, dst, train_cat_names)
-
+            draw_bboxes(image_size, train_dataset, train_cat_names, np_anchor_boxes)
             exit(0)
 
         if train_num_classes is None:
