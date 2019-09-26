@@ -66,7 +66,7 @@ class LossTensorCalculator:
         pred_box_conf = tf.sigmoid(tf.expand_dims(y_pred[..., 4], -1))
 
         true_classes = y_true[..., 5:]
-        pred_classes = tf.math.sigmoid(y_pred[..., 5:])
+        pred_classes = y_pred[..., 5:]
 
 
         true_xy = y_true[..., 0:2]
@@ -90,7 +90,8 @@ class LossTensorCalculator:
         dist_loss = dist_diff * wh_scale
         dist_loss = tf.reduce_sum(tf.square(dist_loss), list(range(1, 5)))
 
-        class_loss = tf.keras.losses.binary_crossentropy(y_true=true_classes, y_pred=pred_classes, label_smoothing=0.1)
+        class_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=true_classes, logits=pred_classes)
+        class_loss = tf.reduce_sum(class_loss, -1)
         class_loss = tf.expand_dims(class_loss, -1)
         class_loss = true_conf * class_loss
         class_loss = tf.reduce_sum(class_loss, list(range(1, 5)))
