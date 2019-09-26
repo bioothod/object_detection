@@ -1,7 +1,10 @@
 import collections
+import logging
 
 import numpy as np
 import tensorflow as tf
+
+logger = logging.getLogger('detection')
 
 GlobalParams = collections.namedtuple('GlobalParams', [
     'batch_norm_momentum', 'batch_norm_epsilon', 'dropout_rate', 'data_format',
@@ -10,7 +13,7 @@ GlobalParams = collections.namedtuple('GlobalParams', [
 GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
 
 class DarknetConv(tf.keras.layers.Layer):
-    def __init__(self, params, num_features, kernel_size=(3, 3), strides=(2, 2), padding='VALID', **kwargs):
+    def __init__(self, params, num_features, kernel_size=(3, 3), strides=(1, 1), padding='SAME', **kwargs):
         super(DarknetConv, self).__init__(**kwargs)
         self.params = params
         self.num_features = num_features
@@ -21,9 +24,9 @@ class DarknetConv(tf.keras.layers.Layer):
     def build(self, input_shape):
         self.conv = tf.keras.layers.Conv2D(
                 self.num_features,
+                input_shape=input_shape,
                 kernel_size=self.kernel_size,
                 strides=self.strides,
-                input_shape=input_shape,
                 data_format=self.params.data_format,
                 use_bias=False,
                 padding=self.padding,
@@ -47,26 +50,16 @@ class DarknetConvPool(tf.keras.layers.Layer):
         self.num_features = num_features
 
     def build(self, input_shape):
-        self.pad = tf.keras.layers.ZeroPadding2D(((1, 0), (1, 0)))
-        self.conv = tf.keras.layers.Conv2D(
+        self.pad = tf.keras.layers.ZeroPadding2D(((1, 0), (1, 0)), input_shape=input_shape)
+        self.conv = DarknetConv(self.params,
                 self.num_features,
                 kernel_size=(3, 3),
                 strides=(2, 2),
-                input_shape=input_shape,
-                data_format=self.params.data_format,
-                use_bias=False,
-                padding='VALID',
-                kernel_initializer='glorot_uniform')
-        self.bn = tf.keras.layers.BatchNormalization(
-            axis=self.params.channel_axis,
-            momentum=self.params.batch_norm_momentum,
-            epsilon=self.params.batch_norm_epsilon)
+                padding='VALID')
 
     def call(self, inputs, training):
         x = self.pad(inputs)
-        x = self.conv(x)
-        x = self.bn(x, training)
-        x = tf.nn.leaky_relu(x, alpha=0.1)
+        x = self.conv(x, training)
         return x
 
 class DarknetResidual(tf.keras.layers.Layer):
@@ -76,41 +69,12 @@ class DarknetResidual(tf.keras.layers.Layer):
         self.params = params
 
     def build(self, input_shape):
-        self.conv2a = tf.keras.layers.Conv2D(
-                self.filters[0],
-                kernel_size=(1, 1),
-                strides=(1, 1),
-                input_shape=input_shape,
-                data_format=self.params.data_format,
-                use_bias=False,
-                padding='SAME',
-                kernel_initializer='glorot_uniform')
-        self.bn2a = tf.keras.layers.BatchNormalization(
-            axis=self.params.channel_axis,
-            momentum=self.params.batch_norm_momentum,
-            epsilon=self.params.batch_norm_epsilon)
-
-        self.conv2b = tf.keras.layers.Conv2D(
-                self.filters[1],
-                kernel_size=(3, 3),
-                strides=(1, 1),
-                data_format=self.params.data_format,
-                use_bias=False,
-                padding='SAME',
-                kernel_initializer='glorot_uniform')
-        self.bn2b = tf.keras.layers.BatchNormalization(
-            axis=self.params.channel_axis,
-            momentum=self.params.batch_norm_momentum,
-            epsilon=self.params.batch_norm_epsilon)
+        self.conv0 = DarknetConv(self.params, self.filters[0], kernel_size=(1, 1), strides=(1, 1), padding='SAME', input_shape=input_shape)
+        self.conv1 = DarknetConv(self.params, self.filters[1], kernel_size=(3, 3), strides=(1, 1), padding='SAME')
 
     def call(self, inputs, training):
-        x = self.conv2a(inputs)
-        x = self.bn2a(x, training)
-        x = tf.nn.leaky_relu(x, alpha=0.1)
-        
-        x = self.conv2b(x)
-        x = self.bn2b(x, training)
-        x = tf.nn.leaky_relu(x, alpha=0.1)
+        x = self.conv0(inputs, training)
+        x = self.conv1(x, training)
 
         x += inputs
         return x
@@ -121,7 +85,7 @@ class DarknetBody(tf.keras.layers.Layer):
         
         # (256, 256, 3)
         self.l0a = DarknetConv(params, 32, name="l0")
-        self.l0_pool = DarknetConv(params, 64, name="l0_pool")
+        self.l0_pool = DarknetConvPool(params, 64, name="l0_pool")
 
         # (128, 128, 64)
         self.l1a = DarknetResidual(params, [32, 64], name="l1")
@@ -321,6 +285,7 @@ def create_model(num_classes):
 
 
     model = Yolo3(params, num_classes)
+    return model
 
 def create_anchors():
     anchors_dict = {
@@ -335,9 +300,8 @@ def create_anchors():
     }
 
     anchors, image_size = anchors_dict["0"]
-    # _,_,H,W format
-    anchors = [[0, 0, a[1], a[0]] for a in anchors]
+    # _,_,W,H format
     anchors = np.array(anchors, dtype=np.float32)
-    areas = anchors[:, 2] * anchors[:, 3]
+    areas = anchors[:, 0] * anchors[:, 1]
 
     return anchors, areas, image_size
