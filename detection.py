@@ -368,14 +368,6 @@ def train():
             steps_per_epoch, calc_epoch_steps(train_num_images), train_num_images,
             steps_per_eval, calc_epoch_steps(eval_num_images), eval_num_images))
 
-        num_vars = len(model.trainable_variables)
-        num_params = np.sum([np.prod(v.shape) for v in model.trainable_variables])
-
-        logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, model trainable variables/params: {}/{}, dtype: {}'.format(
-            num_replicas, checkpoint_dir, FLAGS.model_name, image_size,
-            num_vars, int(num_params),
-            dtype))
-
         opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
         checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model)
@@ -397,13 +389,11 @@ def train():
 
         loss_metric = tf.keras.metrics.Mean(name='train_loss')
         accuracy_metric = tf.keras.metrics.Accuracy(name='train_accuracy')
-        full_accuracy_metric = tf.keras.metrics.Accuracy(name='train_full_accuracy')
         iou_metric = tf.keras.metrics.Mean(name='train_iou')
         num_good_ious_metric = tf.keras.metrics.Mean(name='eval_num_good_ious')
         num_positive_labels_metric = tf.keras.metrics.Mean(name='eval_num_positive_labels_ious')
 
         eval_loss_metric = tf.keras.metrics.Mean(name='eval_loss')
-        eval_full_accuracy_metric = tf.keras.metrics.Accuracy(name='eval_full_accuracy')
         eval_accuracy_metric = tf.keras.metrics.Accuracy(name='eval_accuracy')
         eval_distance_center_metric = tf.keras.metrics.MeanAbsoluteError(name='eval_dist_center')
         eval_distance_size_metric = tf.keras.metrics.MeanAbsoluteError(name='eval_dist_size')
@@ -414,14 +404,12 @@ def train():
         def reset_metrics():
             loss_metric.reset_states()
             accuracy_metric.reset_states()
-            full_accuracy_metric.reset_states()
             iou_metric.reset_states()
             num_good_ious_metric.reset_states()
             num_positive_labels_metric.reset_states()
 
             eval_loss_metric.reset_states()
             eval_accuracy_metric.reset_states()
-            eval_full_accuracy_metric.reset_states()
             eval_iou_metric.reset_states()
             eval_num_good_ious_metric.reset_states()
             eval_num_positive_labels_metric.reset_states()
@@ -438,7 +426,7 @@ def train():
 
         yolo_loss_object = loss.YOLOLoss(image_size, np_anchor_boxes, output_sizes, reduction=tf.keras.losses.Reduction.NONE)
 
-        def calculate_metrics(logits, true_values, loss_metric, accuracy_metric, full_accuracy_metric, iou_metric, num_good_ious_metric, num_positive_labels_metric):
+        def calculate_metrics(logits, true_values, loss_metric, accuracy_metric, iou_metric, num_good_ious_metric, num_positive_labels_metric):
             true_values_list = list(tf.split(true_values, output_splits, axis=1))
             dist_loss, class_loss, conf_loss_pos, conf_loss_neg = yolo_loss_object.call(y_true_list=true_values_list, y_pred_list=logits)
 
@@ -461,7 +449,7 @@ def train():
                 pred_values = tf.reshape(pred_values, [-1, output_size, output_size, num_boxes, 4 + 1 + num_classes])
 
                 non_background_index = tf.where(tf.not_equal(true_values[..., 4], 0))
-                num_positive_labels_metric.update_state(tf.math.count_nonzero(true_values[..., 4]))
+                num_positive_labels_metric.update_state(tf.shape(non_background_index)[0])
                 #tf.print('num_positive_labels_metric:', tf.math.count_nonzero(true_values[..., 4]))
 
                 box_index = non_background_index[:, 3]
@@ -513,6 +501,7 @@ def train():
 
                 #logger.info('pred_box_xy: {}, pred_box_wh: {}, anchors_wh: {}'.format(pred_box_xy.shape, pred_box_wh.shape, anchors_wh.shape))
 
+                # true_bboxes contain upper left corner of the box
                 true_xy = true_bboxes[..., 0:2]
                 true_wh = tf.math.exp(true_bboxes[..., 2:4]) * anchor_grid
 
@@ -521,11 +510,12 @@ def train():
                 pred_bboxes = tf.concat([pred_box_xy, pred_box_wh], axis=-1)
                 true_bboxes = tf.concat([true_xy, true_wh], axis=-1)
                 ious = anchors_gen.calc_ious_one_to_one(pred_bboxes, true_bboxes)
+                #tf.print('pred_bboxes_shape:', tf.shape(pred_bboxes), 'true_bboxes_shape:', tf.shape(true_bboxes))
+                #tf.print('ious:', ious)
+                iou_metric.update_state(ious)
 
-                good_ious = tf.where(ious > 0.5, 1, 0)
-                num_good_ious_metric.update_state(tf.reduce_sum(good_ious))
-
-                iou_metric.update_state(tf.reduce_mean(ious))
+                good_ious = tf.where(ious > 0.5)
+                num_good_ious_metric.update_state(tf.shape(good_ious)[0])
 
             return dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss
 
@@ -534,7 +524,7 @@ def train():
         def eval_step(filenames, images, true_values):
             logits = model(images, training=False)
             dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = calculate_metrics(logits, true_values,
-                    eval_loss_metric, eval_accuracy_metric, eval_full_accuracy_metric, eval_iou_metric,
+                    eval_loss_metric, eval_accuracy_metric, eval_iou_metric,
                     eval_num_good_ious_metric, eval_num_positive_labels_metric)
             return dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss
 
@@ -542,7 +532,7 @@ def train():
             with tf.GradientTape() as tape:
                 logits = model(images, training=True)
                 dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = calculate_metrics(logits, true_values,
-                        loss_metric, accuracy_metric, full_accuracy_metric, iou_metric,
+                        loss_metric, accuracy_metric, iou_metric,
                         num_good_ious_metric, num_positive_labels_metric)
 
             variables = model.trainable_variables
@@ -601,10 +591,10 @@ def train():
 
                 dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = step_func(args=(filenames, images, true_values))
                 if name == 'train' and step % FLAGS.print_per_train_steps == 0:
-                    logger.info('{}: {}: step: {}/{}, dist_loss: {:.2e}, class_loss: {:.2e}, conf_loss: {:.2e}/{:.2e}, total_loss: {:.2e}, accuracy: {:.3f}/{:.3f}, iou: {:.3f}, good_ios/pos: {}/{}'.format(
+                    logger.info('{}: {}: step: {}/{}, dist_loss: {:.2e}, class_loss: {:.2e}, conf_loss: {:.2e}/{:.2e}, total_loss: {:.2e}, accuracy: {:.3f}, iou: {:.3f}, good_ios/pos: {}/{}'.format(
                         name, int(epoch_var.numpy()), step, max_steps,
                         dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss,
-                        accuracy_metric.result(), full_accuracy_metric.result(),
+                        accuracy_metric.result(),
                         iou_metric.result(),
                         int(num_good_ious_metric.result()), int(num_positive_labels_metric.result()),
                         ))
@@ -659,6 +649,13 @@ def train():
             logger.info('setting minimal evaluation metric {:.3f} -> {} from command line arguments'.format(min_metric, FLAGS.min_eval_metric))
             min_metric = FLAGS.min_eval_metric
 
+        num_vars = len(model.trainable_variables)
+        num_params = np.sum([np.prod(v.shape) for v in model.trainable_variables])
+
+        logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, model trainable variables/params: {}/{}'.format(
+            num_replicas, checkpoint_dir, FLAGS.model_name, image_size,
+            num_vars, int(num_params)))
+
         for epoch in range(FLAGS.epoch, FLAGS.num_epochs):
             epoch_var.assign(epoch)
 
@@ -669,12 +666,12 @@ def train():
 
             metric = validation_metric()
 
-            logger.info('epoch: {}, train: steps: {}, accuracy: {:.3f}/{:.3f}, iou: {:.3f}, good_ios/pos: {}/{}, loss: {:.2e}, eval: accuracy: {:.3f}/{:.3f}, iou: {:.3f}, good_ios/pos: {}/{}, loss: {:.2e}, lr: {:.2e}, val_metric: {:.3f}'.format(
+            logger.info('epoch: {}, train: steps: {}, accuracy: {:.3f}, iou: {:.3f}, good_ios/pos: {}/{}, loss: {:.2e}, eval: accuracy: {:.3f}, iou: {:.3f}, good_ios/pos: {}/{}, loss: {:.2e}, lr: {:.2e}, val_metric: {:.3f}'.format(
                 epoch, global_step.numpy(),
-                accuracy_metric.result(), full_accuracy_metric.result(), iou_metric.result(),
+                accuracy_metric.result(), iou_metric.result(),
                 int(num_good_ious_metric.result()), int(num_positive_labels_metric.result()),
                 loss_metric.result(),
-                eval_accuracy_metric.result(), eval_full_accuracy_metric.result(), eval_iou_metric.result(),
+                eval_accuracy_metric.result(), eval_iou_metric.result(),
                 int(eval_num_good_ious_metric.result()), int(eval_num_positive_labels_metric.result()),
                 eval_loss_metric.result(),
                 learning_rate.numpy(),
@@ -682,9 +679,9 @@ def train():
 
             if metric > min_metric:
                 save_path = manager.save()
-                logger.info("epoch: {}, saved checkpoint: {}, eval metric: {:.4f} -> {:.4f}, accuracy: {:.3f}/{:.3f}, iou: {:.3f}, good_ios/positive: {}/{}".format(
+                logger.info("epoch: {}, saved checkpoint: {}, eval metric: {:.4f} -> {:.4f}, accuracy: {:.3f}, iou: {:.3f}, good_ios/positive: {}/{}".format(
                     epoch, save_path, min_metric, metric, 
-                    eval_accuracy_metric.result(), eval_full_accuracy_metric.result(), eval_iou_metric.result(),
+                    eval_accuracy_metric.result(), eval_iou_metric.result(),
                     int(eval_num_good_ious_metric.result()), int(eval_num_positive_labels_metric.result())))
                 min_metric = metric
                 num_epochs_without_improvement = 0
