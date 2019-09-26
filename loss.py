@@ -51,6 +51,7 @@ class LossTensorCalculator:
 
 
         object_mask = tf.expand_dims(y_true[..., 4], 4)
+        true_conf = object_mask
 
         grid_offset = _create_mesh_xy(*y_pred.shape[:4])
         anchor_grid = _create_mesh_anchor(anchors_wh, *y_pred.shape[:4])
@@ -62,8 +63,10 @@ class LossTensorCalculator:
         pred_box_wh = tf.math.exp(y_pred[..., 2:4]) * anchors
 
         # confidence/objectiveness
-        pred_box_conf = tf.sigmoid(y_pred[..., 4])
-        pred_box_conf = tf.expand_dims(pred_box_conf, axis=-1)
+        pred_box_conf = tf.sigmoid(tf.expand_dims(y_pred[..., 4], -1))
+
+        true_classes = y_true[..., 5:]
+        pred_classes = tf.math.sigmoid(y_pred[..., 5:])
 
 
         true_xy = y_true[..., 0:2]
@@ -74,8 +77,9 @@ class LossTensorCalculator:
         pred_bboxes = tf.concat([pred_box_xy, pred_box_wh], axis=-1)
         true_bboxes = tf.concat([true_xy, true_wh], axis=-1)
         best_ious = anchors_gen.calc_ious_one_to_one(pred_bboxes, true_bboxes)
-         
-        conf_delta = pred_box_conf * tf.cast(best_ious < self.ignore_thresh, tf.float32)
+
+        masked_ious = tf.where(best_ious < self.ignore_thresh, 1., 0.)
+        masked_ious = tf.expand_dims(masked_ious, -1)
 
         wh_scale = tf.math.exp(y_true[..., 2:4]) * anchors / self.image_size
         # the smaller the box, the bigger the scale
@@ -86,22 +90,19 @@ class LossTensorCalculator:
         dist_loss = dist_diff * wh_scale
         dist_loss = tf.reduce_sum(tf.square(dist_loss), list(range(1, 5)))
 
-        class_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=y_true[..., 5:], logits=y_pred[..., 5:])
-        class_loss = tf.reduce_sum(class_loss, -1)
-        #logger.info('class_loss: {}, object_mask: {}'.format(class_loss.shape, object_mask.shape))
-        class_loss = tf.expand_dims(class_loss, 4) * object_mask
+        class_loss = tf.keras.losses.binary_crossentropy(y_true=true_classes, y_pred=pred_classes, label_smoothing=0.1)
+        class_loss = tf.expand_dims(class_loss, -1)
+        class_loss = true_conf * class_loss
         class_loss = tf.reduce_sum(class_loss, list(range(1, 5)))
 
-        true_conf = y_true[..., 4]
-        true_conf = tf.expand_dims(true_conf, -1)
-        conf_loss_pos = object_mask * (pred_box_conf - true_conf)
-        conf_loss_pos = tf.reduce_sum(tf.square(conf_loss_pos), list(range(1,5)))
-        #logger.info('object_mask: {}, conf_loss_pos: {}, conf_delta: {}'.format(object_mask.shape, conf_loss_pos.shape, conf_delta.shape))
+        conf_loss_pos = true_conf * (pred_box_conf - true_conf)
+        conf_loss_pos = tf.square(conf_loss_pos)
+        conf_loss_pos = tf.reduce_sum(conf_loss_pos, list(range(1, 5)))
 
-        conf_loss_neg = (1 - object_mask) * conf_delta
-        conf_loss_neg = tf.reduce_sum(tf.square(conf_loss_neg), list(range(1,5)))
+        conf_loss_neg = (1 - true_conf) * pred_box_conf * masked_ious
+        conf_loss_neg = tf.square(conf_loss_neg)
+        conf_loss_neg = tf.reduce_sum(conf_loss_neg, list(range(1, 5)))
 
-        #logger.info('dist_loss: {}, class_loss: {}, conf_loss_pos: {}, conf_loss_neg: {}'.format(dist_loss.shape, class_loss.shape, conf_loss_pos.shape, conf_loss_neg.shape))
         return dist_loss * self.dist_scale, class_loss * self.class_scale, conf_loss_pos * self.obj_scale, conf_loss_neg * self.noobj_scale
 
 class YOLOLoss:
