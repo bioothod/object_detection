@@ -34,17 +34,17 @@ def calc_ious(orig_bboxes, boxes, areas):
     return ious
 
 def calc_ious_one_to_one(pred_bboxes, true_bboxes):
-    px0 = pred_bboxes[0] - pred_bboxes[2]/2
-    px1 = pred_bboxes[0] + pred_bboxes[2]/2
-    py0 = pred_bboxes[1] - pred_bboxes[3]/2
-    py1 = pred_bboxes[1] + pred_bboxes[3]/2
-    pareas = pred_bboxes[2] * pred_bboxes[3]
+    px0 = pred_bboxes[..., 0] - pred_bboxes[..., 2]/2
+    px1 = pred_bboxes[..., 0] + pred_bboxes[..., 2]/2
+    py0 = pred_bboxes[..., 1] - pred_bboxes[..., 3]/2
+    py1 = pred_bboxes[..., 1] + pred_bboxes[..., 3]/2
+    pareas = pred_bboxes[..., 2] * pred_bboxes[..., 3]
 
-    tx0 = true_bboxes[0] - true_bboxes[2]/2
-    tx1 = true_bboxes[0] + true_bboxes[2]/2
-    ty0 = true_bboxes[1] - true_bboxes[3]/2
-    ty1 = true_bboxes[1] + true_bboxes[3]/2
-    tareas = true_bboxes[2] * true_bboxes[3]
+    tx0 = true_bboxes[..., 0] - true_bboxes[..., 2]/2
+    tx1 = true_bboxes[..., 0] + true_bboxes[..., 2]/2
+    ty0 = true_bboxes[..., 1] - true_bboxes[..., 3]/2
+    ty1 = true_bboxes[..., 1] + true_bboxes[..., 3]/2
+    tareas = true_bboxes[..., 2] * true_bboxes[..., 3]
 
     xx0 = tf.maximum(px0, tx0)
     yy0 = tf.maximum(py0, ty0)
