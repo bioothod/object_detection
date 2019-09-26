@@ -97,35 +97,29 @@ def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas, image_
     yminf = (cy - h/2) / image_height
     ymaxf = (cy + h/2) / image_height
 
-    image = tf.cast(image, tf.float32)
-    image -= 128.
-    image /= 128.
-
     if FLAGS.orig_images:
         coords_yx = tf.concat([yminf, xminf, ymaxf, xmaxf], axis=1)
 
         if is_training:
             image, new_labels, new_bboxes = preprocess_ssd.preprocess_for_train(image, orig_labels, coords_yx, [image_size, image_size], data_format=FLAGS.data_format)
-
             yminf, xminf, ymaxf, xmaxf = tf.split(new_bboxes, num_or_size_splits=4, axis=1)
-            cx = (xminf + xmaxf) * image_size / 2
-            cy = (yminf + ymaxf) * image_size / 2
-            h = (ymaxf - yminf) * image_size
-            w = (xmaxf - xminf) * image_size
 
-            orig_bboxes = tf.concat([cx, cy, w, h], axis=1)
             orig_labels = new_labels
         else:
             image = preprocess_ssd.preprocess_for_eval(image, [image_size, image_size], data_format=FLAGS.data_format)
     else:
+        image = tf.cast(image, tf.float32)
+        image -= 128.
+        image /= 128.
+
         image = tf.image.resize_with_pad(image, image_size, image_size)
 
-        cx = (xminf + xmaxf) * image_size / 2
-        cy = (yminf + ymaxf) * image_size / 2
-        h = (ymaxf - yminf) * image_size
-        w = (xmaxf - xminf) * image_size
+    cx = (xminf + xmaxf) * image_size / 2
+    cy = (yminf + ymaxf) * image_size / 2
+    h = (ymaxf - yminf) * image_size
+    w = (xmaxf - xminf) * image_size
 
-        orig_bboxes = tf.concat([cx, cy, w, h], axis=1)
+    orig_bboxes = tf.concat([cx, cy, w, h], axis=1)
 
     true_values = anchors_gen.generate_true_labels_for_anchors(orig_bboxes, orig_labels, np_anchor_boxes, np_anchor_areas, image_size, num_classes)
 
