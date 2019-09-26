@@ -1,174 +1,134 @@
 import logging
 
 import tensorflow as tf
-from tensorflow.python.ops import array_ops
+
+import anchors_gen
 
 logger = logging.getLogger('detection')
 
-class CategoricalLoss(tf.keras.losses.Loss):
-    def __init__(self, from_logits=False, reduction=tf.keras.losses.Reduction.NONE, class_weights=1.):
-        super(CategoricalLoss, self).__init__()
-        self.from_logits = from_logits
-        self.data_format = 'channels_last'
-        self.reduction = reduction
-        self.class_weights = class_weights
+def _create_mesh_xy(batch_size, grid_h, grid_w, n_box):
+    mesh_x = tf.cast(tf.reshape(tf.tile(tf.range(grid_w), [grid_h]), (1, grid_h, grid_w, 1, 1)), tf.float32)
+    mesh_y = tf.transpose(mesh_x, (0, 2, 1, 3, 4))
+    mesh_xy = tf.tile(tf.concat([mesh_x, mesh_y],-1), [batch_size, 1, 1, n_box, 1])
 
-    def call(self, y_true, y_pred):
-        true_shape = y_true.shape
-        pred_shape = y_pred.shape
+    return mesh_xy
 
-        assert true_shape == pred_shape
+def _create_mesh_anchor(anchors, batch_size, grid_h, grid_w, n_box):
+    """
+    # Returns
+        mesh_xy : Tensor, shape of (batch_size, grid_h, grid_w, n_box, 2)
+            [..., 0] means "anchor_w"
+            [..., 1] means "anchor_h"
+    """
+    mesh_anchor = tf.tile(anchors, [batch_size*grid_h*grid_w])
+    mesh_anchor = tf.reshape(mesh_anchor, [batch_size, grid_h, grid_w, n_box, 2])
+    mesh_anchor = tf.cast(mesh_anchor, tf.float32)
+    return mesh_anchor
 
-        if self.from_logits:
-            axis = 3 if self.data_format() == 'channels_last' else 1
-            y_pred /= tf.math.sum(y_pred, axis=axis, keepdims=True)
-
-        #y_true = tf.clip_by_value(y_true, 1e-10, 1-1e-10)
-        y_pred = tf.clip_by_value(y_pred, 1e-10, 1-1e-10)
-
-        per_entry_ce = -y_true * tf.math.log(y_pred) * self.class_weights
-
-        if self.reduction == tf.keras.losses.Reduction.NONE:
-            return per_entry_ce
-
-        raise "qwe"
-
-def _gather_channels(x, indexes, **kwargs):
-    """Slice tensor along channels axis by given indexes"""
-    backend = kwargs['backend']
-    if backend.image_data_format() == 'channels_last':
-        x = backend.permute_dimensions(x, (3, 0, 1, 2))
-        x = backend.gather(x, indexes)
-        x = backend.permute_dimensions(x, (1, 2, 3, 0))
-    else:
-        x = backend.permute_dimensions(x, (1, 0, 2, 3))
-        x = backend.gather(x, indexes)
-        x = backend.permute_dimensions(x, (1, 0, 2, 3))
-    return x
-
-def gather_channels(*xs, indexes=None, **kwargs):
-    """Slice tensors along channels axis by given indexes"""
-    if indexes is None:
-        return xs
-    elif isinstance(indexes, (int)):
-        indexes = [indexes]
-    xs = [_gather_channels(x, indexes=indexes, **kwargs) for x in xs]
-    return xs
-
-def get_reduce_axes(per_image, data_format):
-    axes = [1, 2] if data_format == 'channels_last' else [2, 3]
-    if not per_image:
-        axes.insert(0, 0)
-    return axes
-
-def round_if_needed(x, threshold):
-    if threshold is not None:
-        dtype = x.dtype
-        x = tf.greater(x, threshold)
-        x = tf.cast(x, dtype)
-
-    return x
-
-def average(x, per_image=False, class_weights=None, keepdims=True):
-    if per_image:
-        x = tf.reduce_mean(x, axis=0, keepdims=keepdims)
-    if class_weights is not None:
-        x = x * class_weights
-    return tf.reduce_mean(x, keepdims=keepdims)
-
-class DiceLoss(tf.keras.losses.Loss):
-    def __init__(self, from_logits=False, reduction=tf.keras.losses.Reduction.NONE, beta=1, class_weights=1.):
-        super(DiceLoss, self).__init__()
-        self.from_logits = from_logits
-        self.data_format = 'channels_last'
-        self.reduction = reduction
-        self.class_weights = class_weights
-        self.beta = beta
-        self.smooth = 1e-8
-        self.per_image = False
-        self.threshold = None
-
-    def call(self, y_true, y_pred):
-        y_true = tf.cast(y_true, y_pred.dtype)
-        y_pred = round_if_needed(y_pred, self.threshold)
-        axes = get_reduce_axes(self.per_image, self.data_format)
-
-        # calculate score
-        tp = tf.reduce_sum(y_true * y_pred, axis=axes, keepdims=True)
-        fp = tf.reduce_sum(y_pred, axis=axes, keepdims=True) - tp
-        fn = tf.reduce_sum(y_true, axis=axes, keepdims=True) - tp
-
-        score = ((1 + self.beta ** 2) * tp + self.smooth) \
-                / ((1 + self.beta ** 2) * tp + self.beta ** 2 * fn + fp + self.smooth)
-
-        if self.reduction == tf.keras.losses.Reduction.NONE:
-            return score
-
-        score = average(score, self.per_image, self.class_weights)
-
-        return 1. - score
-
-class CategoricalFocalLoss(tf.keras.losses.Loss):
-    def __init__(self, from_logits=False, reduction=tf.keras.losses.Reduction.AUTO):
-        super(CategoricalFocalLoss, self).__init__()
-        self.alpha = 0.25
-        self.gamma = 2
-        self.reduction = reduction
-        self.from_logits = from_logits
-        self.data_format = 'channels_last'
-
-    def call(self, y_true, y_pred):
-        if self.from_logits:
-            axis = 3 if self.data_format == 'channels_last' else 1
-            y_pred = tf.nn.softmax(y_pred, axis=axis)
-
-        y_true = tf.cast(y_true, y_pred.dtype)
-        #y_true = tf.clip_by_value(y_true, 1e-10, 1-1e-10)
-        y_pred = tf.clip_by_value(y_pred, 1e-10, 1-1e-10)
-
-        per_entry_ce = -y_true * (self.alpha * tf.math.pow((1 - y_pred), self.gamma) * tf.math.log(y_pred))
-
-        if self.reduction == tf.keras.losses.Reduction.NONE:
-            return per_entry_ce
-
-        raise "qwe"
-
-class IOUScore(tf.keras.metrics.Metric):
+class LossTensorCalculator:
     def __init__(self,
-            class_weights=1.,
-            class_indexes=None,
-            threshold=None,
-            per_image=False,
-            smooth=1e-8,
-            name=None,
-            **kwargs):
-        super(IOUScore, self).__init__(name=name, **kwargs)
+                 image_size=[288, 288], 
+                 ignore_thresh=0.5, 
+                 obj_scale=5.,
+                 noobj_scale=1.,
+                 dist_scale=1.,
+                 class_scale=1.):
+        self.ignore_thresh = ignore_thresh
+        self.obj_scale = obj_scale
+        self.noobj_scale = noobj_scale
+        self.dist_scale = dist_scale
+        self.class_scale = class_scale        
+        self.image_size = image_size # WH tuple
 
-        self.class_weights = class_weights if class_weights is not None else 1
-        self.class_indexes = class_indexes
-        self.threshold = threshold
-        self.per_image = per_image
-        self.smooth = smooth
-        self.data_format = 'channels_last'
+        self.bce = tf.keras.losses.BinaryCrossentropy()
 
-        self.iou_score = self.add_weight(name='iou_score', initializer='zeros')
-        self.iou_num = self.add_weight(name='iou_num', initializer='zeros')
+    def run(self, y_true, y_pred, anchors_wh, output_size):
+        pred_orig_shape = tf.shape(y_pred)
+        true_orig_shape = tf.shape(y_true)
 
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        y_true = tf.cast(y_true, y_pred.dtype)
-        y_pred = round_if_needed(y_pred, self.threshold)
-        axes = get_reduce_axes(self.per_image, self.data_format)
+        y_true = tf.reshape(y_true, [-1, output_size, output_size, true_orig_shape[2], true_orig_shape[3]])
+        y_pred = tf.reshape(y_pred, [-1, output_size, output_size, true_orig_shape[2], true_orig_shape[3]])
 
-        # score calculation
-        intersection = tf.reduce_sum(y_true * y_pred, axis=axes)
-        union = tf.reduce_sum(y_true + y_pred, axis=axes) - intersection
 
-        score = (intersection + self.smooth) / (union + self.smooth)
-        score = tf.reduce_mean(score)
-        #score = average(score, self.per_image, self.class_weights, keepdims=False)
+        object_mask = tf.expand_dims(y_true[..., 4], 4)
 
-        self.iou_score.assign_add(score)
-        self.iou_num.assign_add(1)
+        grid_offset = _create_mesh_xy(*y_pred.shape[:4])
+        anchor_grid = _create_mesh_anchor(anchors_wh, *y_pred.shape[:4])
 
-    def result(self):
-        return (self.iou_score + self.smooth) / (self.iou_num + self.smooth)
+        #sigmoid(t_xy) + c_xy
+        pred_box_xy = grid_offset + tf.sigmoid(y_pred[:, :, :, :, :2])
+
+        anchors = tf.constant(anchors_wh, dtype=tf.float32, shape=[1, 1, 1, 3, 2])
+        pred_box_wh = tf.math.exp(y_pred[..., 2:4]) * anchors
+
+        # confidence/objectiveness
+        pred_box_conf = tf.sigmoid(y_pred[..., 4])
+        pred_box_conf = tf.expand_dims(pred_box_conf, axis=-1)
+
+
+        true_xy = y_true[..., 0:2]
+        true_wh = tf.math.exp(y_true[..., 2:4]) * anchor_grid
+        # zero-out those where objectivness is zero
+        true_wh = true_wh * object_mask
+
+        pred_bboxes = tf.concat([pred_box_xy, pred_box_wh], axis=-1)
+        true_bboxes = tf.concat([true_xy, true_wh], axis=-1)
+        best_ious = anchors_gen.calc_ious_one_to_one(pred_bboxes, true_bboxes)
+         
+        conf_delta = pred_box_conf * tf.cast(best_ious < self.ignore_thresh, tf.float32)
+
+        wh_scale = tf.math.exp(y_true[..., 2:4]) * anchors / self.image_size
+        # the smaller the box, the bigger the scale
+        wh_scale = tf.expand_dims(2 - wh_scale[..., 0] * wh_scale[..., 1], axis=4) 
+
+        dist_diff = object_mask * (y_pred[..., :4] - y_true[..., :4])
+
+        dist_loss = dist_diff * wh_scale
+        dist_loss = tf.reduce_sum(tf.square(dist_loss), list(range(1, 5)))
+
+        class_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=y_true[..., 5:], logits=y_pred[..., 5:])
+        class_loss = tf.reduce_sum(class_loss, -1)
+        #logger.info('class_loss: {}, object_mask: {}'.format(class_loss.shape, object_mask.shape))
+        class_loss = tf.expand_dims(class_loss, 4) * object_mask
+        class_loss = tf.reduce_sum(class_loss, list(range(1, 5)))
+
+        true_conf = y_true[..., 4]
+        true_conf = tf.expand_dims(true_conf, -1)
+        conf_loss_pos = object_mask * (pred_box_conf - true_conf)
+        conf_loss_pos = tf.reduce_sum(tf.square(conf_loss_pos), list(range(1,5)))
+        #logger.info('object_mask: {}, conf_loss_pos: {}, conf_delta: {}'.format(object_mask.shape, conf_loss_pos.shape, conf_delta.shape))
+
+        conf_loss_neg = (1 - object_mask) * conf_delta
+        conf_loss_neg = tf.reduce_sum(tf.square(conf_loss_neg), list(range(1,5)))
+
+        #logger.info('dist_loss: {}, class_loss: {}, conf_loss_pos: {}, conf_loss_neg: {}'.format(dist_loss.shape, class_loss.shape, conf_loss_pos.shape, conf_loss_neg.shape))
+        return dist_loss * self.dist_scale, class_loss * self.class_scale, conf_loss_pos * self.obj_scale, conf_loss_neg * self.noobj_scale
+
+class YOLOLoss:
+    def __init__(self, image_size, anchors, output_sizes, ignore_thresh=0.5, obj_scale=5, noobj_scale=1, dist_scale=1, class_scale=1, reduction=tf.keras.losses.Reduction.NONE):
+        super(YOLOLoss, self).__init__()
+        self.reduction = reduction
+        self.anchors = anchors.reshape([len(output_sizes), -1])
+        self.output_sizes = output_sizes
+
+        self.calc = LossTensorCalculator(image_size=[image_size, image_size],
+                                        ignore_thresh=ignore_thresh, 
+                                        obj_scale=obj_scale,
+                                        noobj_scale=noobj_scale,
+                                        dist_scale=dist_scale,
+                                        class_scale=class_scale)
+
+    def call(self, y_true_list, y_pred_list):
+        dist_loss = tf.zeros((tf.shape(y_true_list[0])[0]), dtype=tf.float32)
+        class_loss = tf.zeros((tf.shape(y_true_list[0])[0]), dtype=tf.float32)
+        conf_loss_pos = tf.zeros((tf.shape(y_true_list[0])[0]), dtype=tf.float32)
+        conf_loss_neg = tf.zeros((tf.shape(y_true_list[0])[0]), dtype=tf.float32)
+
+        for output_size, anchors, y_true, y_pred in zip(self.output_sizes, self.anchors, y_true_list, y_pred_list):
+            dist_loss_, class_loss_, conf_loss_pos_, conf_loss_neg_ = self.calc.run(y_true, y_pred, anchors, output_size)
+            dist_loss += dist_loss_
+            class_loss += class_loss_
+            conf_loss_pos += conf_loss_pos_
+            conf_loss_neg += conf_loss_neg_
+
+        return dist_loss, class_loss, conf_loss_pos, conf_loss_neg

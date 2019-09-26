@@ -86,7 +86,8 @@ def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas, image_
     cx += (mx - orig_image_width) / 2
     cy += (mx - orig_image_height) / 2
 
-    orig_bboxes = tf.concat([cx, cy, h, w], axis=1)
+    # convert to XYWH format
+    orig_bboxes = tf.concat([cx, cy, w, h], axis=1)
 
     image_height = tf.cast(tf.shape(image)[0], tf.float32)
     image_width = tf.cast(tf.shape(image)[1], tf.float32)
@@ -112,7 +113,7 @@ def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas, image_
             h = (ymaxf - yminf) * image_size
             w = (xmaxf - xminf) * image_size
 
-            orig_bboxes = tf.concat([cx, cy, h, w], axis=1)
+            orig_bboxes = tf.concat([cx, cy, w, h], axis=1)
             orig_labels = new_labels
         else:
             image = preprocess_ssd.preprocess_for_eval(image, [image_size, image_size], data_format=FLAGS.data_format)
@@ -124,7 +125,7 @@ def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas, image_
         h = (ymaxf - yminf) * image_size
         w = (xmaxf - xminf) * image_size
 
-        orig_bboxes = tf.concat([cx, cy, h, w], axis=1)
+        orig_bboxes = tf.concat([cx, cy, w, h], axis=1)
 
     true_values = anchors_gen.generate_true_labels_for_anchors(orig_bboxes, orig_labels, np_anchor_boxes, np_anchor_areas, image_size, num_classes)
 
@@ -156,7 +157,7 @@ def draw_bboxes(image_size, train_dataset, train_cat_names, np_anchor_boxes):
             labels = np.argmax(labels, axis=1)
 
             for bb, cat_id in zip(bboxes, labels):
-                cx, cy, h, w = bb
+                cx, cy, w, h = bb
                 x0 = cx - w/2
                 x1 = cx + w/2
                 y0 = cy - h/2
@@ -179,7 +180,7 @@ def draw_bboxes(image_size, train_dataset, train_cat_names, np_anchor_boxes):
         output_sizes = []
         output_indexes = []
         offset = 0
-        for base_scale in reversed(range(3)):
+        for base_scale in range(3):
             output_indexes.append(base_scale)
             output_size = scaled_size * np.math.pow(2, base_scale)
             output_sizes.append(output_size)
@@ -213,13 +214,13 @@ def draw_bboxes(image_size, train_dataset, train_cat_names, np_anchor_boxes):
 
 
                 for bb, cat_id, bidx in zip(bboxes, labels, box_index):
-                    cx, cy, h, w = bb
+                    cx, cy, w, h = bb
                     cx = cx / output_size * image_size
                     cy = cy / output_size * image_size
 
                     anchor_box_idx = output_idx * 3 + bidx
                     anchor = np_anchor_boxes[anchor_box_idx]
-                    _, _, anchor_h, anchor_w = anchor
+                    anchor_w, anchor_h = anchor
 
                     h = np.math.exp(h) * anchor_h
                     w = np.math.exp(w) * anchor_w
@@ -272,7 +273,10 @@ def train():
         eval_base = coco.create_coco_iterable(FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, logger)
 
         num_classes = train_base.num_classes()
-        #model = yolo.create_model(num_classes)
+        if num_classes != FLAGS.num_classes:
+            num_classes = FLAGS.num_classes
+
+        model = yolo.create_model(num_classes)
         np_anchor_boxes, np_anchor_areas, image_size = yolo.create_anchors()
 
         def create_dataset(name, base, is_training):
@@ -318,7 +322,7 @@ def train():
 
             ds = ds.batch(FLAGS.batch_size)
             ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
-            #ds = dstrategy.experimental_distribute_dataset(ds)
+            ds = dstrategy.experimental_distribute_dataset(ds)
 
             logger.info('{} dataset has been created, tfrecords: {}'.format(name, len(filenames)))
 
@@ -337,7 +341,7 @@ def train():
             eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, image_size, train_num_classes, is_training=False)
 
 
-        if True:
+        if False:
             draw_bboxes(image_size, train_dataset, train_cat_names, np_anchor_boxes)
             exit(0)
 
@@ -392,15 +396,15 @@ def train():
                 logger.info("Restored base model from external checkpoint {}".format(FLAGS.base_checkpoint))
 
         loss_metric = tf.keras.metrics.Mean(name='train_loss')
-        accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='train_accuracy')
-        full_accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='train_full_accuracy')
+        accuracy_metric = tf.keras.metrics.Accuracy(name='train_accuracy')
+        full_accuracy_metric = tf.keras.metrics.Accuracy(name='train_full_accuracy')
         iou_metric = tf.keras.metrics.Mean(name='train_iou')
         num_good_ious_metric = tf.keras.metrics.Mean(name='eval_num_good_ious')
         num_positive_labels_metric = tf.keras.metrics.Mean(name='eval_num_positive_labels_ious')
 
         eval_loss_metric = tf.keras.metrics.Mean(name='eval_loss')
-        eval_full_accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='eval_full_accuracy')
-        eval_accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='eval_accuracy')
+        eval_full_accuracy_metric = tf.keras.metrics.Accuracy(name='eval_full_accuracy')
+        eval_accuracy_metric = tf.keras.metrics.Accuracy(name='eval_accuracy')
         eval_distance_center_metric = tf.keras.metrics.MeanAbsoluteError(name='eval_dist_center')
         eval_distance_size_metric = tf.keras.metrics.MeanAbsoluteError(name='eval_dist_size')
         eval_iou_metric = tf.keras.metrics.Mean(name='eval_iou')
@@ -422,27 +426,122 @@ def train():
             eval_num_good_ious_metric.reset_states()
             eval_num_positive_labels_metric.reset_states()
 
-        yolo_loss_object = loss.YOLOLoss(image_size, reduction=tf.keras.losses.Reduction.NONE)
+        scaled_size = image_size / anchors_gen.DOWNSAMPLE_RATIO
+        output_sizes, output_splits = [], []
+        offset = 0
+        num_scales = 3
+        num_boxes = 3
+        for base_scale in range(num_scales):
+            output_size = scaled_size * np.math.pow(2, base_scale)
+            output_sizes.append(int(output_size))
+            output_splits.append(int(output_size * output_size))
 
-        def calculate_metrics(logits, bboxes, true_labels, loss_metric, accuracy_metric, full_accuracy_metric, iou_metric, num_good_ious_metric, num_positive_labels_metric):
+        yolo_loss_object = loss.YOLOLoss(image_size, np_anchor_boxes, output_sizes, reduction=tf.keras.losses.Reduction.NONE)
 
-            yolo_loss = yolo_loss_object(logits)
+        def calculate_metrics(logits, true_values, loss_metric, accuracy_metric, full_accuracy_metric, iou_metric, num_good_ious_metric, num_positive_labels_metric):
+            true_values_list = list(tf.split(true_values, output_splits, axis=1))
+            dist_loss, class_loss, conf_loss_pos, conf_loss_neg = yolo_loss_object.call(y_true_list=true_values_list, y_pred_list=logits)
 
-            return total_loss
+            dist_loss = tf.nn.compute_average_loss(dist_loss, global_batch_size=FLAGS.batch_size)
+            class_loss = tf.nn.compute_average_loss(class_loss, global_batch_size=FLAGS.batch_size)
+            conf_loss_pos = tf.nn.compute_average_loss(conf_loss_pos, global_batch_size=FLAGS.batch_size)
+            conf_loss_neg = tf.nn.compute_average_loss(conf_loss_neg, global_batch_size=FLAGS.batch_size)
+
+            total_loss = dist_loss + class_loss + conf_loss_pos + conf_loss_neg
+            loss_metric.update_state(total_loss)
+
+            anchors_reshaped = tf.reshape(np_anchor_boxes, [3, -1])
+
+            for output_idx, (true_values, pred_values) in enumerate(zip(true_values_list, logits)):
+                output_size = int(scaled_size) * tf.math.pow(2, output_idx)
+
+                #logger.info('true_values: {}, pred_values: {}'.format(true_values.shape, pred_values.shape))
+
+                true_values = tf.reshape(true_values, [-1, output_size, output_size, num_boxes, 4 + 1 + num_classes])
+                pred_values = tf.reshape(pred_values, [-1, output_size, output_size, num_boxes, 4 + 1 + num_classes])
+
+                non_background_index = tf.where(tf.not_equal(true_values[..., 4], 0))
+                num_positive_labels_metric.update_state(tf.math.count_nonzero(true_values[..., 4]))
+                #tf.print('num_positive_labels_metric:', tf.math.count_nonzero(true_values[..., 4]))
+
+                box_index = non_background_index[:, 3]
+
+                #logger.info('non_background_index: {}'.format(non_background_index.shape))
+                #tf.print('non_background_index:', non_background_index)
+                #tf.print('box_index:', box_index)
+
+                sampled_true_values = tf.gather_nd(true_values, non_background_index)
+                sampled_pred_values = tf.gather_nd(pred_values, non_background_index)
+
+                true_bboxes = sampled_true_values[:, 0:4]
+                true_labels = sampled_true_values[:, 5:]
+                true_labels = tf.argmax(true_labels, axis=1)
+
+                pred_bboxes = sampled_pred_values[:, 0:4]
+                pred_labels = sampled_pred_values[:, 5:]
+                pred_labels = tf.argmax(pred_labels, axis=1)
+
+                #logger.info('true_bboxes: {}, pred_bboxes: {}'.format(true_bboxes.shape, pred_bboxes.shape))
+                #logger.info('true_labels: {}, pred_labels: {}'.format(true_labels.shape, pred_labels.shape))
+
+                #tf.print('true_labels:', true_labels, ', pred_labels:', pred_labels)
+
+                accuracy_metric.update_state(pred_labels, true_labels)
+
+                anchors_wh = anchors_reshaped[output_idx, :]
+
+                grid_offset = loss._create_mesh_xy(tf.shape(true_bboxes)[0], output_size, output_size, 3)
+                grid_offset = tf.gather_nd(grid_offset, non_background_index)
+
+                anchor_grid = loss._create_mesh_anchor(anchors_wh, tf.shape(true_bboxes)[0], output_size, output_size, 3)
+                anchor_grid = tf.gather_nd(anchor_grid, non_background_index)
+
+                pred_box_xy = grid_offset + tf.sigmoid(pred_bboxes[..., :2])
+
+                anchors_wh = tf.reshape(anchors_wh, [3, 2])
+                anchors_wh = tf.expand_dims(anchors_wh, 0)
+                anchors_wh = tf.tile(anchors_wh, [tf.shape(pred_box_xy)[0], 1, 1])
+
+                box_index = tf.one_hot(box_index, 3, dtype=tf.float32)
+                box_index = tf.expand_dims(box_index, -1)
+
+                #logger.info('anchors_wh: {}, box_index: {}'.format(anchors_wh.shape, box_index.shape))
+                anchors_wh = tf.reduce_sum(anchors_wh * box_index, axis=1)
+                #logger.info('anchors_wh: {}'.format(anchors_wh.shape))
+
+                pred_box_wh = tf.math.exp(pred_bboxes[..., 2:4]) * anchors_wh
+
+                #logger.info('pred_box_xy: {}, pred_box_wh: {}, anchors_wh: {}'.format(pred_box_xy.shape, pred_box_wh.shape, anchors_wh.shape))
+
+                true_xy = true_bboxes[..., 0:2]
+                true_wh = tf.math.exp(true_bboxes[..., 2:4]) * anchor_grid
+
+                #logger.info('true_xy: {}, true_wh: {}, true_wh_orig: {}, anchor_grid: {}'.format(true_xy.shape, true_wh.shape, true_bboxes[..., 2:4].shape, anchor_grid.shape))
+
+                pred_bboxes = tf.concat([pred_box_xy, pred_box_wh], axis=-1)
+                true_bboxes = tf.concat([true_xy, true_wh], axis=-1)
+                ious = anchors_gen.calc_ious_one_to_one(pred_bboxes, true_bboxes)
+
+                good_ious = tf.where(ious > 0.5, 1, 0)
+                num_good_ious_metric.update_state(tf.reduce_sum(good_ious))
+
+                iou_metric.update_state(tf.reduce_mean(ious))
+
+            return dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss
 
         epoch_var = tf.Variable(0, dtype=tf.float32, name='epoch_number', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
 
-        def eval_step(filenames, images, bboxes, true_labels):
+        def eval_step(filenames, images, true_values):
             logits = model(images, training=False)
-            ce_loss, dist_loss, total_loss = calculate_metrics(logits, bboxes, true_labels,
+            dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = calculate_metrics(logits, true_values,
                     eval_loss_metric, eval_accuracy_metric, eval_full_accuracy_metric, eval_iou_metric,
                     eval_num_good_ious_metric, eval_num_positive_labels_metric)
-            return ce_loss, dist_loss, total_loss
+            return dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss
 
-        def train_step(filenames, images, bboxes, true_labels):
+        def train_step(filenames, images, true_values):
             with tf.GradientTape() as tape:
                 logits = model(images, training=True)
-                ce_loss, dist_loss, total_loss = calculate_metrics(logits, bboxes, true_labels,
+                dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = calculate_metrics(logits, true_values,
                         loss_metric, accuracy_metric, full_accuracy_metric, iou_metric,
                         num_good_ious_metric, num_positive_labels_metric)
 
@@ -464,30 +563,34 @@ def train():
 
             global_step.assign_add(1)
 
-            return ce_loss, dist_loss, total_loss
+            return dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss
 
         @tf.function
         def distributed_train_step(args):
-            pr_ce_losses, pr_dist_losses, pr_total_losses = dstrategy.experimental_run_v2(train_step, args=args)
-            ce_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_ce_losses, axis=None)
-            dist_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_dist_losses, axis=None)
-            total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_total_losses, axis=None)
-            return ce_loss, dist_loss, total_loss
+            dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = dstrategy.experimental_run_v2(train_step, args=args)
+            dist_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, dist_loss, axis=None)
+            class_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, class_loss, axis=None)
+            conf_loss_pos = dstrategy.reduce(tf.distribute.ReduceOp.SUM, conf_loss_pos, axis=None)
+            conf_loss_neg = dstrategy.reduce(tf.distribute.ReduceOp.SUM, conf_loss_neg, axis=None)
+            total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, total_loss, axis=None)
+            return dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss
 
         @tf.function
         def distributed_eval_step(args):
-            pr_ce_losses, pr_dist_losses, pr_total_losses = dstrategy.experimental_run_v2(eval_step, args=args)
-            ce_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_ce_losses, axis=None)
-            dist_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_dist_losses, axis=None)
-            total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, pr_total_losses, axis=None)
-            return ce_loss, dist_loss, total_loss
+            dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = dstrategy.experimental_run_v2(eval_step, args=args)
+            dist_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, dist_loss, axis=None)
+            class_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, class_loss, axis=None)
+            conf_loss_pos = dstrategy.reduce(tf.distribute.ReduceOp.SUM, conf_loss_pos, axis=None)
+            conf_loss_neg = dstrategy.reduce(tf.distribute.ReduceOp.SUM, conf_loss_neg, axis=None)
+            total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, total_loss, axis=None)
+            return dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss
 
         def run_epoch(name, dataset, step_func, max_steps):
             losses = []
             accs = []
 
             step = 0
-            for filenames, image_ids, images, bboxes, true_labels in dataset:
+            for filenames, image_ids, images, true_values in dataset:
                 # In most cases, the default data format NCHW instead of NHWC should be
                 # used for a significant performance boost on GPU/TPU. NHWC should be used
                 # only if the network needs to be run on CPU since the pooling operations
@@ -496,10 +599,11 @@ def train():
                     images = tf.transpose(images, [0, 3, 1, 2])
 
 
-                ce_loss, dist_loss, total_loss = step_func(args=(filenames, images, bboxes, true_labels))
+                dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = step_func(args=(filenames, images, true_values))
                 if name == 'train' and step % FLAGS.print_per_train_steps == 0:
-                    logger.info('{}: {}: step: {}/{}, ce_loss: {:.2e}, dist_loss: {:.2e}, total_loss: {:.2e}, accuracy: {:.3f}/{:.3f}, iou: {:.3f}, good_ios/pos: {}/{}'.format(
-                        name, epoch_var.numpy(), step, max_steps, ce_loss, dist_loss, total_loss,
+                    logger.info('{}: {}: step: {}/{}, dist_loss: {:.2e}, class_loss: {:.2e}, conf_loss: {:.2e}/{:.2e}, total_loss: {:.2e}, accuracy: {:.3f}/{:.3f}, iou: {:.3f}, good_ios/pos: {}/{}'.format(
+                        name, int(epoch_var.numpy()), step, max_steps,
+                        dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss,
                         accuracy_metric.result(), full_accuracy_metric.result(),
                         iou_metric.result(),
                         int(num_good_ious_metric.result()), int(num_positive_labels_metric.result()),
