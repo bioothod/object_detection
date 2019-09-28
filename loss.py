@@ -58,18 +58,19 @@ class LossTensorCalculator:
 
         #sigmoid(t_xy) + c_xy
         pred_box_xy = grid_offset + tf.sigmoid(y_pred[:, :, :, :, :2])
+        pred_box_xy = pred_box_xy / float(output_size) * self.image_size
 
         anchors = tf.constant(anchors_wh, dtype=tf.float32, shape=[1, 1, 1, 3, 2])
-        pred_box_wh = tf.math.exp(y_pred[..., 2:4]) * anchors
+        pred_box_wh = tf.math.exp(y_pred[..., 2:4]) * anchors / float(output_size) * self.image_size
 
         # confidence/objectiveness
-        pred_box_conf = tf.sigmoid(tf.expand_dims(y_pred[..., 4], -1))
+        pred_box_conf = tf.expand_dims(y_pred[..., 4], -1)
 
         true_classes = y_true[..., 5:]
         pred_classes = y_pred[..., 5:]
 
 
-        true_xy = y_true[..., 0:2]
+        true_xy = y_true[..., 0:2] / float(output_size) * self.image_size
         true_wh = tf.math.exp(y_true[..., 2:4]) * anchor_grid
         # zero-out those where objectivness is zero
         true_wh = true_wh * object_mask
@@ -93,16 +94,18 @@ class LossTensorCalculator:
         class_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=true_classes, logits=pred_classes)
         class_loss = tf.reduce_sum(class_loss, -1)
         class_loss = tf.expand_dims(class_loss, -1)
-        class_loss = true_conf * class_loss
+        class_loss = object_mask * class_loss
         class_loss = tf.reduce_sum(class_loss, list(range(1, 5)))
 
-        conf_loss_pos = true_conf * (pred_box_conf - true_conf)
-        conf_loss_pos = tf.square(conf_loss_pos)
-        conf_loss_pos = tf.reduce_sum(conf_loss_pos, list(range(1, 5)))
+        label_smoothing = 0.1
+        smooth_true_conf = true_conf * (1.0 - label_smoothing) + 0.5 * label_smoothing
+        conf_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_conf, logits=pred_box_conf)
 
-        conf_loss_neg = (1 - true_conf) * pred_box_conf * masked_ious
-        conf_loss_neg = tf.square(conf_loss_neg)
-        conf_loss_neg = tf.reduce_sum(conf_loss_neg, list(range(1, 5)))
+        conf_loss_pos = object_mask * conf_loss
+        conf_loss_pos = tf.reduce_mean(conf_loss_pos, list(range(1, 5)))
+
+        conf_loss_neg = (1 - object_mask) * conf_loss * masked_ious
+        conf_loss_neg = tf.reduce_mean(conf_loss_neg, list(range(1, 5)))
 
         return dist_loss * self.dist_scale, class_loss * self.class_scale, conf_loss_pos * self.obj_scale, conf_loss_neg * self.noobj_scale
 
