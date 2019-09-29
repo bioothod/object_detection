@@ -382,17 +382,15 @@ def train():
                 logger.info("Restored base model from external checkpoint {}".format(FLAGS.base_checkpoint))
 
         loss_metric = tf.keras.metrics.Mean(name='train_loss')
-        accuracy_metric = tf.keras.metrics.Accuracy(name='train_accuracy')
+        accuracy_metric = tf.keras.metrics.BinaryAccuracy(name='train_accuracy')
         obj_accuracy_metric = tf.keras.metrics.BinaryAccuracy(name='train_objectness_accuracy')
         iou_metric = tf.keras.metrics.Mean(name='train_iou')
         num_good_ious_metric = tf.keras.metrics.Mean(name='eval_num_good_ious')
         num_positive_labels_metric = tf.keras.metrics.Mean(name='eval_num_positive_labels_ious')
 
         eval_loss_metric = tf.keras.metrics.Mean(name='eval_loss')
-        eval_accuracy_metric = tf.keras.metrics.Accuracy(name='eval_accuracy')
+        eval_accuracy_metric = tf.keras.metrics.BinaryAccuracy(name='eval_accuracy')
         eval_obj_accuracy_metric = tf.keras.metrics.BinaryAccuracy(name='eval_objectness_accuracy')
-        eval_distance_center_metric = tf.keras.metrics.MeanAbsoluteError(name='eval_dist_center')
-        eval_distance_size_metric = tf.keras.metrics.MeanAbsoluteError(name='eval_dist_size')
         eval_iou_metric = tf.keras.metrics.Mean(name='eval_iou')
         eval_num_good_ious_metric = tf.keras.metrics.Mean(name='eval_num_good_ious')
         eval_num_positive_labels_metric = tf.keras.metrics.Mean(name='eval_num_positive_labels_ious')
@@ -446,74 +444,75 @@ def train():
 
                 #logger.info('true_values: {}, pred_values: {}'.format(true_values.shape, pred_values.shape))
 
-                true_values = tf.reshape(true_values, [-1, output_size, output_size, num_boxes, 4 + 1 + num_classes])
-                pred_values = tf.reshape(pred_values, [-1, output_size, output_size, num_boxes, 4 + 1 + num_classes])
+                y_true = tf.reshape(true_values, [-1, output_size, output_size, num_boxes, 4 + 1 + num_classes])
+                y_pred = tf.reshape(pred_values, [-1, output_size, output_size, num_boxes, 4 + 1 + num_classes])
 
-                non_background_index = tf.where(tf.not_equal(true_values[..., 4], 0))
-                num_positive_labels_metric.update_state(tf.shape(non_background_index)[0])
-                #tf.print('num_positive_labels_metric:', tf.math.count_nonzero(true_values[..., 4]))
-
-                box_index = non_background_index[:, 3]
-
-                #logger.info('non_background_index: {}'.format(non_background_index.shape))
-                #tf.print('non_background_index:', non_background_index)
-                #tf.print('box_index:', box_index)
-
-                sampled_true_values = tf.gather_nd(true_values, non_background_index)
-                sampled_pred_values = tf.gather_nd(pred_values, non_background_index)
-
-                true_obj = sampled_true_values[:, 5]
-                true_bboxes = sampled_true_values[:, 0:4]
-                true_labels = sampled_true_values[:, 5:]
-                true_labels = tf.argmax(true_labels, axis=1)
-
-                pred_obj = tf.math.sigmoid(sampled_pred_values[:, 5])
-                pred_bboxes = sampled_pred_values[:, 0:4]
-                pred_labels = sampled_pred_values[:, 5:]
-                pred_labels = tf.argmax(pred_labels, axis=1)
-
-                obj_accuracy_metric.update_state(y_true=true_obj, y_pred=pred_obj)
-
-                #logger.info('true_bboxes: {}, pred_bboxes: {}'.format(true_bboxes.shape, pred_bboxes.shape))
-                #logger.info('true_labels: {}, pred_labels: {}'.format(true_labels.shape, pred_labels.shape))
-
-                #tf.print('true_labels:', true_labels, ', pred_labels:', pred_labels)
-
-                accuracy_metric.update_state(pred_labels, true_labels)
+                object_mask = tf.expand_dims(y_true[..., 4], 4)
+                object_mask_bool = tf.cast(object_mask[..., 0], 'bool')
+                num_positive_labels_metric.update_state(tf.math.count_nonzero(object_mask))
 
                 anchors_wh = anchors_reshaped[output_idx, :]
+                grid_offset = loss._create_mesh_xy(*y_pred.shape[:4])
+                anchor_grid = loss._create_mesh_anchor(anchors_wh, *y_pred.shape[:4])
 
-                grid_offset = loss._create_mesh_xy(tf.shape(true_bboxes)[0], output_size, output_size, 3)
-                grid_offset = tf.gather_nd(grid_offset, non_background_index)
 
-                anchor_grid = loss._create_mesh_anchor(anchors_wh, tf.shape(true_bboxes)[0], output_size, output_size, 3)
-                anchor_grid = tf.gather_nd(anchor_grid, non_background_index)
+                #sigmoid(t_xy) + c_xy
+                pred_box_xy = grid_offset + tf.sigmoid(y_pred[..., :2])
+                pred_box_xy = pred_box_xy * ratio
+                pred_box_wh = tf.math.exp(y_pred[..., 2:4]) * anchor_grid
 
-                pred_box_xy = grid_offset + tf.math.sigmoid(pred_bboxes[..., :2])
-                pred_box_xy *= ratio
+                # confidence/objectiveness
+                true_obj_mask = tf.boolean_mask(object_mask, object_mask_bool)
+                pred_box_conf = tf.boolean_mask(tf.expand_dims(y_pred[..., 4], -1), object_mask_bool)
+                pred_box_conf = tf.math.sigmoid(pred_box_conf)
+                obj_accuracy_metric.update_state(y_true=true_obj_mask, y_pred=pred_box_conf)
 
-                pred_box_wh = tf.math.exp(pred_bboxes[..., 2:4]) * anchor_grid
+                true_classes = tf.boolean_mask(y_true[..., 5:], object_mask_bool)
+                pred_classes = tf.boolean_mask(tf.math.sigmoid(y_pred[..., 5:]), object_mask_bool)
+                accuracy_metric.update_state(y_true=true_classes, y_pred=pred_classes)
 
-                # true_bboxes contain upper left corner of the box
-                true_xy = true_bboxes[..., 0:2] * ratio
-                true_wh = tf.math.exp(true_bboxes[..., 2:4]) * anchor_grid
-                true_wh_1 = tf.math.exp(true_bboxes[..., 2:4]) * anchors_wh
 
+                true_xy = y_true[..., 0:2] * ratio
+                true_wh = tf.math.exp(y_true[..., 2:4]) * anchor_grid
+
+                anchors_wh = tf.reshape(anchors_wh, [3, 2])
+                true_wh_1 = tf.math.exp(y_true[..., 2:4]) * anchors_wh
                 diff = tf.cast(true_wh, tf.int32) - tf.cast(true_wh_1, tf.int32)
                 diff = tf.math.count_nonzero(diff)
                 if diff != 0:
-                    tf.print('diff:', diff, 'boxes:', tf.math.reduce_prod(tf.shape(true_wh)))
+                    tf.print('diff:', diff, 'total boxes:', tf.math.reduce_prod(tf.shape(true_wh)[:-1]))
 
-                #logger.info('true_xy: {}, true_wh: {}, true_wh_orig: {}, anchor_grid: {}'.format(true_xy.shape, true_wh.shape, true_bboxes[..., 2:4].shape, anchor_grid.shape))
+                pred_box_wh = tf.clip_by_value(pred_box_wh, -1e8, 1e8)
 
                 pred_bboxes = tf.concat([pred_box_xy, pred_box_wh], axis=-1)
                 true_bboxes = tf.concat([true_xy, true_wh], axis=-1)
-                ious = anchors_gen.calc_ious_one_to_one(pred_bboxes, true_bboxes)
-                #tf.print('pred_bboxes_shape:', tf.shape(pred_bboxes), 'true_bboxes_shape:', tf.shape(true_bboxes))
-                #tf.print('ious:', ious)
-                iou_metric.update_state(ious)
 
-                good_ious = tf.where(ious > 0.5)
+                def get_best_ious(input_tuple, object_mask, true_bboxes):
+                    idx, pred_boxes_for_single_image = input_tuple
+                    # shape: [13, 13, 3, 4] & [13, 13, 3]  ==>  [V, 4]
+                    # V: num of true gt box of each image in a batch
+                    valid_true_boxes = tf.boolean_mask(true_bboxes[idx, ..., 0:4], tf.cast(object_mask[idx, ..., 0], 'bool'))
+                    # shape: [13, 13, 3, 4] & [V, 4] ==> [13, 13, 3, V]
+                    ious = loss.box_iou(pred_boxes_for_single_image, valid_true_boxes)
+                    # shape: [13, 13, 3, V] -> [V]
+                    best_ious = tf.reduce_max(ious, axis=[0, 1, 2])
+                    best_ious_padded = tf.pad(best_ious,
+                            [[0, tf.cast(tf.math.count_nonzero(object_mask), tf.int32) - tf.shape(valid_true_boxes)[0]]],
+                            constant_values=-1.)
+                    return best_ious_padded
+
+                best_ious = tf.map_fn(lambda t: get_best_ious(t, object_mask, true_bboxes),
+                                    (tf.range(tf.shape(pred_bboxes)[0]), pred_bboxes),
+                                    parallel_iterations=32,
+                                    back_prop=False,
+                                    dtype=(tf.float32))
+
+                best_ious = tf.reshape(best_ious, [-1])
+                best_ious_index = tf.where(best_ious >= 0)
+                best_ious = tf.gather_nd(best_ious, best_ious_index)
+                iou_metric.update_state(best_ious)
+
+                good_ious = tf.where(best_ious > 0.5)
                 num_good_ious_metric.update_state(tf.shape(good_ious)[0])
 
             return dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss
@@ -544,8 +543,9 @@ def train():
                 if g is None:
                     logger.info('no gradients for variable: {}'.format(v))
                 else:
-                    g += tf.random.normal(stddev=stddev, mean=0., shape=g.shape)
+                    #g += tf.random.normal(stddev=stddev, mean=0., shape=g.shape)
                     #g = tf.clip_by_value(g, -5, 5)
+                    pass
 
                 clip_gradients.append(g)
             opt.apply_gradients(zip(clip_gradients, variables))
