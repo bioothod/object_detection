@@ -149,7 +149,7 @@ class LossTensorCalculator:
         wh_scale = tf.expand_dims(2 - wh_scale[..., 0] * wh_scale[..., 1], axis=4) 
 
         dist_loss = tf.square(y_pred[..., :4] - y_true[..., :4])
-        dist_loss = dist_diff * wh_scale * object_mask
+        dist_loss = dist_loss * wh_scale * object_mask
         dist_loss = tf.reduce_sum(dist_loss, list(range(1, 5)))
 
         class_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=true_classes, logits=pred_classes)
@@ -173,7 +173,7 @@ class LossTensorCalculator:
         return dist_loss * self.dist_scale, class_loss * self.class_scale, conf_loss_pos * self.obj_scale, conf_loss_neg * self.noobj_scale
 
 class YOLOLoss:
-    def __init__(self, image_size, anchors, output_sizes, ignore_thresh=0.5, obj_scale=5, noobj_scale=1, dist_scale=1, class_scale=1, reduction=tf.keras.losses.Reduction.NONE):
+    def __init__(self, image_size, anchors, output_sizes, ignore_thresh=0.5, obj_scale=4, noobj_scale=0.001, dist_scale=2, class_scale=1, reduction=tf.keras.losses.Reduction.NONE):
         super(YOLOLoss, self).__init__()
         self.reduction = reduction
         self.anchors = anchors.reshape([len(output_sizes), -1])
