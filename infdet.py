@@ -233,11 +233,11 @@ def non_max_suppression(coords, scores, max_ret, iou_threshold):
     return pick
     #return tf.gather(coords, pick), tf.gather(scores, pick)
 
-def per_image_supression(logits, num_classes):
+def per_image_supression(logits, image_size, num_classes):
     coords, scores, labels, objectness = logits
 
     non_background_index = tf.where(tf.logical_and(
-                                        tf.greater(objectness, 0.4),
+                                        tf.greater(objectness, 0.7),
                                         tf.greater(scores, FLAGS.min_score)))
     tf.print('max_obj:', tf.reduce_max(objectness), 'max_score:', tf.reduce_max(scores, -1), 'scores:', tf.shape(scores))
     #non_background_index = tf.where(tf.greater(scores, FLAGS.min_score))
@@ -247,12 +247,13 @@ def per_image_supression(logits, num_classes):
     sampled_coords = tf.gather(coords, non_background_index)
     sampled_scores = tf.gather(scores, non_background_index)
     sampled_labels = tf.gather(labels, non_background_index)
+    sampled_objs = tf.gather(objectness, non_background_index)
 
     tf.print('labels:', tf.shape(labels), 'scores:', tf.shape(scores), 'coords:', tf.shape(coords))
     tf.print('sampled_labels:', tf.shape(sampled_labels), 'sampled_scores:', tf.shape(sampled_scores), 'sampled_coords:', tf.shape(sampled_coords))
     tf.print('sampled_labels:', sampled_labels, 'sampled_scores:', sampled_scores, 'sampled_coords:', sampled_coords)
 
-    ret_coords, ret_scores, ret_cat_ids = [], [], []
+    ret_coords, ret_scores, ret_cat_ids, ret_objs = [], [], [], []
     for cat_id in range(0, num_classes):
         class_index = tf.where(tf.equal(sampled_labels, cat_id))
         #tf.print('class_index:', class_index)
@@ -261,6 +262,7 @@ def per_image_supression(logits, num_classes):
         #logger.info('class_index: {}, sampled_labels: {}, sampled_scores: {}, selected_scores: {}'.format(class_index.shape, sampled_labels.shape, sampled_scores.shape, selected_scores.shape))
 
         selected_coords = tf.gather_nd(sampled_coords, class_index)
+        selected_objs = tf.gather_nd(sampled_objs, class_index)
 
         #tf.print('selected_scores:', selected_scores, 'selected_coords:', selected_coords)
 
@@ -270,11 +272,15 @@ def per_image_supression(logits, num_classes):
         w = tf.squeeze(w, 1)
         h = tf.squeeze(h, 1)
 
-        index = tf.where(tf.logical_and(h >= FLAGS.min_size, w >= FLAGS.min_size))
+        small_cond = tf.logical_and(h >= FLAGS.min_size, w >= FLAGS.min_size)
+        large_cond = tf.logical_and(h < image_size*2, w < image_size*2)
+        index = tf.where(tf.logical_and(small_cond, large_cond))
         selected_scores = tf.gather(selected_scores, index)
         selected_scores = tf.squeeze(selected_scores, 1)
         selected_coords = tf.gather(selected_coords, index)
         selected_coords = tf.squeeze(selected_coords, 1)
+        selected_objs = tf.gather(selected_objs, index)
+        selected_objs = tf.squeeze(selected_objs, 1)
 
         cx, cy, w, h = tf.split(selected_coords, num_or_size_splits=4, axis=1)
         cx = tf.squeeze(cx, 1)
@@ -291,17 +297,20 @@ def per_image_supression(logits, num_classes):
 
         coords_yx = tf.stack([ymin, xmin, ymax, xmax], axis=1)
 
+        scores_to_sort = selected_scores * selected_objs
         if True:
-            selected_indexes = tf.image.non_max_suppression(coords_yx, selected_scores, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
+            selected_indexes = tf.image.non_max_suppression(coords_yx, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
         else:
-            selected_indexes = non_max_suppression(coords_yx, selected_scores, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
+            selected_indexes = non_max_suppression(coords_yx, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
 
         #logger.info('selected_indexes: {}, selected_coords: {}, selected_scores: {}'.format(selected_indexes, selected_coords, selected_scores))
-        #selected_coords = tf.gather(selected_coords, selected_indexes)
-        #selected_scores = tf.gather(selected_scores, selected_indexes)
+        selected_coords = tf.gather(selected_coords, selected_indexes)
+        selected_scores = tf.gather(selected_scores, selected_indexes)
+        selected_objs = tf.gather(selected_objs, selected_indexes)
 
         ret_coords.append(selected_coords)
         ret_scores.append(selected_scores)
+        ret_objs.append(selected_objs)
 
         num = tf.shape(selected_scores)[0]
         tile = tf.tile([cat_id], [num])
@@ -309,13 +318,16 @@ def per_image_supression(logits, num_classes):
 
     ret_coords = tf.concat(ret_coords, 0)
     ret_scores = tf.concat(ret_scores, 0)
+    ret_objs = tf.concat(ret_objs, 0)
     ret_cat_ids = tf.concat(ret_cat_ids, 0)
 
     #logger.info('ret_coords: {}, ret_scores: {}, ret_cat_ids: {}'.format(ret_coords, ret_scores, ret_cat_ids))
 
-    best_scores, best_index = tf.math.top_k(ret_scores, tf.minimum(FLAGS.max_ret, tf.shape(ret_scores)[0]), sorted=True)
+    scores_to_sort = ret_scores * ret_objs
+    best_scores, best_index = tf.math.top_k(scores_to_sort, tf.minimum(FLAGS.max_ret, tf.shape(ret_scores)[0]), sorted=True)
 
     best_coords = tf.gather(ret_coords, best_index)
+    best_objs = tf.gather(ret_objs, best_index)
     best_cat_ids = tf.gather(ret_cat_ids, best_index)
 
     #logger.info('best_coords: {}, best_scores: {}, best_cat_ids: {}'.format(best_coords, best_scores, best_cat_ids))
@@ -323,13 +335,14 @@ def per_image_supression(logits, num_classes):
     to_add = tf.maximum(FLAGS.max_ret - tf.shape(best_scores)[0], 0)
     best_coords = tf.pad(best_coords, [[0, to_add], [0, 0]] , 'CONSTANT')
     best_scores = tf.pad(best_scores, [[0, to_add]], 'CONSTANT')
+    best_objs = tf.pad(best_objs, [[0, to_add]], 'CONSTANT')
     best_cat_ids = tf.pad(best_cat_ids, [[0, to_add]], 'CONSTANT')
 
 
     #logger.info('ret_coords: {}, ret_scores: {}, ret_cat_ids: {}, best_index: {}, best_scores: {}, best_coords: {}, best_cat_ids: {}'.format(
     #    ret_coords, ret_scores, ret_cat_ids, best_index, best_scores, best_coords, best_cat_ids))
 
-    return best_coords, best_scores, best_cat_ids
+    return best_coords, best_scores, best_objs, best_cat_ids
 
 @tf.function
 def eval_step_logits(model, images, image_size, num_classes, np_anchor_boxes):
@@ -391,21 +404,21 @@ def eval_step_logits(model, images, image_size, num_classes, np_anchor_boxes):
 
     #logger.info('pred_bboxes: {}, pred_labels: {}'.format(pred_bboxes.shape, pred_labels.shape))
 
-    return tf.map_fn(lambda out: per_image_supression(out, num_classes),
+    return tf.map_fn(lambda out: per_image_supression(out, image_size, num_classes),
                      (pred_bboxes, pred_scores, pred_labels, pred_objs),
                      parallel_iterations=FLAGS.num_cpus,
                      back_prop=False,
                      infer_shape=False,
-                     dtype=(tf.float32, tf.float32, tf.int32))
+                     dtype=(tf.float32, tf.float32, tf.float32, tf.int32))
 
 def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, np_anchor_boxes):
     num_files = 0
     for filenames, images in dataset:
-        coords_batch, scores_batch, cat_ids_batch = eval_step_logits(model, images, image_size, num_classes, np_anchor_boxes)
+        coords_batch, scores_batch, objs_batch, cat_ids_batch = eval_step_logits(model, images, image_size, num_classes, np_anchor_boxes)
 
         num_files += len(filenames)
 
-        for filename, image, coords, scores, cat_ids in zip(filenames, images, coords_batch, scores_batch, cat_ids_batch):
+        for filename, image, coords, scores, objectness, cat_ids in zip(filenames, images, coords_batch, scores_batch, objs_batch, cat_ids_batch):
             filename = str(filename.numpy(), 'utf8')
 
             good_scores = np.count_nonzero((scores.numpy() > 0))
@@ -413,7 +426,7 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, np_an
 
             anns = []
 
-            for coord, score, cat_id in zip(coords, scores, cat_ids):
+            for coord, score, objs, cat_id in zip(coords, scores, objectness, cat_ids):
                 if score.numpy() == 0:
                     break
 
@@ -430,9 +443,9 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, np_an
                 cat_id = cat_id.numpy()
                 area = h * w
 
-                logger.info('{}: bbox: {} -> {}, score: {:.3f}, area: {:.1f}, cat_id: {}'.format(
+                logger.info('{}: bbox: {} -> {}, obj: {:.3f}, score: {:.3f}, cat_id: {}'.format(
                     filename,
-                    coord, bb, score, area, cat_id))
+                    coord, bb, objs, score, cat_id))
 
                 anns.append((bb, cat_id))
 
