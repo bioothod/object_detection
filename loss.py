@@ -152,7 +152,11 @@ class LossTensorCalculator:
         dist_loss = dist_loss * wh_scale * object_mask
         dist_loss = tf.reduce_sum(dist_loss, list(range(1, 5)))
 
-        class_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=true_classes, logits=pred_classes)
+        smooth_true_classes = true_classes
+        if True:
+            label_smoothing = 0.1
+            smooth_true_classes = true_classes * (1.0 - label_smoothing) + 0.5 * label_smoothing
+        class_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_classes, logits=pred_classes)
         class_loss = tf.reduce_sum(class_loss, -1)
         class_loss = tf.expand_dims(class_loss, -1)
         class_loss = object_mask * class_loss
