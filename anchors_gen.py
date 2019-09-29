@@ -92,6 +92,7 @@ def generate_true_labels_for_anchors(orig_bboxes, orig_labels, np_anchor_boxes, 
     for base_scale in range(num_scales):
         output_size = scaled_size * tf.math.pow(2, base_scale)
         output_size_float = tf.cast(output_size, tf.float32)
+        ratio = float(image_size) / output_size_float
 
         scale_match_idx_orig = tf.where(tf.equal(scale_idx, base_scale))
         scale_match_idx = tf.squeeze(scale_match_idx_orig, 1)
@@ -103,8 +104,8 @@ def generate_true_labels_for_anchors(orig_bboxes, orig_labels, np_anchor_boxes, 
 
         cx, cy, w, h = tf.split(orig_bboxes_matched_scale, num_or_size_splits=4, axis=1)
 
-        out_cx = cx / float(image_size) * output_size_float
-        out_cy = cy / float(image_size) * output_size_float
+        out_cx = cx / ratio
+        out_cy = cy / ratio
 
         anchors_for_scale = tf.gather(matched_anchor_boxes, scale_match_idx)
         anchor_w, anchor_h = tf.split(anchors_for_scale, num_or_size_splits=2, axis=1)

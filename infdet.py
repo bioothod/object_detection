@@ -82,6 +82,7 @@ def tf_left_needed_dimensions_from_tfrecord(image_size, num_classes, np_anchor_b
     true_values_list = list(tf.split(true_values, output_splits, axis=1))
     for output_idx, true_values in enumerate(true_values_list):
         output_size = int(scaled_size) * tf.math.pow(2, output_idx)
+        ratio = float(image_size) / tf.cast(output_size, tf.float32)
 
         true_values = tf.reshape(true_values, [-1, output_size, output_size, num_boxes, 4 + 1 + num_classes])
 
@@ -100,7 +101,7 @@ def tf_left_needed_dimensions_from_tfrecord(image_size, num_classes, np_anchor_b
         anchor_grid = loss._create_mesh_anchor(anchors_wh, tf.shape(true_bboxes)[0], output_size, output_size, 3)
         anchor_grid = tf.gather_nd(anchor_grid, non_background_index)
 
-        true_xy = true_bboxes[..., 0:2] / tf.cast(output_size, tf.float32) * float(image_size)
+        true_xy = true_bboxes[..., 0:2] * ratio
         true_xy = tf.reshape(true_xy, [-1, 2])
 
         true_wh = tf.math.exp(true_bboxes[..., 2:4]) * anchor_grid
@@ -236,7 +237,7 @@ def per_image_supression(logits, num_classes):
     coords, scores, labels, objectness = logits
 
     non_background_index = tf.where(tf.logical_and(
-                                        tf.greater(objectness, 0.5),
+                                        tf.greater(objectness, 0.4),
                                         tf.greater(scores, FLAGS.min_score)))
     tf.print('max_obj:', tf.reduce_max(objectness), 'max_score:', tf.reduce_max(scores, -1), 'scores:', tf.shape(scores))
     #non_background_index = tf.where(tf.greater(scores, FLAGS.min_score))
@@ -348,6 +349,7 @@ def eval_step_logits(model, images, image_size, num_classes, np_anchor_boxes):
 
     for output_idx, (true_values, pred_values) in enumerate(zip(true_values_list, logits)):
         output_size = int(scaled_size) * tf.math.pow(2, output_idx)
+        ratio = float(image_size) / tf.cast(output_size, tf.float32)
 
         pred_values = tf.reshape(pred_values, [-1, output_size, output_size, num_boxes, 4 + 1 + num_classes])
 
@@ -367,11 +369,12 @@ def eval_step_logits(model, images, image_size, num_classes, np_anchor_boxes):
         pred_objs_list.append(pred_objs)
 
         anchors_wh = anchors_reshaped[output_idx, :]
-        anchors = tf.reshape(anchors_wh, shape=[1, 1, 1, 3, 2])
-        pred_box_wh = tf.math.exp(pred_bboxes[..., 2:4]) * anchors
+        anchors_wh = tf.reshape(anchors_wh, [3, 2])
+        pred_box_wh = tf.math.exp(pred_bboxes[..., 2:4]) * anchors_wh
 
         grid_offset = loss._create_mesh_xy(tf.shape(pred_bboxes)[0], output_size, output_size, num_boxes)
         pred_box_xy = grid_offset + tf.sigmoid(pred_bboxes[..., :2])
+        pred_box_xy *= ratio
 
         pred_bboxes = tf.concat([pred_box_xy, pred_box_wh], axis=-1)
 
@@ -399,7 +402,6 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, np_an
     num_files = 0
     for filenames, images in dataset:
         coords_batch, scores_batch, cat_ids_batch = eval_step_logits(model, images, image_size, num_classes, np_anchor_boxes)
-        #logger.info('batch: shapes: coords: {}, scores: {}, cat_ids: {}'.format(coords_batch.shape, scores_batch.shape, cat_ids_batch.shape))
 
         num_files += len(filenames)
 
@@ -436,7 +438,6 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, np_an
 
             r, g, b = tf.split(image, 3, axis=-1)
             image = tf.concat([b, g, r], axis=-1)
-
 
             image = image.numpy() * 128 + 128
             image = image.astype(np.uint8)

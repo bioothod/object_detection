@@ -75,7 +75,11 @@ def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas, image_
 
     mx = tf.maximum(orig_image_height, orig_image_width)
     mx_int = tf.cast(mx, tf.int32)
-    image = tf.image.pad_to_bounding_box(image, tf.cast((mx - orig_image_height) / 2, tf.int32), tf.cast((mx - orig_image_width) / 2, tf.int32), mx_int, mx_int)
+    image = tf.image.pad_to_bounding_box(image,
+                tf.cast((mx - orig_image_height) / 2, tf.int32),
+                tf.cast((mx - orig_image_width) / 2, tf.int32),
+                mx_int,
+                mx_int)
     cx += (mx - orig_image_width) / 2
     cy += (mx - orig_image_height) / 2
 
@@ -94,7 +98,8 @@ def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas, image_
         coords_yx = tf.concat([yminf, xminf, ymaxf, xmaxf], axis=1)
 
         if is_training:
-            image, new_labels, new_bboxes = preprocess_ssd.preprocess_for_train(image, orig_labels, coords_yx, [image_size, image_size], data_format=data_format)
+            image, new_labels, new_bboxes = preprocess_ssd.preprocess_for_train(image, orig_labels, coords_yx,
+                    [image_size, image_size], data_format=data_format)
             yminf, xminf, ymaxf, xmaxf = tf.split(new_bboxes, num_or_size_splits=4, axis=1)
 
             orig_labels = new_labels
@@ -114,7 +119,8 @@ def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas, image_
 
     orig_bboxes = tf.concat([cx, cy, w, h], axis=1)
 
-    true_values = anchors_gen.generate_true_labels_for_anchors(orig_bboxes, orig_labels, np_anchor_boxes, np_anchor_areas, image_size, num_classes)
+    true_values = anchors_gen.generate_true_labels_for_anchors(orig_bboxes, orig_labels,
+            np_anchor_boxes, np_anchor_areas, image_size, num_classes)
 
     return filename, image_id, image, true_values
 
@@ -418,7 +424,9 @@ def train():
 
         yolo_loss_object = loss.YOLOLoss(image_size, np_anchor_boxes, output_sizes, reduction=tf.keras.losses.Reduction.NONE)
 
-        def calculate_metrics(logits, true_values, loss_metric, accuracy_metric, obj_accuracy_metric, iou_metric, num_good_ious_metric, num_positive_labels_metric):
+        def calculate_metrics(logits, true_values,
+                loss_metric, accuracy_metric, obj_accuracy_metric,
+                iou_metric, num_good_ious_metric, num_positive_labels_metric):
             true_values_list = list(tf.split(true_values, output_splits, axis=1))
             dist_loss, class_loss, conf_loss_pos, conf_loss_neg = yolo_loss_object.call(y_true_list=true_values_list, y_pred_list=logits)
 
@@ -434,6 +442,7 @@ def train():
 
             for output_idx, (true_values, pred_values) in enumerate(zip(true_values_list, logits)):
                 output_size = int(scaled_size) * tf.math.pow(2, output_idx)
+                ratio = float(image_size) / tf.cast(output_size, tf.float32)
 
                 #logger.info('true_values: {}, pred_values: {}'.format(true_values.shape, pred_values.shape))
 
@@ -463,13 +472,14 @@ def train():
                 pred_labels = sampled_pred_values[:, 5:]
                 pred_labels = tf.argmax(pred_labels, axis=1)
 
+                obj_accuracy_metric.update_state(y_true=true_obj, y_pred=pred_obj)
+
                 #logger.info('true_bboxes: {}, pred_bboxes: {}'.format(true_bboxes.shape, pred_bboxes.shape))
                 #logger.info('true_labels: {}, pred_labels: {}'.format(true_labels.shape, pred_labels.shape))
 
                 #tf.print('true_labels:', true_labels, ', pred_labels:', pred_labels)
 
                 accuracy_metric.update_state(pred_labels, true_labels)
-                obj_accuracy_metric.update_state(y_true=true_obj, y_pred=pred_obj)
 
                 anchors_wh = anchors_reshaped[output_idx, :]
 
@@ -480,25 +490,19 @@ def train():
                 anchor_grid = tf.gather_nd(anchor_grid, non_background_index)
 
                 pred_box_xy = grid_offset + tf.math.sigmoid(pred_bboxes[..., :2])
+                pred_box_xy *= ratio
 
-                anchors_wh = tf.reshape(anchors_wh, [3, 2])
-                anchors_wh = tf.expand_dims(anchors_wh, 0)
-                anchors_wh = tf.tile(anchors_wh, [tf.shape(pred_box_xy)[0], 1, 1])
-
-                box_index = tf.one_hot(box_index, 3, dtype=tf.float32)
-                box_index = tf.expand_dims(box_index, -1)
-
-                #logger.info('anchors_wh: {}, box_index: {}'.format(anchors_wh.shape, box_index.shape))
-                anchors_wh = tf.reduce_sum(anchors_wh * box_index, axis=1)
-                #logger.info('anchors_wh: {}'.format(anchors_wh.shape))
-
-                pred_box_wh = tf.math.exp(pred_bboxes[..., 2:4]) * anchors_wh
-
-                #logger.info('pred_box_xy: {}, pred_box_wh: {}, anchors_wh: {}'.format(pred_box_xy.shape, pred_box_wh.shape, anchors_wh.shape))
+                pred_box_wh = tf.math.exp(pred_bboxes[..., 2:4]) * anchor_grid
 
                 # true_bboxes contain upper left corner of the box
-                true_xy = true_bboxes[..., 0:2] * tf.cast(output_size, tf.float32) / float(image_size)
+                true_xy = true_bboxes[..., 0:2] * ratio
                 true_wh = tf.math.exp(true_bboxes[..., 2:4]) * anchor_grid
+                true_wh_1 = tf.math.exp(true_bboxes[..., 2:4]) * anchors_wh
+
+                diff = tf.cast(true_wh, tf.int32) - tf.cast(true_wh_1, tf.int32)
+                diff = tf.math.count_nonzero(diff)
+                if diff != 0:
+                    tf.print('diff:', diff, 'boxes:', tf.math.reduce_prod(tf.shape(true_wh)))
 
                 #logger.info('true_xy: {}, true_wh: {}, true_wh_orig: {}, anchor_grid: {}'.format(true_xy.shape, true_wh.shape, true_bboxes[..., 2:4].shape, anchor_grid.shape))
 
