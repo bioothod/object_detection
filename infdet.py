@@ -164,7 +164,7 @@ def tf_left_needed_dimensions(image_size, filename, image_id, image, true_bboxes
     return filename, image
 
 def non_max_suppression(coords, scores, max_ret, iou_threshold):
-    ymax, xmax, ymin, xmin = tf.split(coords, num_or_size_splits=4, axis=1)
+    ymin, xmin, ymax, xmax = tf.split(coords, num_or_size_splits=4, axis=1)
     ymax = tf.squeeze(ymax, 1)
     xmax = tf.squeeze(xmax, 1)
     ymin = tf.squeeze(ymin, 1)
@@ -237,21 +237,21 @@ def per_image_supression(logits, image_size, num_classes):
     coords, scores, labels, objectness = logits
 
     non_background_index = tf.where(tf.logical_and(
-                                        tf.greater(objectness, 0.7),
+                                        tf.greater(objectness, FLAGS.min_score),
                                         tf.greater(scores, FLAGS.min_score)))
-    tf.print('max_obj:', tf.reduce_max(objectness), 'max_score:', tf.reduce_max(scores, -1), 'scores:', tf.shape(scores))
     #non_background_index = tf.where(tf.greater(scores, FLAGS.min_score))
+    #tf.print('non_background_index:', tf.shape(non_background_index), ':', non_background_index)
     non_background_index = tf.squeeze(non_background_index, 1)
-    tf.print('non_background_index:', tf.shape(non_background_index), ':', non_background_index)
-    tf.print('coords:', tf.shape(coords), 'scores:', tf.shape(scores), 'labels:', tf.shape(labels))
+    #tf.print('coords:', tf.shape(coords), 'scores:', tf.shape(scores), 'labels:', tf.shape(labels))
     sampled_coords = tf.gather(coords, non_background_index)
     sampled_scores = tf.gather(scores, non_background_index)
     sampled_labels = tf.gather(labels, non_background_index)
     sampled_objs = tf.gather(objectness, non_background_index)
+    #tf.print('min_obj:', tf.reduce_min(sampled_objs), 'min_score:', tf.reduce_min(sampled_scores), 'scores:', tf.shape(sampled_scores))
 
-    tf.print('labels:', tf.shape(labels), 'scores:', tf.shape(scores), 'coords:', tf.shape(coords))
-    tf.print('sampled_labels:', tf.shape(sampled_labels), 'sampled_scores:', tf.shape(sampled_scores), 'sampled_coords:', tf.shape(sampled_coords))
-    tf.print('sampled_labels:', sampled_labels, 'sampled_scores:', sampled_scores, 'sampled_coords:', sampled_coords)
+    #tf.print('labels:', tf.shape(labels), 'scores:', tf.shape(scores), 'coords:', tf.shape(coords))
+    #tf.print('sampled_labels:', tf.shape(sampled_labels), 'sampled_scores:', tf.shape(sampled_scores), 'sampled_coords:', tf.shape(sampled_coords))
+    #tf.print('sampled_labels:', sampled_labels, 'sampled_scores:', sampled_scores, 'sampled_coords:', sampled_coords)
 
     ret_coords, ret_scores, ret_cat_ids, ret_objs = [], [], [], []
     for cat_id in range(0, num_classes):
@@ -298,7 +298,7 @@ def per_image_supression(logits, image_size, num_classes):
         coords_yx = tf.stack([ymin, xmin, ymax, xmax], axis=1)
 
         scores_to_sort = selected_scores * selected_objs
-        if True:
+        if False:
             selected_indexes = tf.image.non_max_suppression(coords_yx, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
         else:
             selected_indexes = non_max_suppression(coords_yx, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
@@ -324,8 +324,9 @@ def per_image_supression(logits, image_size, num_classes):
     #logger.info('ret_coords: {}, ret_scores: {}, ret_cat_ids: {}'.format(ret_coords, ret_scores, ret_cat_ids))
 
     scores_to_sort = ret_scores * ret_objs
-    best_scores, best_index = tf.math.top_k(scores_to_sort, tf.minimum(FLAGS.max_ret, tf.shape(ret_scores)[0]), sorted=True)
+    _, best_index = tf.math.top_k(scores_to_sort, tf.minimum(FLAGS.max_ret, tf.shape(ret_scores)[0]), sorted=True)
 
+    best_scores = tf.gather(ret_scores, best_index)
     best_coords = tf.gather(ret_coords, best_index)
     best_objs = tf.gather(ret_objs, best_index)
     best_cat_ids = tf.gather(ret_cat_ids, best_index)
