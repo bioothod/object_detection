@@ -151,9 +151,11 @@ class LossTensorCalculator:
         dist_loss = tf.reduce_sum(dist_loss, list(range(1, 5)))
 
         smooth_true_classes = true_classes
-        if False:
+        if True:
             label_smoothing = 0.1
             smooth_true_classes = true_classes * (1.0 - label_smoothing) + 0.5 * label_smoothing
+
+        pred_classes = tf.where(tf.equal(pred_classes, 0), 1e-10, pred_classes)
         class_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_classes, logits=pred_classes)
         class_loss = tf.reduce_sum(class_loss, -1)
         class_loss = tf.expand_dims(class_loss, -1)
@@ -164,6 +166,7 @@ class LossTensorCalculator:
         if True:
             label_smoothing = 0.1
             smooth_true_conf = true_conf * (1.0 - label_smoothing) + 0.5 * label_smoothing
+        pred_box_conf = tf.where(tf.equal(pred_box_conf, 0), 1e-10, pred_box_conf)
         conf_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_conf, logits=pred_box_conf)
 
         conf_loss_pos = object_mask * conf_loss
