@@ -515,7 +515,7 @@ def train():
                                     (tf.range(tf.shape(pred_bboxes)[0]), pred_bboxes),
                                     parallel_iterations=32,
                                     back_prop=False,
-                                    dtype=(tf.float32))
+                                    dtype=(tf.float32, tf.float32))
 
                 best_ious = tf.reshape(best_ious, [-1])
                 best_ious_index = tf.where(best_ious >= 0)
