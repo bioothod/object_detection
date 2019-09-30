@@ -301,14 +301,11 @@ class COCO_Iterable:
         orig_bboxes = []
         orig_cat_ids = []
         for bb, cat_id in anns:
-            if bb[2] <= 4 or bb[3] <= 4:
-                continue
-
             orig_bboxes.append(bb)
             orig_cat_ids.append(cat_id)
 
         if len(orig_bboxes) == 0:
-            raise ProcessingError('no orig bboxes')
+            raise ProcessingError('{}: no orig bboxes'.format(filename))
 
         start_aug_time = time.time()
         annotations = {
@@ -328,7 +325,7 @@ class COCO_Iterable:
 
         if return_orig_format:
             if len(bboxes) == 0:
-                raise ProcessingError('there are no bboxes after preprocessing')
+                raise ProcessingError('{}: there are no bboxes after preprocessing'.format(filename))
 
             bboxes = np.array(bboxes)
             x0 = np.array(bboxes[:, 0], dtype=np.float32)
