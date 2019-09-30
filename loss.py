@@ -83,12 +83,10 @@ def gen_ignore_mask(input_tuple, object_mask, true_bboxes):
 class LossTensorCalculator:
     def __init__(self,
                  image_size=288, 
-                 ignore_thresh=0.5, 
                  obj_scale=5.,
                  noobj_scale=1.,
                  dist_scale=1.,
                  class_scale=1.):
-        self.ignore_thresh = ignore_thresh
         self.obj_scale = obj_scale
         self.noobj_scale = noobj_scale
         self.dist_scale = dist_scale
@@ -153,7 +151,7 @@ class LossTensorCalculator:
         dist_loss = tf.reduce_sum(dist_loss, list(range(1, 5)))
 
         smooth_true_classes = true_classes
-        if True:
+        if False:
             label_smoothing = 0.1
             smooth_true_classes = true_classes * (1.0 - label_smoothing) + 0.5 * label_smoothing
         class_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_classes, logits=pred_classes)
@@ -177,14 +175,13 @@ class LossTensorCalculator:
         return dist_loss * self.dist_scale, class_loss * self.class_scale, conf_loss_pos * self.obj_scale, conf_loss_neg * self.noobj_scale
 
 class YOLOLoss:
-    def __init__(self, image_size, anchors, output_sizes, ignore_thresh=0.5, obj_scale=4, noobj_scale=0.001, dist_scale=2, class_scale=1, reduction=tf.keras.losses.Reduction.NONE):
+    def __init__(self, image_size, anchors, output_sizes, obj_scale=3, noobj_scale=0.001, dist_scale=2., class_scale=1, reduction=tf.keras.losses.Reduction.NONE):
         super(YOLOLoss, self).__init__()
         self.reduction = reduction
         self.anchors = anchors.reshape([len(output_sizes), -1])
         self.output_sizes = output_sizes
 
         self.calc = LossTensorCalculator(image_size=image_size,
-                                        ignore_thresh=ignore_thresh, 
                                         obj_scale=obj_scale,
                                         noobj_scale=noobj_scale,
                                         dist_scale=dist_scale,
