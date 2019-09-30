@@ -520,9 +520,11 @@ def train():
                 best_ious = tf.reshape(best_ious, [-1])
                 best_ious_index = tf.where(best_ious >= 0)
                 best_ious = tf.gather_nd(best_ious, best_ious_index)
+                iou_metric.update_state(best_ious)
 
                 mean_ious = tf.reshape(mean_ious, [-1])
-                iou_metric.update_state(best_ious)
+                mean_ious_index = tf.where(mean_ious >= 0)
+                mean_ious = tf.gather_nd(mean_ious, mean_ious_index)
                 mean_iou_metric.update_state(mean_ious)
 
                 good_ious = tf.where(best_ious > 0.5)
