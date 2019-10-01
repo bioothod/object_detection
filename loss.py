@@ -48,7 +48,7 @@ def box_iou(pred_boxes, valid_true_boxes):
 
 def gen_ignore_mask(input_tuple, object_mask, true_bboxes):
     idx, pred_boxes_for_single_image = input_tuple
-    valid_true_boxes = tf.boolean_mask(true_bboxes[idx, ..., 0:4], tf.cast(object_mask[idx, ..., 0], 'bool'))
+    valid_true_boxes = tf.boolean_mask(true_bboxes[idx, ..., 0:4], tf.cast(object_mask[idx, ..., 0], tf.bool))
     iou = box_iou(pred_boxes_for_single_image, valid_true_boxes)
     best_iou = tf.reduce_max(iou, axis=-1)
     ignore_mask_tmp = tf.cast(best_iou < 0.5, tf.float32)
@@ -62,8 +62,8 @@ class YOLOLoss:
                  grid_xy,
                  ratios,
                  image_size,
-                 obj_scale=3.,
-                 noobj_scale=1e-2,
+                 obj_scale=5.,
+                 noobj_scale=4e-3,
                  dist_scale=2.,
                  class_scale=1.,
                  **kwargs):
@@ -100,7 +100,7 @@ class YOLOLoss:
         pred_classes = y_pred[..., 5:]
 
 
-        true_xy = (y_true[..., 0:2] + self.grid_xy) * self.ratios
+        true_xy = (tf.sigmoid(y_true[..., 0:2]) + self.grid_xy) * self.ratios
         true_wh = tf.math.exp(y_true[..., 2:4]) * self.anchors_wh
 
         pred_bboxes = tf.concat([pred_box_xy, pred_box_wh], axis=-1)
@@ -119,7 +119,11 @@ class YOLOLoss:
         # the smaller the box, the bigger the scale
         wh_scale = tf.expand_dims(2 - wh_scale[..., 0] * wh_scale[..., 1], axis=-1)
 
-        dist_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=y_true[..., :4], logits=y_pred[..., :4])
+        l2_loss = tf.nn.l2_loss(y_pred[..., :2]) + tf.nn.l2_loss(y_pred[..., 4]) + tf.nn.l2_loss(y_pred[..., 5:])
+
+        dist_loss_xy = tf.nn.sigmoid_cross_entropy_with_logits(labels=y_true[..., :2], logits=y_pred[..., :2])
+        dist_loss_wh = tf.square(y_true[..., 2:4] - y_pred[..., 2:4])
+        dist_loss = dist_loss_xy + dist_loss_wh
         dist_loss = dist_loss * wh_scale * object_mask
         dist_loss = tf.reduce_sum(dist_loss, [1, 2])
 
@@ -130,16 +134,37 @@ class YOLOLoss:
 
         class_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_classes, logits=pred_classes)
 
+        nan_obj = tf.math.is_nan(class_loss)
+        num_nans = tf.math.count_nonzero(nan_obj)
+        if num_nans != 0:
+            tf.print('nans in class_loss1:', num_nans, 'class_loss:', tf.shape(class_loss), 'total nodes:', tf.math.reduce_prod(tf.shape(class_loss)))
+
         class_loss = tf.reduce_sum(class_loss, -1)
         class_loss = tf.expand_dims(class_loss, -1)
-        class_loss = object_mask * class_loss
+
+        nan_obj = tf.math.is_nan(class_loss)
+        num_nans = tf.math.count_nonzero(nan_obj)
+        if num_nans != 0:
+            tf.print('nans in class_loss2:', num_nans, 'class_loss:', tf.shape(class_loss), 'total nodes:', tf.math.reduce_prod(tf.shape(class_loss)))
+
+        class_loss1 = object_mask * class_loss
 
         nan_obj = tf.math.is_nan(class_loss)
         num_nans = tf.math.count_nonzero(nan_obj)
         if num_nans != 0:
             tf.print('nans in class_loss3:', num_nans, 'class_loss:', tf.shape(class_loss), 'total nodes:', tf.math.reduce_prod(tf.shape(class_loss)))
+        nan_obj = tf.math.is_nan(class_loss1)
+        num_nans = tf.math.count_nonzero(nan_obj)
+        if num_nans != 0:
+            tf.print('nans in class_loss4:', num_nans, 'class_loss:', tf.shape(class_loss), 'total nodes:', tf.math.reduce_prod(tf.shape(class_loss)))
 
-        class_loss = tf.reduce_sum(class_loss, [1, 2])
+        nan_obj = tf.math.is_nan(object_mask)
+        num_nans = tf.math.count_nonzero(nan_obj)
+        if num_nans != 0:
+            tf.print('nans in object_mask3:', num_nans, 'object_mask:', tf.shape(object_mask), 'total nodes:', tf.math.reduce_prod(tf.shape(object_mask)))
+
+
+        class_loss = tf.reduce_sum(class_loss1, [1, 2])
 
 
         smooth_true_conf = true_conf
@@ -155,4 +180,4 @@ class YOLOLoss:
         conf_loss_neg = (1 - object_mask) * conf_loss * ignore_mask
         conf_loss_neg = tf.reduce_sum(conf_loss_neg, [1, 2])
 
-        return dist_loss * self.dist_scale, class_loss * self.class_scale, conf_loss_pos * self.obj_scale, conf_loss_neg * self.noobj_scale
+        return dist_loss * self.dist_scale, class_loss * self.class_scale, conf_loss_pos * self.obj_scale, conf_loss_neg * self.noobj_scale + l2_loss * 1e-2
