@@ -139,7 +139,6 @@ class YOLOLoss:
         if num_nans != 0:
             tf.print('nans in class_loss3:', num_nans, 'class_loss:', tf.shape(class_loss), 'total nodes:', tf.math.reduce_prod(tf.shape(class_loss)))
 
-        logger.info('class_loss: {}'.format(class_loss.shape))
         class_loss = tf.reduce_sum(class_loss, [1, 2])
 
 
