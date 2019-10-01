@@ -519,7 +519,7 @@ def train():
             variables = model.trainable_variables
             gradients = tape.gradient(total_loss, variables)
 
-            stddev = 1 / ((1 + epoch_var)**0.55)
+            stddev = 1 / ((1 + epoch_var)**1.55)
 
             clip_gradients = []
             for g, v in zip(gradients, variables):
@@ -572,7 +572,7 @@ def train():
 
 
                 dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = step_func(args=(filenames, images, true_values))
-                if name == 'train' and step % FLAGS.print_per_train_steps == 0:
+                if (name == 'train' and step % FLAGS.print_per_train_steps == 0) or np.isnan(total_loss.numpy()):
                     logger.info('{}: {}: step: {}/{}, dist_loss: {:.2e}, class_loss: {:.2e}, conf_loss: {:.2e}/{:.2e}, total_loss: {:.2e}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}/{:.3f}, good_ios/pos: {}/{}'.format(
                         name, int(epoch_var.numpy()), step, max_steps,
                         dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss,
@@ -580,6 +580,10 @@ def train():
                         iou_metric.result(), mean_iou_metric.result(),
                         int(num_good_ious_metric.result()), int(num_positive_labels_metric.result()),
                         ))
+
+                    if np.isnan(total_loss.numpy()):
+                        exit(-1)
+
 
                 step += 1
                 if step >= max_steps:
