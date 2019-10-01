@@ -614,8 +614,9 @@ def train():
 
         def validation_metric():
             eval_acc = eval_accuracy_metric.result()
+            eval_obj_acc = eval_obj_accuracy_metric.result()
             eval_iou = eval_iou_metric.result()
-            metric = eval_acc + eval_iou
+            metric = eval_acc * eval_iou * eval_obj_acc
 
             return metric
 
