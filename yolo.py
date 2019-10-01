@@ -268,10 +268,7 @@ class Yolo3(tf.keras.Model):
             flat = tf.reshape(output, [batch_size, -1, 4+1+self.num_classes])
             outputs.append(flat)
 
-            logger.info('model output: {} -> {}'.format(output.shape, flat.shape))
-
         outputs = tf.concat(outputs, axis=1)
-        logger.info('model final output: {}'.format(outputs.shape))
         return outputs
 
 def local_relu(x):
