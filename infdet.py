@@ -64,7 +64,7 @@ def tf_read_image(filename, image_size, dtype):
     return filename, image
 
 def tf_left_needed_dimensions_from_tfrecord(image_size, num_classes, np_anchor_boxes, filename, image_id, image, true_values):
-    scaled_size = image_size / anchors_gen.DOWNSAMPLE_RATIO
+    scaled_size = image_size / yolo.DOWNSAMPLE_RATIO
     output_splits = []
     offset = 0
     num_scales = 3
@@ -351,7 +351,7 @@ def eval_step_logits(model, images, image_size, num_classes, np_anchor_boxes):
 
     true_values_list = [None, None, None]
 
-    scaled_size = image_size / anchors_gen.DOWNSAMPLE_RATIO
+    scaled_size = image_size / yolo.DOWNSAMPLE_RATIO
     num_boxes = 3
 
     anchors_reshaped = tf.reshape(np_anchor_boxes, [3, -1])

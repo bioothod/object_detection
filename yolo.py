@@ -260,7 +260,16 @@ class Yolo3(tf.keras.Model):
     def call(self, input_tensor, training):
         s3, s4, s5 = self.body(input_tensor, training)
         f5, f4, f3 = self.head(s3, s4, s5, training)
-        return f5, f4, f3
+
+        batch_size = tf.shape(f5)[0]
+        last_dim = tf.shape(f5)[-1]
+        outputs = []
+        for output in [f5, f4, f3]:
+            flat = tf.reshape(output, [batch_size, -1, last_dim])
+            outputs.append(flat)
+
+        outputs = tf.concat(outputs, axis=1)
+        return outputs
 
 def local_relu(x):
     return x * tf.nn.sigmoid(x)
@@ -286,6 +295,8 @@ def create_model(num_classes):
 
     model = Yolo3(params, num_classes)
     return model
+
+DOWNSAMPLE_RATIO = 32
 
 def create_anchors():
     anchors_dict = {
