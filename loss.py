@@ -91,7 +91,8 @@ class YOLOLoss:
         pred_box_xy = self.grid_xy + tf.sigmoid(y_pred[..., :2])
         pred_box_xy = pred_box_xy * self.ratios
 
-        pred_box_wh = tf.math.exp(y_pred[..., 2:4]) * self.anchors_wh
+        pred_wh = tf.clip_by_value(y_pred[..., 2:4], -100, 10)
+        pred_box_wh = tf.math.exp(pred_wh) * self.anchors_wh
 
         # confidence/objectiveness
         pred_box_conf = tf.expand_dims(y_pred[..., 4], -1)
@@ -166,7 +167,6 @@ class YOLOLoss:
 
         class_loss = tf.reduce_sum(class_loss1, [1, 2])
 
-
         smooth_true_conf = true_conf
         if True:
             label_smoothing = 0.1
@@ -180,4 +180,4 @@ class YOLOLoss:
         conf_loss_neg = (1 - object_mask) * conf_loss * ignore_mask
         conf_loss_neg = tf.reduce_sum(conf_loss_neg, [1, 2])
 
-        return dist_loss * self.dist_scale, class_loss * self.class_scale, conf_loss_pos * self.obj_scale, conf_loss_neg * self.noobj_scale + l2_loss * 1e-2
+        return dist_loss * self.dist_scale, class_loss * self.class_scale, conf_loss_pos * self.obj_scale, conf_loss_neg * self.noobj_scale + l2_loss * 1e-3
