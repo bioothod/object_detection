@@ -62,7 +62,7 @@ class YOLOLoss:
                  grid_xy,
                  ratios,
                  image_size,
-                 obj_scale=2.,
+                 obj_scale=3.,
                  noobj_scale=1e-2,
                  dist_scale=2.,
                  class_scale=1.,
