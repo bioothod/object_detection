@@ -319,7 +319,7 @@ def train():
 
             ds = ds.batch(FLAGS.batch_size)
             ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
-            #ds = dstrategy.experimental_distribute_dataset(ds)
+            ds = dstrategy.experimental_distribute_dataset(ds)
 
             logger.info('{} dataset has been created, tfrecords: {}'.format(name, len(filenames)))
 
@@ -338,7 +338,7 @@ def train():
             eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, image_size, train_num_classes, is_training=False)
 
 
-        if True:
+        if False:
             draw_bboxes(image_size, train_dataset, train_cat_names, anchors_all, output_xy_grids, output_ratios)
             exit(0)
 
@@ -435,7 +435,7 @@ def train():
             y_true = true_values
             y_pred = logits
 
-            object_mask = tf.expand_dims(y_true[..., 4], 4)
+            object_mask = tf.expand_dims(y_true[..., 4], -1)
             object_mask_bool = tf.cast(object_mask[..., 0], 'bool')
             num_positive_labels_metric.update_state(tf.math.count_nonzero(object_mask))
 
@@ -465,17 +465,15 @@ def train():
 
             def get_best_ious(input_tuple, object_mask, true_bboxes):
                 idx, pred_boxes_for_single_image = input_tuple
-                # shape: [13, 13, 3, 4] & [13, 13, 3]  ==>  [V, 4]
-                # V: num of true gt box of each image in a batch
                 valid_true_boxes = tf.boolean_mask(true_bboxes[idx, ..., 0:4], tf.cast(object_mask[idx, ..., 0], 'bool'))
-                # shape: [13, 13, 3, 4] & [V, 4] ==> [13, 13, 3, V]
+                # shape: [N, 4] & [V, 4] ==> [N, V]
                 ious = loss.box_iou(pred_boxes_for_single_image, valid_true_boxes)
-                # shape: [13, 13, 3, V] -> [V]
-                best_ious = tf.reduce_max(ious, axis=[0, 1, 2])
+                # shape: [N, V] -> [V]
+                best_ious = tf.reduce_max(ious, axis=[0])
                 best_ious_padded = tf.pad(best_ious,
                         [[0, tf.cast(tf.math.count_nonzero(object_mask), tf.int32) - tf.shape(valid_true_boxes)[0]]],
                         constant_values=-1.)
-                mean_ious = tf.reduce_mean(ious, axis=[0, 1, 2])
+                mean_ious = tf.reduce_mean(ious, axis=[0])
                 mean_ious_padded = tf.pad(mean_ious,
                         [[0, tf.cast(tf.math.count_nonzero(object_mask), tf.int32) - tf.shape(valid_true_boxes)[0]]],
                         constant_values=-1.)

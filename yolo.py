@@ -250,6 +250,7 @@ class Yolo3(tf.keras.Model):
     def __init__(self, params, num_classes, **kwargs):
         super(Yolo3, self).__init__(**kwargs)
 
+        self.num_classes = num_classes
         self.body = DarknetBody(params)
         self.head = DarknetHead(params, num_classes)
 
@@ -262,13 +263,15 @@ class Yolo3(tf.keras.Model):
         f5, f4, f3 = self.head(s3, s4, s5, training)
 
         batch_size = tf.shape(f5)[0]
-        last_dim = tf.shape(f5)[-1]
         outputs = []
         for output in [f5, f4, f3]:
-            flat = tf.reshape(output, [batch_size, -1, last_dim])
+            flat = tf.reshape(output, [batch_size, -1, 4+1+self.num_classes])
             outputs.append(flat)
 
+            logger.info('model output: {} -> {}'.format(output.shape, flat.shape))
+
         outputs = tf.concat(outputs, axis=1)
+        logger.info('model final output: {}'.format(outputs.shape))
         return outputs
 
 def local_relu(x):

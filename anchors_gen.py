@@ -36,8 +36,8 @@ def generate_true_labels_for_anchors(orig_bboxes, orig_labels, anchors_all, outp
     scaled_size = image_size / yolo.DOWNSAMPLE_RATIO
 
     ious = loss.box_iou(orig_bboxes, anchors_all)
-    logger.info('ious: {}, orig_bboxes: {}, anchors_all: {}, output_xy_grids: {}, output_ratios: {}'.format(
-        ious.shape, orig_bboxes.shape, anchors_all.shape, output_xy_grids.shape, output_ratios.shape))
+    #logger.info('ious: {}, orig_bboxes: {}, anchors_all: {}, output_xy_grids: {}, output_ratios: {}'.format(
+    #    ious.shape, orig_bboxes.shape, anchors_all.shape, output_xy_grids.shape, output_ratios.shape))
 
     #tf.print('bboxes:', orig_bboxes)
 
@@ -53,7 +53,7 @@ def generate_true_labels_for_anchors(orig_bboxes, orig_labels, anchors_all, outp
     best_ratios = tf.gather(output_ratios, best_anchors_index)
     best_ratios = tf.expand_dims(best_ratios, 1) # [N, 1]
 
-    logger.info('best_anchors_index: {}, best_anchors: {}, best_xy_grids: {}, best_ratios: {}'.format(best_anchors_index.shape, best_anchors.shape, best_xy_grids.shape, best_ratios.shape))
+    #logger.info('best_anchors_index: {}, best_anchors: {}, best_xy_grids: {}, best_ratios: {}'.format(best_anchors_index.shape, best_anchors.shape, best_xy_grids.shape, best_ratios.shape))
 
     cx, cy, w, h = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
 
@@ -71,7 +71,7 @@ def generate_true_labels_for_anchors(orig_bboxes, orig_labels, anchors_all, outp
     y_for_loss = cy / best_ratios - grid_y
 
     #tf.print('x_for_loss:', x_for_loss)
-    logger.info('cx: {}, grid_x: {}, x_for_loss: {}, aw: {}, w: {}, w_for_loss: {}'.format(cx.shape, grid_x.shape, x_for_loss.shape, aw.shape, w.shape, w_for_loss.shape))
+    #logger.info('cx: {}, grid_x: {}, x_for_loss: {}, aw: {}, w: {}, w_for_loss: {}'.format(cx.shape, grid_x.shape, x_for_loss.shape, aw.shape, w.shape, w_for_loss.shape))
 
     bboxes_for_loss = tf.concat([x_for_loss, y_for_loss, w_for_loss, h_for_loss], axis=1)
     objs_for_loss = tf.ones_like(x_for_loss)

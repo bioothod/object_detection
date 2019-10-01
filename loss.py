@@ -48,14 +48,9 @@ def box_iou(pred_boxes, valid_true_boxes):
 
 def gen_ignore_mask(input_tuple, object_mask, true_bboxes):
     idx, pred_boxes_for_single_image = input_tuple
-    # shape: [13, 13, 3, 4] & [13, 13, 3]  ==>  [V, 4]
-    # V: num of true gt box of each image in a batch
     valid_true_boxes = tf.boolean_mask(true_bboxes[idx, ..., 0:4], tf.cast(object_mask[idx, ..., 0], 'bool'))
-    # shape: [13, 13, 3, 4] & [V, 4] ==> [13, 13, 3, V]
     iou = box_iou(pred_boxes_for_single_image, valid_true_boxes)
-    # shape: [13, 13, 3]
     best_iou = tf.reduce_max(iou, axis=-1)
-    # shape: [13, 13, 3]
     ignore_mask_tmp = tf.cast(best_iou < 0.5, tf.float32)
     #logger.info('pred_boxes_for_single_image: {}, valid_true_boxes: {}, iou: {}, best_iou: {}, ignore_mask_tmp: {}'.format(
     #    pred_boxes_for_single_image.shape, valid_true_boxes.shape, iou.shape, best_iou.shape, ignore_mask_tmp.shape))
@@ -67,9 +62,9 @@ class YOLOLoss:
                  grid_xy,
                  ratios,
                  image_size,
-                 obj_scale=5.,
-                 noobj_scale=1.,
-                 dist_scale=1.,
+                 obj_scale=2.,
+                 noobj_scale=1e-2,
+                 dist_scale=2.,
                  class_scale=1.,
                  **kwargs):
 
@@ -82,22 +77,14 @@ class YOLOLoss:
         self.dist_scale = dist_scale
         self.class_scale = class_scale
 
-        self.grid_xy = grid_xy
-        self.ratios = ratios
-        ax, ay, aw, ah = tf.split(anchors, 4, axis=1)
-        self.ax = ax
-        self.ay = ay
-        self.aw = aw
-        self.ah = ah
+        # added batch dimension
+        self.grid_xy = tf.expand_dims(grid_xy, 0)
+        self.ratios = tf.expand_dims(ratios, 0)
+        self.ratios = tf.expand_dims(ratios, -1) # [B, N, 1]
+        self.anchors_wh = tf.expand_dims(anchors[..., :2], 0)
 
-        self.anchors_wh = tf.concatenate([aw, ah], axis=1)
-
-        wh_scale = true_wh / self.image_size
-        # the smaller the box, the bigger the scale
-        self.wh_scale = tf.expand_dims(2 - wh_scale[..., 0] * wh_scale[..., 1], axis=-1)
-
-    def run(self, y_true, y_pred):
-        object_mask = tf.expand_dims(y_true[..., 4], 4)
+    def call(self, y_true, y_pred):
+        object_mask = tf.expand_dims(y_true[..., 4], -1)
         true_conf = object_mask
 
         #sigmoid(t_xy) + c_xy
@@ -128,8 +115,12 @@ class YOLOLoss:
         ignore_mask = tf.expand_dims(ignore_mask, -1)
 
 
-        dist_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=y_true[..., :4], logits=y_pred[..., 4])
-        dist_loss = dist_loss * self.wh_scale * object_mask
+        wh_scale = true_wh / self.image_size
+        # the smaller the box, the bigger the scale
+        wh_scale = tf.expand_dims(2 - wh_scale[..., 0] * wh_scale[..., 1], axis=-1)
+
+        dist_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=y_true[..., :4], logits=y_pred[..., :4])
+        dist_loss = dist_loss * wh_scale * object_mask
         dist_loss = tf.reduce_sum(dist_loss, [1, 2])
 
         smooth_true_classes = true_classes
@@ -148,6 +139,7 @@ class YOLOLoss:
         if num_nans != 0:
             tf.print('nans in class_loss3:', num_nans, 'class_loss:', tf.shape(class_loss), 'total nodes:', tf.math.reduce_prod(tf.shape(class_loss)))
 
+        logger.info('class_loss: {}'.format(class_loss.shape))
         class_loss = tf.reduce_sum(class_loss, [1, 2])
 
 
@@ -162,6 +154,6 @@ class YOLOLoss:
         conf_loss_pos = tf.reduce_sum(conf_loss_pos, [1, 2])
 
         conf_loss_neg = (1 - object_mask) * conf_loss * ignore_mask
-        conf_loss_neg = tf.reduce_sum(conf_loss_neg, list(range(1, 5)))
+        conf_loss_neg = tf.reduce_sum(conf_loss_neg, [1, 2])
 
         return dist_loss * self.dist_scale, class_loss * self.class_scale, conf_loss_pos * self.obj_scale, conf_loss_neg * self.noobj_scale
