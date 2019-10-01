@@ -120,7 +120,7 @@ class YOLOLoss:
         # the smaller the box, the bigger the scale
         wh_scale = tf.expand_dims(2 - wh_scale[..., 0] * wh_scale[..., 1], axis=-1)
 
-        l2_loss = tf.nn.l2_loss(y_pred[..., :2]) + tf.nn.l2_loss(y_pred[..., 4]) + tf.nn.l2_loss(y_pred[..., 5:])
+        l2_loss = tf.nn.l2_loss(y_pred[..., :2]) + tf.nn.l2_loss(y_pred[..., 2:4]) + tf.nn.l2_loss(y_pred[..., 4]) + tf.nn.l2_loss(y_pred[..., 5:])
 
         dist_loss_xy = tf.nn.sigmoid_cross_entropy_with_logits(labels=y_true[..., :2], logits=y_pred[..., :2])
         dist_loss_wh = tf.square(y_true[..., 2:4] - y_pred[..., 2:4])
@@ -180,4 +180,4 @@ class YOLOLoss:
         conf_loss_neg = (1 - object_mask) * conf_loss * ignore_mask
         conf_loss_neg = tf.reduce_sum(conf_loss_neg, [1, 2])
 
-        return dist_loss * self.dist_scale, class_loss * self.class_scale, conf_loss_pos * self.obj_scale, conf_loss_neg * self.noobj_scale + l2_loss * 1e-3
+        return dist_loss * self.dist_scale, class_loss * self.class_scale, conf_loss_pos * self.obj_scale, conf_loss_neg * self.noobj_scale + l2_loss * 1e-4
