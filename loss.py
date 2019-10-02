@@ -101,7 +101,7 @@ class YOLOLoss:
         pred_classes = y_pred[..., 5:]
 
 
-        true_xy = (tf.sigmoid(y_true[..., 0:2]) + self.grid_xy) * self.ratios
+        true_xy = (y_true[..., 0:2] + self.grid_xy) * self.ratios
         true_wh = tf.math.exp(y_true[..., 2:4]) * self.anchors_wh
 
         pred_bboxes = tf.concat([pred_box_xy, pred_box_wh], axis=-1)
