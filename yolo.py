@@ -250,6 +250,7 @@ class Yolo3(tf.keras.Model):
     def __init__(self, params, num_classes, **kwargs):
         super(Yolo3, self).__init__(**kwargs)
 
+        self.num_classes = num_classes
         self.body = DarknetBody(params)
         self.head = DarknetHead(params, num_classes)
 
@@ -260,7 +261,15 @@ class Yolo3(tf.keras.Model):
     def call(self, input_tensor, training):
         s3, s4, s5 = self.body(input_tensor, training)
         f5, f4, f3 = self.head(s3, s4, s5, training)
-        return f5, f4, f3
+
+        batch_size = tf.shape(f5)[0]
+        outputs = []
+        for output in [f5, f4, f3]:
+            flat = tf.reshape(output, [batch_size, -1, 4+1+self.num_classes])
+            outputs.append(flat)
+
+        outputs = tf.concat(outputs, axis=1)
+        return outputs
 
 def local_relu(x):
     return x * tf.nn.sigmoid(x)
@@ -286,6 +295,8 @@ def create_model(num_classes):
 
     model = Yolo3(params, num_classes)
     return model
+
+DOWNSAMPLE_RATIO = 32
 
 def create_anchors():
     anchors_dict = {

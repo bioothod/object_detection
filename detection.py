@@ -50,7 +50,7 @@ parser.add_argument('--orig_images', action='store_true', help='Whether tfrecord
 parser.add_argument('--train_num_images', type=int, help='Number of images in train epoch')
 parser.add_argument('--eval_num_images', type=int, help='Number of images in eval epoch')
 
-def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas, image_size, num_classes, is_training, orig_images, data_format):
+def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_ratios, image_size, num_classes, is_training, orig_images, data_format):
     features = tf.io.parse_single_example(serialized_example,
             features={
                 'image_id': tf.io.FixedLenFeature([], tf.int64),
@@ -64,6 +64,9 @@ def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas, image_
     orig_bboxes = tf.reshape(orig_bboxes, [-1, 4])
 
     orig_labels = tf.io.decode_raw(features['true_labels'], tf.int32)
+    # labels should start from zero, originally zero was background for SSD training
+    orig_labels -= 1
+
     filename = features['filename']
     image_id = features['image_id']
     image = tf.image.decode_jpeg(features['image'], channels=3)
@@ -120,7 +123,8 @@ def unpack_tfrecord(serialized_example, np_anchor_boxes, np_anchor_areas, image_
     orig_bboxes = tf.concat([cx, cy, w, h], axis=1)
 
     true_values = anchors_gen.generate_true_labels_for_anchors(orig_bboxes, orig_labels,
-            np_anchor_boxes, np_anchor_areas, image_size, num_classes)
+            anchors_all, output_xy_grids, output_ratios,
+            image_size, num_classes)
 
     return filename, image_id, image, true_values
 
@@ -132,107 +136,64 @@ def smooth_l1_loss(x):
     absolute_loss = tf.abs(x)
     return tf.where(tf.less(absolute_loss, 1), square_loss, absolute_loss-0.5)
 
-def draw_bboxes(image_size, train_dataset, train_cat_names, np_anchor_boxes):
+def draw_bboxes(image_size, train_dataset, train_cat_names, all_anchors, all_grid_xy, all_ratios):
     data_dir = os.path.join(FLAGS.train_dir, 'tmp')
     os.makedirs(data_dir, exist_ok=True)
 
-    if False:
-        for filename, image_id, image, true_values in train_dataset.take(20):
-            filename = str(filename.numpy(), 'utf8')
+    all_anchors = all_anchors.numpy()
+    all_grid_xy = all_grid_xy.numpy()
+    all_ratios = all_ratios.numpy()
 
-            dst = '{}/{}.png'.format(data_dir, image_id.numpy())
-            new_anns = []
+    for filename, image_id, image, true_values in train_dataset.unbatch().take(20):
+        filename = str(filename.numpy(), 'utf8')
 
-            true_values_combined = true_values.numpy()
+        dst = '{}/{}.png'.format(data_dir, image_id.numpy())
 
-            bboxes = true_values[:, 0:4]
-            labels = true_values[:, 5:]
-            labels = np.argmax(labels, axis=1)
+        true_values = true_values.numpy()
 
-            for bb, cat_id in zip(bboxes, labels):
-                cx, cy, w, h = bb
-                x0 = cx - w/2
-                x1 = cx + w/2
-                y0 = cy - h/2
-                y1 = cy + h/2
+        non_background_index = np.where(true_values[..., 4] != 0)[0]
+        #logger.info('{}: true_values: {}, non_background_index: {}'.format(filename, true_values.shape, non_background_index.shape))
 
-                bb = [x0, y0, x1, y1]
-                new_anns.append((bb, cat_id))
+        bboxes = true_values[non_background_index, 0:4]
+        labels = true_values[non_background_index, 5:]
+        labels = np.argmax(labels, axis=1)
 
-            #logger.info('{}: true anchors: {}'.format(dst, new_anns))
-            logger.info('{}: true anchors: {}'.format(dst, len(new_anns)))
+        anchors = all_anchors[non_background_index, :]
+        grid_xy = all_grid_xy[non_background_index, :]
+        ratios = all_ratios[non_background_index]
 
-            image = image.numpy() * 128. + 128
-            image = image.astype(np.uint8)
-            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-            image_draw.draw_im(image, new_anns, dst, train_cat_names)
+        cx, cy, w, h = np.split(bboxes, 4, axis=1)
+        cx = np.squeeze(cx)
+        cy = np.squeeze(cy)
+        w = np.squeeze(w)
+        h = np.squeeze(h)
 
-    if True:
-        scaled_size = image_size / anchors_gen.DOWNSAMPLE_RATIO
-        output_splits = []
-        output_sizes = []
-        output_indexes = []
-        offset = 0
-        for base_scale in range(3):
-            output_indexes.append(base_scale)
-            output_size = scaled_size * np.math.pow(2, base_scale)
-            output_sizes.append(output_size)
-            offset += int(output_size * output_size)
-            output_splits.append(offset)
+        #logger.info('bboxes: {}, grid_xy: {}, anchors: {}, ratios: {}'.format(bboxes, grid_xy, anchors, ratios))
+        #logger.info('cx: {}, cy: {}, w: {}, h: {}'.format(cx, cy, w, h))
 
-        for filename, image_id, image, true_values in train_dataset.unbatch().take(20):
-            filename = str(filename.numpy(), 'utf8')
+        cx = (cx + grid_xy[:, 0]) * ratios
+        cy = (cy + grid_xy[:, 1]) * ratios
 
-            dst = '{}/{}.png'.format(data_dir, image_id.numpy())
-            new_anns = []
+        #logger.info('cx: {}, anchors: {}'.format(cx, anchors))
+        w = np.power(np.math.e, w) * anchors[:, 2]
+        h = np.power(np.math.e, h) * anchors[:, 3]
 
-            true_values_combined = true_values.numpy()
-            for true_values, output_size, output_idx in zip(np.split(true_values_combined, output_splits), output_sizes, output_indexes):
-                non_background_index_tuple = np.where(true_values[:, :, 4] != 0)
-                logger.info('{}: true_values: {}, non_background_index_tuple: {}'.format(filename, true_values.shape, non_background_index_tuple))
+        x0 = cx - w/2
+        x1 = cx + w/2
+        y0 = cy - h/2
+        y1 = cy + h/2
 
-                anchor_loc_index = non_background_index_tuple[0]
-                box_index = non_background_index_tuple[1]
-                if len(anchor_loc_index) == 0:
-                    continue
+        bb = np.stack([x0, y0, x1, y1], axis=1)
+        new_anns = []
+        for _bb, l in zip(bb, labels):
+            new_anns.append((_bb, l))
 
-                logger.info('{}: true_values: {}, anchor_loc_index: {}, box_index: {}'.format(filename, true_values.shape, anchor_loc_index, box_index))
+        logger.info('{}: true anchors: {}'.format(dst, len(new_anns)))
 
-                bboxes = true_values[anchor_loc_index, box_index, 0:4]
-                labels = true_values[anchor_loc_index, box_index, 5:]
-                labels = np.argmax(labels, axis=1)
-
-                logger.info('{}: true_values: {}, bboxes: {}, anchor_loc_index: {}, box_index: {}, labels: {}'.format(
-                    filename, true_values.shape, bboxes, anchor_loc_index, box_index, labels))
-
-
-                for bb, cat_id, bidx in zip(bboxes, labels, box_index):
-                    cx, cy, w, h = bb
-                    cx = cx / output_size * image_size
-                    cy = cy / output_size * image_size
-
-                    anchor_box_idx = output_idx * 3 + bidx
-                    anchor = np_anchor_boxes[anchor_box_idx]
-                    anchor_w, anchor_h = anchor
-
-                    h = np.math.exp(h) * anchor_h
-                    w = np.math.exp(w) * anchor_w
-
-                    x0 = cx - w/2
-                    x1 = cx + w/2
-                    y0 = cy - h/2
-                    y1 = cy + h/2
-
-                    bb = [x0, y0, x1, y1]
-                    new_anns.append((bb, cat_id))
-
-            #logger.info('{}: true anchors: {}'.format(dst, new_anns))
-            logger.info('{}: true anchors: {}'.format(dst, len(new_anns)))
-
-            image = image.numpy() * 128. + 128
-            image = image.astype(np.uint8)
-            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-            image_draw.draw_im(image, new_anns, dst, train_cat_names)
+        image = image.numpy() * 128. + 128
+        image = image.astype(np.uint8)
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        image_draw.draw_im(image, new_anns, dst, train_cat_names)
 
 def train():
     checkpoint_dir = os.path.join(FLAGS.train_dir, 'checkpoints')
@@ -295,11 +256,53 @@ def train():
 
             ds = ds.batch(FLAGS.batch_size)
             ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
-            ds = dstrategy.experimental_distribute_dataset(ds)
+            #ds = dstrategy.experimental_distribute_dataset(ds)
 
             logger.info('{} dataset has been created, images: {}, classes: {}'.format(name, num_images, num_classes))
 
             return ds, num_images, num_classes, cat_names
+
+        num_scales = 3
+        num_boxes = 3
+
+        anchors_reshaped = tf.reshape(np_anchor_boxes, [num_scales, num_boxes, 2])
+        anchors_abs_coords = []
+
+        scaled_size = image_size / yolo.DOWNSAMPLE_RATIO
+        output_xy_grids = []
+        output_ratios = []
+
+        for base_scale in range(num_scales):
+            output_size = int(scaled_size) * tf.math.pow(2, base_scale)
+
+            output_size_float = tf.cast(output_size, tf.float32)
+            ratio = float(image_size) / output_size_float
+
+            anchors_wh_one = anchors_reshaped[num_scales - base_scale - 1, ...]
+            anchors_wh = tf.expand_dims(anchors_wh_one, 0)
+            anchors_wh = tf.tile(anchors_wh, [output_size * output_size, 1, 1])
+            anchors_wh = tf.reshape(anchors_wh, [output_size, output_size, num_boxes, 2]) # [13, 13, 3, 2]
+
+            anchors_xy = anchors_gen.create_xy_grid(1, output_size, num_boxes)
+            anchors_xy = tf.squeeze(anchors_xy, 0) # [13, 13, 3, 2]
+            anchors_xy_flat = tf.reshape(anchors_xy, [-1, 2])
+            output_xy_grids.append(anchors_xy_flat)
+
+            anchors_xy_centers = anchors_xy + 0.5 # centers
+            anchors_xy_centers *= ratio
+            ratios = tf.tile([ratio], [tf.shape(anchors_xy_flat)[0]])
+            output_ratios.append(ratios)
+
+            anchors_for_layer = tf.concat([anchors_xy_centers, anchors_wh], axis=-1)
+
+            anchors_flat = tf.reshape(anchors_for_layer, [-1, 4])
+
+            logger.info('base_scale: {}: output_size: {}, anchors_for_layer: {}, anchors_flat: {}'.format(base_scale, output_size, anchors_for_layer.shape, anchors_flat.shape))
+            anchors_abs_coords.append(anchors_flat)
+
+        anchors_all = tf.concat(anchors_abs_coords, axis=0)
+        output_xy_grids = tf.concat(output_xy_grids, axis=0)
+        output_ratios = tf.concat(output_ratios, axis=0)
 
         def create_dataset_from_tfrecord(name, dataset_dir, image_size, num_classes, is_training):
             filenames = []
@@ -309,7 +312,7 @@ def train():
                     filenames.append(fn)
 
             ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=2)
-            ds = ds.map(lambda record: unpack_tfrecord(record, np_anchor_boxes, np_anchor_areas, image_size, num_classes, is_training, FLAGS.orig_images, FLAGS.data_format),
+            ds = ds.map(lambda record: unpack_tfrecord(record, anchors_all, output_xy_grids, output_ratios, image_size, num_classes, is_training, FLAGS.orig_images, FLAGS.data_format),
                     num_parallel_calls=FLAGS.num_cpus)
             if is_training:
                 ds = ds.shuffle(200)
@@ -336,7 +339,7 @@ def train():
 
 
         if False:
-            draw_bboxes(image_size, train_dataset, train_cat_names, np_anchor_boxes)
+            draw_bboxes(image_size, train_dataset, train_cat_names, anchors_all, output_xy_grids, output_ratios)
             exit(0)
 
         if train_num_classes is None:
@@ -384,14 +387,16 @@ def train():
         loss_metric = tf.keras.metrics.Mean(name='train_loss')
         accuracy_metric = tf.keras.metrics.BinaryAccuracy(name='train_accuracy')
         obj_accuracy_metric = tf.keras.metrics.BinaryAccuracy(name='train_objectness_accuracy')
-        iou_metric = tf.keras.metrics.Mean(name='train_iou')
+        iou_metric = tf.keras.metrics.Mean(name='train_best_iou')
+        mean_iou_metric = tf.keras.metrics.Mean(name='train_mean_iou')
         num_good_ious_metric = tf.keras.metrics.Mean(name='eval_num_good_ious')
         num_positive_labels_metric = tf.keras.metrics.Mean(name='eval_num_positive_labels_ious')
 
         eval_loss_metric = tf.keras.metrics.Mean(name='eval_loss')
         eval_accuracy_metric = tf.keras.metrics.BinaryAccuracy(name='eval_accuracy')
         eval_obj_accuracy_metric = tf.keras.metrics.BinaryAccuracy(name='eval_objectness_accuracy')
-        eval_iou_metric = tf.keras.metrics.Mean(name='eval_iou')
+        eval_iou_metric = tf.keras.metrics.Mean(name='eval_best_iou')
+        eval_mean_iou_metric = tf.keras.metrics.Mean(name='eval_mean_iou')
         eval_num_good_ious_metric = tf.keras.metrics.Mean(name='eval_num_good_ious')
         eval_num_positive_labels_metric = tf.keras.metrics.Mean(name='eval_num_positive_labels_ious')
 
@@ -400,6 +405,7 @@ def train():
             accuracy_metric.reset_states()
             obj_accuracy_metric.reset_states()
             iou_metric.reset_states()
+            mean_iou_metric.reset_states()
             num_good_ious_metric.reset_states()
             num_positive_labels_metric.reset_states()
 
@@ -407,26 +413,16 @@ def train():
             eval_accuracy_metric.reset_states()
             eval_obj_accuracy_metric.reset_states()
             eval_iou_metric.reset_states()
+            eval_mean_iou_metric.reset_states()
             eval_num_good_ious_metric.reset_states()
             eval_num_positive_labels_metric.reset_states()
 
-        scaled_size = image_size / anchors_gen.DOWNSAMPLE_RATIO
-        output_sizes, output_splits = [], []
-        offset = 0
-        num_scales = 3
-        num_boxes = 3
-        for base_scale in range(num_scales):
-            output_size = scaled_size * np.math.pow(2, base_scale)
-            output_sizes.append(int(output_size))
-            output_splits.append(int(output_size * output_size))
-
-        yolo_loss_object = loss.YOLOLoss(image_size, np_anchor_boxes, output_sizes, reduction=tf.keras.losses.Reduction.NONE)
+        ylo = loss.YOLOLoss(anchors_all, output_xy_grids, output_ratios, image_size, reduction=tf.keras.losses.Reduction.NONE)
 
         def calculate_metrics(logits, true_values,
                 loss_metric, accuracy_metric, obj_accuracy_metric,
-                iou_metric, num_good_ious_metric, num_positive_labels_metric):
-            true_values_list = list(tf.split(true_values, output_splits, axis=1))
-            dist_loss, class_loss, conf_loss_pos, conf_loss_neg = yolo_loss_object.call(y_true_list=true_values_list, y_pred_list=logits)
+                iou_metric, mean_iou_metric, num_good_ious_metric, num_positive_labels_metric):
+            dist_loss, class_loss, conf_loss_pos, conf_loss_neg = ylo.call(y_true=true_values, y_pred=logits)
 
             dist_loss = tf.nn.compute_average_loss(dist_loss, global_batch_size=FLAGS.batch_size)
             class_loss = tf.nn.compute_average_loss(class_loss, global_batch_size=FLAGS.batch_size)
@@ -436,84 +432,71 @@ def train():
             total_loss = dist_loss + class_loss + conf_loss_pos + conf_loss_neg
             loss_metric.update_state(total_loss)
 
-            anchors_reshaped = tf.reshape(np_anchor_boxes, [3, -1])
+            y_true = true_values
+            y_pred = logits
 
-            for output_idx, (true_values, pred_values) in enumerate(zip(true_values_list, logits)):
-                output_size = int(scaled_size) * tf.math.pow(2, output_idx)
-                ratio = float(image_size) / tf.cast(output_size, tf.float32)
+            object_mask = tf.expand_dims(y_true[..., 4], -1)
+            object_mask_bool = tf.cast(object_mask[..., 0], 'bool')
+            num_positive_labels_metric.update_state(tf.math.count_nonzero(object_mask))
 
-                #logger.info('true_values: {}, pred_values: {}'.format(true_values.shape, pred_values.shape))
+            #sigmoid(t_xy) + c_xy
+            pred_box_xy = ylo.grid_xy + tf.sigmoid(y_pred[..., :2])
+            pred_box_xy = pred_box_xy * ylo.ratios
+            pred_box_wh = tf.math.exp(y_pred[..., 2:4]) * ylo.anchors_wh
 
-                y_true = tf.reshape(true_values, [-1, output_size, output_size, num_boxes, 4 + 1 + num_classes])
-                y_pred = tf.reshape(pred_values, [-1, output_size, output_size, num_boxes, 4 + 1 + num_classes])
+            # confidence/objectiveness
+            true_obj_mask = tf.boolean_mask(object_mask, object_mask_bool)
+            pred_box_conf = tf.boolean_mask(tf.expand_dims(y_pred[..., 4], -1), object_mask_bool)
+            pred_box_conf = tf.math.sigmoid(pred_box_conf)
+            obj_accuracy_metric.update_state(y_true=true_obj_mask, y_pred=pred_box_conf)
 
-                object_mask = tf.expand_dims(y_true[..., 4], 4)
-                object_mask_bool = tf.cast(object_mask[..., 0], 'bool')
-                num_positive_labels_metric.update_state(tf.math.count_nonzero(object_mask))
-
-                anchors_wh = anchors_reshaped[output_idx, :]
-                grid_offset = loss._create_mesh_xy(*y_pred.shape[:4])
-                anchor_grid = loss._create_mesh_anchor(anchors_wh, *y_pred.shape[:4])
-
-
-                #sigmoid(t_xy) + c_xy
-                pred_box_xy = grid_offset + tf.sigmoid(y_pred[..., :2])
-                pred_box_xy = pred_box_xy * ratio
-                pred_box_wh = tf.math.exp(y_pred[..., 2:4]) * anchor_grid
-
-                # confidence/objectiveness
-                true_obj_mask = tf.boolean_mask(object_mask, object_mask_bool)
-                pred_box_conf = tf.boolean_mask(tf.expand_dims(y_pred[..., 4], -1), object_mask_bool)
-                pred_box_conf = tf.math.sigmoid(pred_box_conf)
-                obj_accuracy_metric.update_state(y_true=true_obj_mask, y_pred=pred_box_conf)
-
-                true_classes = tf.boolean_mask(y_true[..., 5:], object_mask_bool)
-                pred_classes = tf.boolean_mask(tf.math.sigmoid(y_pred[..., 5:]), object_mask_bool)
-                accuracy_metric.update_state(y_true=true_classes, y_pred=pred_classes)
+            true_classes = tf.boolean_mask(y_true[..., 5:], object_mask_bool)
+            pred_classes = tf.boolean_mask(tf.math.sigmoid(y_pred[..., 5:]), object_mask_bool)
+            accuracy_metric.update_state(y_true=true_classes, y_pred=pred_classes)
 
 
-                true_xy = y_true[..., 0:2] * ratio
-                true_wh = tf.math.exp(y_true[..., 2:4]) * anchor_grid
+            true_xy = (y_true[..., 0:2] + ylo.grid_xy) * ylo.ratios
+            true_wh = tf.math.exp(y_true[..., 2:4]) * ylo.anchors_wh
 
-                anchors_wh = tf.reshape(anchors_wh, [3, 2])
-                true_wh_1 = tf.math.exp(y_true[..., 2:4]) * anchors_wh
-                diff = tf.cast(true_wh, tf.int32) - tf.cast(true_wh_1, tf.int32)
-                diff = tf.math.count_nonzero(diff)
-                if diff != 0:
-                    tf.print('diff:', diff, 'total boxes:', tf.math.reduce_prod(tf.shape(true_wh)[:-1]))
+            pred_box_wh = tf.clip_by_value(pred_box_wh, -1e8, 1e8)
 
-                pred_box_wh = tf.clip_by_value(pred_box_wh, -1e8, 1e8)
+            pred_bboxes = tf.concat([pred_box_xy, pred_box_wh], axis=-1)
+            true_bboxes = tf.concat([true_xy, true_wh], axis=-1)
 
-                pred_bboxes = tf.concat([pred_box_xy, pred_box_wh], axis=-1)
-                true_bboxes = tf.concat([true_xy, true_wh], axis=-1)
+            def get_best_ious(input_tuple, object_mask, true_bboxes):
+                idx, pred_boxes_for_single_image = input_tuple
+                valid_true_boxes = tf.boolean_mask(true_bboxes[idx, ..., 0:4], tf.cast(object_mask[idx, ..., 0], 'bool'))
+                # shape: [N, 4] & [V, 4] ==> [N, V]
+                ious = loss.box_iou(pred_boxes_for_single_image, valid_true_boxes)
+                # shape: [N, V] -> [V]
+                best_ious = tf.reduce_max(ious, axis=[0])
+                best_ious_padded = tf.pad(best_ious,
+                        [[0, tf.cast(tf.math.count_nonzero(object_mask), tf.int32) - tf.shape(valid_true_boxes)[0]]],
+                        constant_values=-1.)
+                mean_ious = tf.reduce_mean(ious, axis=[0])
+                mean_ious_padded = tf.pad(mean_ious,
+                        [[0, tf.cast(tf.math.count_nonzero(object_mask), tf.int32) - tf.shape(valid_true_boxes)[0]]],
+                        constant_values=-1.)
+                return best_ious_padded, mean_ious_padded
 
-                def get_best_ious(input_tuple, object_mask, true_bboxes):
-                    idx, pred_boxes_for_single_image = input_tuple
-                    # shape: [13, 13, 3, 4] & [13, 13, 3]  ==>  [V, 4]
-                    # V: num of true gt box of each image in a batch
-                    valid_true_boxes = tf.boolean_mask(true_bboxes[idx, ..., 0:4], tf.cast(object_mask[idx, ..., 0], 'bool'))
-                    # shape: [13, 13, 3, 4] & [V, 4] ==> [13, 13, 3, V]
-                    ious = loss.box_iou(pred_boxes_for_single_image, valid_true_boxes)
-                    # shape: [13, 13, 3, V] -> [V]
-                    best_ious = tf.reduce_max(ious, axis=[0, 1, 2])
-                    best_ious_padded = tf.pad(best_ious,
-                            [[0, tf.cast(tf.math.count_nonzero(object_mask), tf.int32) - tf.shape(valid_true_boxes)[0]]],
-                            constant_values=-1.)
-                    return best_ious_padded
+            best_ious, mean_ious = tf.map_fn(lambda t: get_best_ious(t, object_mask, true_bboxes),
+                                (tf.range(tf.shape(pred_bboxes)[0]), pred_bboxes),
+                                parallel_iterations=32,
+                                back_prop=False,
+                                dtype=(tf.float32, tf.float32))
 
-                best_ious = tf.map_fn(lambda t: get_best_ious(t, object_mask, true_bboxes),
-                                    (tf.range(tf.shape(pred_bboxes)[0]), pred_bboxes),
-                                    parallel_iterations=32,
-                                    back_prop=False,
-                                    dtype=(tf.float32))
+            best_ious = tf.reshape(best_ious, [-1])
+            best_ious_index = tf.where(best_ious >= 0)
+            best_ious = tf.gather_nd(best_ious, best_ious_index)
+            iou_metric.update_state(best_ious)
 
-                best_ious = tf.reshape(best_ious, [-1])
-                best_ious_index = tf.where(best_ious >= 0)
-                best_ious = tf.gather_nd(best_ious, best_ious_index)
-                iou_metric.update_state(best_ious)
+            mean_ious = tf.reshape(mean_ious, [-1])
+            mean_ious_index = tf.where(mean_ious >= 0)
+            mean_ious = tf.gather_nd(mean_ious, mean_ious_index)
+            mean_iou_metric.update_state(mean_ious)
 
-                good_ious = tf.where(best_ious > 0.5)
-                num_good_ious_metric.update_state(tf.shape(good_ious)[0])
+            good_ious = tf.where(best_ious > 0.5)
+            num_good_ious_metric.update_state(tf.shape(good_ious)[0])
 
             return dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss
 
@@ -522,7 +505,7 @@ def train():
         def eval_step(filenames, images, true_values):
             logits = model(images, training=False)
             dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = calculate_metrics(logits, true_values,
-                    eval_loss_metric, eval_accuracy_metric, eval_obj_accuracy_metric, eval_iou_metric,
+                    eval_loss_metric, eval_accuracy_metric, eval_obj_accuracy_metric, eval_iou_metric, eval_mean_iou_metric,
                     eval_num_good_ious_metric, eval_num_positive_labels_metric)
             return dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss
 
@@ -530,13 +513,13 @@ def train():
             with tf.GradientTape() as tape:
                 logits = model(images, training=True)
                 dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = calculate_metrics(logits, true_values,
-                        loss_metric, accuracy_metric, obj_accuracy_metric, iou_metric,
+                        loss_metric, accuracy_metric, obj_accuracy_metric, iou_metric, mean_iou_metric,
                         num_good_ious_metric, num_positive_labels_metric)
 
             variables = model.trainable_variables
             gradients = tape.gradient(total_loss, variables)
 
-            stddev = 1 / ((1 + epoch_var)**0.55)
+            stddev = 1 / ((1 + epoch_var)**1.55)
 
             clip_gradients = []
             for g, v in zip(gradients, variables):
@@ -589,14 +572,18 @@ def train():
 
 
                 dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = step_func(args=(filenames, images, true_values))
-                if name == 'train' and step % FLAGS.print_per_train_steps == 0:
-                    logger.info('{}: {}: step: {}/{}, dist_loss: {:.2e}, class_loss: {:.2e}, conf_loss: {:.2e}/{:.2e}, total_loss: {:.2e}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}, good_ios/pos: {}/{}'.format(
+                if (name == 'train' and step % FLAGS.print_per_train_steps == 0) or np.isnan(total_loss.numpy()):
+                    logger.info('{}: {}: step: {}/{}, dist_loss: {:.2e}, class_loss: {:.2e}, conf_loss: {:.2e}/{:.2e}, total_loss: {:.2e}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}/{:.3f}, good_ios/pos: {}/{}'.format(
                         name, int(epoch_var.numpy()), step, max_steps,
                         dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss,
                         accuracy_metric.result(), obj_accuracy_metric.result(),
-                        iou_metric.result(),
+                        iou_metric.result(), mean_iou_metric.result(),
                         int(num_good_ious_metric.result()), int(num_positive_labels_metric.result()),
                         ))
+
+                    if np.isnan(total_loss.numpy()):
+                        exit(-1)
+
 
                 step += 1
                 if step >= max_steps:
@@ -631,8 +618,9 @@ def train():
 
         def validation_metric():
             eval_acc = eval_accuracy_metric.result()
+            eval_obj_acc = eval_obj_accuracy_metric.result()
             eval_iou = eval_iou_metric.result()
-            metric = eval_acc + eval_iou
+            metric = eval_acc * eval_iou * eval_obj_acc
 
             return metric
 
@@ -665,12 +653,12 @@ def train():
 
             metric = validation_metric()
 
-            logger.info('epoch: {}, train: steps: {}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}, good_ios/pos: {}/{}, loss: {:.2e}, eval: accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}, good_ios/pos: {}/{}, loss: {:.2e}, lr: {:.2e}, val_metric: {:.3f}'.format(
+            logger.info('epoch: {}, train: steps: {}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}/{:.3f}, good_ios/pos: {}/{}, loss: {:.2e}, eval: accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}/{:.3f}, good_ios/pos: {}/{}, loss: {:.2e}, lr: {:.2e}, val_metric: {:.3f}'.format(
                 epoch, global_step.numpy(),
-                accuracy_metric.result(), obj_accuracy_metric.result(), iou_metric.result(),
+                accuracy_metric.result(), obj_accuracy_metric.result(), iou_metric.result(), mean_iou_metric.result(),
                 int(num_good_ious_metric.result()), int(num_positive_labels_metric.result()),
                 loss_metric.result(),
-                eval_accuracy_metric.result(), eval_obj_accuracy_metric.result(), eval_iou_metric.result(),
+                eval_accuracy_metric.result(), eval_obj_accuracy_metric.result(), eval_iou_metric.result(), eval_mean_iou_metric.result(),
                 int(eval_num_good_ious_metric.result()), int(eval_num_positive_labels_metric.result()),
                 eval_loss_metric.result(),
                 learning_rate.numpy(),
@@ -678,9 +666,9 @@ def train():
 
             if metric > min_metric:
                 save_path = manager.save()
-                logger.info("epoch: {}, saved checkpoint: {}, eval metric: {:.4f} -> {:.4f}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}, good_ios/positive: {}/{}".format(
+                logger.info("epoch: {}, saved checkpoint: {}, eval metric: {:.4f} -> {:.4f}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}/{:.3f}, good_ios/positive: {}/{}".format(
                     epoch, save_path, min_metric, metric, 
-                    eval_accuracy_metric.result(), eval_obj_accuracy_metric.result(), eval_iou_metric.result(),
+                    eval_accuracy_metric.result(), eval_obj_accuracy_metric.result(), eval_iou_metric.result(), eval_mean_iou_metric.result(),
                     int(eval_num_good_ious_metric.result()), int(eval_num_positive_labels_metric.result())))
                 min_metric = metric
                 num_epochs_without_improvement = 0

@@ -3,142 +3,85 @@ import logging
 import numpy as np
 import tensorflow as tf
 
+import loss
+import yolo
+
 logger = logging.getLogger('detection')
 
-def calc_iou_for_single_box(box, bx0, by0, bx1, by1, areas):
-    x0 = box[0] - box[2]/2
-    x1 = box[0] + box[2]/2
-    y0 = box[1] - box[3]/2
-    y1 = box[1] + box[3]/2
-    box_area = box[2] * box[3]
+def create_xy_grid(batch_size, output_size, anchors_per_scale):
+    y = tf.tile(tf.range(output_size, dtype=tf.int32)[:, tf.newaxis], [1, output_size])
+    x = tf.tile(tf.range(output_size, dtype=tf.int32)[tf.newaxis, :], [output_size, 1])
 
-    xx0 = tf.maximum(x0, bx0)
-    yy0 = tf.maximum(y0, by0)
-    xx1 = tf.minimum(x1, bx1)
-    yy1 = tf.minimum(y1, by1)
+    xy_grid = tf.concat([x[:, :, tf.newaxis], y[:, :, tf.newaxis]], axis=-1)
+    xy_grid = tf.tile(xy_grid[tf.newaxis, :, :, tf.newaxis, :], [batch_size, 1, 1, anchors_per_scale, 1])
+    xy_grid = tf.cast(xy_grid, tf.float32)
 
-    w = tf.maximum(0., xx1 - xx0 + 1)
-    h = tf.maximum(0., yy1 - yy0 + 1)
+    return xy_grid
 
-    inter = w * h
-    iou = inter / (box_area + areas - inter)
-    return iou
+    pred_xy = (tf.sigmoid(conv_raw_dxdy) + xy_grid) * stride
+    pred_wh = (tf.exp(conv_raw_dwdh) * anchors) * stride
+    pred_xywh = tf.concat([pred_xy, pred_wh], axis=-1)
 
-def calc_ious(orig_bboxes, boxes, areas):
-    bx0 = boxes[:, 0] - boxes[:, 2]/2
-    bx1 = boxes[:, 0] + boxes[:, 2]/2
-    by0 = boxes[:, 1] - boxes[:, 3]/2
-    by1 = boxes[:, 1] + boxes[:, 3]/2
-
-    ious = tf.map_fn(lambda box: calc_iou_for_single_box(box, bx0, by0, bx1, by1, areas), orig_bboxes, parallel_iterations=32)
-    return ious
-
-def calc_ious_one_to_one(pred_bboxes, true_bboxes):
-    px0 = pred_bboxes[..., 0] - pred_bboxes[..., 2]/2
-    px1 = pred_bboxes[..., 0] + pred_bboxes[..., 2]/2
-    py0 = pred_bboxes[..., 1] - pred_bboxes[..., 3]/2
-    py1 = pred_bboxes[..., 1] + pred_bboxes[..., 3]/2
-    pareas = pred_bboxes[..., 2] * pred_bboxes[..., 3]
-
-    tx0 = true_bboxes[..., 0] - true_bboxes[..., 2]/2
-    tx1 = true_bboxes[..., 0] + true_bboxes[..., 2]/2
-    ty0 = true_bboxes[..., 1] - true_bboxes[..., 3]/2
-    ty1 = true_bboxes[..., 1] + true_bboxes[..., 3]/2
-    tareas = true_bboxes[..., 2] * true_bboxes[..., 3]
-
-    xx0 = tf.maximum(px0, tx0)
-    yy0 = tf.maximum(py0, ty0)
-    xx1 = tf.minimum(px1, tx1)
-    yy1 = tf.minimum(py1, ty1)
-
-    w = tf.maximum(0., xx1 - xx0 + 1)
-    h = tf.maximum(0., yy1 - yy0 + 1)
-
-    inter = w * h
-    iou = inter / (pareas + tareas - inter)
-    return iou
-
-DOWNSAMPLE_RATIO = 32
-
-def generate_true_labels_for_anchors(orig_bboxes, orig_labels, np_anchor_boxes, np_anchor_areas, image_size, num_classes):
-    num_anchors = np_anchor_boxes.shape[0]
-
+def generate_true_labels_for_anchors(orig_bboxes, orig_labels, anchors_all, output_xy_grids, output_ratios, image_size, num_classes):
     orig_bboxes = tf.convert_to_tensor(orig_bboxes, dtype=tf.float32)
     orig_labels = tf.convert_to_tensor(orig_labels, dtype=tf.int32)
 
-    _, _, w, h = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
-    shifted_orig_bboxes = tf.concat([tf.zeros_like(w), tf.zeros_like(h), w, h], axis=1)
-    anchor_bboxes = tf.concat([tf.zeros((num_anchors, 2), tf.float32), np_anchor_boxes], axis=1)
+    #num_examples = 9
+    #orig_bboxes = tf.zeros([num_examples, 4], dtype=tf.float32)
+    #orig_labels = tf.ones([num_examples,], dtype=tf.int32)
 
     num_scales = 3
+    num_boxes = 3
 
-    ious = calc_ious(shifted_orig_bboxes, anchor_bboxes, np_anchor_areas)
-    anchor_idx = tf.argmax(ious, axis=1)
-    box_idx = tf.math.floormod(anchor_idx, num_scales)
-    scale_idx = tf.math.floordiv(anchor_idx, num_scales)
+    scaled_size = image_size / yolo.DOWNSAMPLE_RATIO
 
-    #tf.print('bboxes:', orig_bboxes, 'ious:', ious, 'anchor_idx:', anchor_idx, 'box_idx:', box_idx, 'scale_idx', scale_idx)
+    ious = loss.box_iou(orig_bboxes, anchors_all)
+    #logger.info('ious: {}, orig_bboxes: {}, anchors_all: {}, output_xy_grids: {}, output_ratios: {}'.format(
+    #    ious.shape, orig_bboxes.shape, anchors_all.shape, output_xy_grids.shape, output_ratios.shape))
 
-    #anchor_idx = tf.cast(anchor_idx, tf.int64)
-    #anchor_idx_range = tf.stack([anchor_idx, tf.range(num_anchors, dtype=tf.int64)], axis=1)
+    #tf.print('bboxes:', orig_bboxes)
 
+    best_anchors_index = tf.argmax(ious, 1)
+    #tf.print('best_anchors_index:', best_anchors_index)
+    num_anchors = anchors_all.shape[0]
 
-    matched_anchor_boxes = tf.gather(np_anchor_boxes, anchor_idx)
+    true_values_for_loss = tf.zeros([num_anchors, 4 + 1 + num_classes])
+    true_values_abs = tf.zeros([num_anchors, 4 + 1 + num_classes])
 
+    best_anchors = tf.gather(anchors_all, best_anchors_index) # [N, 4]
+    best_xy_grids = tf.gather(output_xy_grids, best_anchors_index) # [N, 2]
+    best_ratios = tf.gather(output_ratios, best_anchors_index)
+    best_ratios = tf.expand_dims(best_ratios, 1) # [N, 1]
 
-    scaled_size = tf.math.floordiv(image_size, DOWNSAMPLE_RATIO)
+    #logger.info('best_anchors_index: {}, best_anchors: {}, best_xy_grids: {}, best_ratios: {}'.format(best_anchors_index.shape, best_anchors.shape, best_xy_grids.shape, best_ratios.shape))
 
-    ret = []
-    for base_scale in range(num_scales):
-        output_size = scaled_size * tf.math.pow(2, base_scale)
-        output_size_float = tf.cast(output_size, tf.float32)
-        ratio = float(image_size) / output_size_float
+    cx, cy, w, h = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
 
-        scale_match_idx_orig = tf.where(tf.equal(scale_idx, base_scale))
-        scale_match_idx = tf.squeeze(scale_match_idx_orig, 1)
-        orig_bboxes_matched_scale = tf.gather(orig_bboxes, scale_match_idx)
-        orig_labels_matched_scale = tf.gather(orig_labels, scale_match_idx)
+    _, _, aw, ah = tf.split(best_anchors, num_or_size_splits=4, axis=1)
+    w_for_loss = tf.math.log(tf.maximum(w, 1) / aw)
+    h_for_loss = tf.math.log(tf.maximum(h, 1) / ah)
 
-        logger.info('base_scale: {}, orig_bboxes: {}, anchor_idx: {}, scale_idx: {}, scale_match_idx: {}, orig_bboxes_matched_scale: {}'.format(
-            base_scale, orig_bboxes.shape, anchor_idx.shape, scale_idx.shape, scale_match_idx.shape, orig_bboxes_matched_scale.shape))
+    #tf.print('bboxes:', orig_bboxes, 'grid:', best_xy_grids, 'ratio:', best_ratios, 'best_anchors:', best_anchors)
 
-        cx, cy, w, h = tf.split(orig_bboxes_matched_scale, num_or_size_splits=4, axis=1)
+    grid_x, grid_y = tf.split(best_xy_grids, num_or_size_splits=2, axis=1)
+    # this is offset within a cell on the particular scale measured in relative to this scale units
+    # this is what sigmoid(pred_xy) should be equal to
+    # loss will use tf.nn.sigmoid_cross_entropy_with_logits() to match logits (Tx, Ty) to these true values, otherwise true value should've been logit() (aka reverse sigmoid)
+    x_for_loss = cx / best_ratios - grid_x
+    y_for_loss = cy / best_ratios - grid_y
 
-        out_cx = cx / ratio
-        out_cy = cy / ratio
+    #tf.print('x_for_loss:', x_for_loss)
+    #logger.info('cx: {}, grid_x: {}, x_for_loss: {}, aw: {}, w: {}, w_for_loss: {}'.format(cx.shape, grid_x.shape, x_for_loss.shape, aw.shape, w.shape, w_for_loss.shape))
 
-        anchors_for_scale = tf.gather(matched_anchor_boxes, scale_match_idx)
-        anchor_w, anchor_h = tf.split(anchors_for_scale, num_or_size_splits=2, axis=1)
+    bboxes_for_loss = tf.concat([x_for_loss, y_for_loss, w_for_loss, h_for_loss], axis=1)
+    objs_for_loss = tf.ones_like(x_for_loss)
+    labels_for_loss = tf.one_hot(orig_labels, num_classes, dtype=tf.float32)
+    values_for_loss = tf.concat([bboxes_for_loss, objs_for_loss, labels_for_loss], axis=1)
 
-        #tf.print('anchor_idx:', tf.shape(anchor_idx), 'h:', tf.shape(h), 'ah:', tf.shape(anchor_h))
-        out_w = tf.math.log(tf.maximum(w, 1) / anchor_w)
-        out_h = tf.math.log(tf.maximum(h, 1) / anchor_h)
+    update_idx = tf.expand_dims(best_anchors_index, 1)
 
-        bboxes_to_set = tf.concat([out_cx, out_cy, out_w, out_h], axis=1)
-        #bboxes_to_set = tf.concat([cx, cy, w, h], axis=1)
-        #bboxes_to_set = tf.concat([out_cx, out_cy, w, h], axis=1)
-        obj_to_set = tf.ones_like(cx)
-        labels_to_set = tf.one_hot(orig_labels_matched_scale, num_classes, dtype=tf.float32)
+    logger.info('update true_values: bboxes: {}, objs: {}, labels: {}, values: {}, update_idx: {}'.format(
+        bboxes_for_loss.shape, objs_for_loss.shape, labels_for_loss.shape, values_for_loss.shape, update_idx.shape))
+    output = tf.tensor_scatter_nd_update(true_values_for_loss, update_idx, values_for_loss)
 
-        values_to_set = tf.concat([bboxes_to_set, obj_to_set, labels_to_set], axis=1)
-        logger.info('base_scale: {}, concat: bboxes: {}, obj: {}, labels: {}, values: {}'.format(base_scale, bboxes_to_set, obj_to_set, labels_to_set, values_to_set))
-
-        icx = tf.cast(tf.floor(out_cx), tf.int64)
-        icy = tf.cast(tf.floor(out_cy), tf.int64)
-
-        box_match_idx = tf.gather(box_idx, scale_match_idx_orig)
-
-        update_idx = tf.concat([icy, icx, box_match_idx], axis=1)
-
-        #tf.print('update_idx:', update_idx, 'values_to_set:', values_to_set)
-
-        output = tf.zeros((output_size, output_size, num_scales, 4+1+num_classes), dtype=tf.float32)
-
-        logger.info('base_scale: {}, output: {}, update_idx: {}, values_to_set: {}'.format(base_scale, output.shape, update_idx.shape, values_to_set.shape))
-        output = tf.tensor_scatter_nd_update(output, update_idx, values_to_set)
-
-        output = tf.reshape(output, [output.shape[0] * output.shape[1], output.shape[2], output.shape[3]])
-        ret.append(output)
-
-    ret = tf.concat(ret, axis=0)
-    return ret
+    return output

@@ -49,13 +49,12 @@ def draw_im(im, ann, dst, cat_names):
     for b, c in ann:
         b = bb_hw(b)
 
-        if c != 0:
-            color = color_map.get(c)
-            if color is None:
-                color = np.random.rand(3,)
-                color_map[c] = color
+        color = color_map.get(c)
+        if color is None:
+            color = np.random.rand(3,)
+            color_map[c] = color
 
-            draw_rect(ax, b, color)
+        draw_rect(ax, b, color)
 
         if True:
             if c in cat_names:

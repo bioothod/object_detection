@@ -64,7 +64,7 @@ def tf_read_image(filename, image_size, dtype):
     return filename, image
 
 def tf_left_needed_dimensions_from_tfrecord(image_size, num_classes, np_anchor_boxes, filename, image_id, image, true_values):
-    scaled_size = image_size / anchors_gen.DOWNSAMPLE_RATIO
+    scaled_size = image_size / yolo.DOWNSAMPLE_RATIO
     output_splits = []
     offset = 0
     num_scales = 3
@@ -240,14 +240,15 @@ def per_image_supression(logits, image_size, num_classes):
                                         tf.greater(objectness, FLAGS.min_score),
                                         tf.greater(scores, FLAGS.min_score)))
     #non_background_index = tf.where(tf.greater(scores, FLAGS.min_score))
-    tf.print('non_background_index:', tf.shape(non_background_index), ':', non_background_index)
+    #tf.print('non_background_index:', tf.shape(non_background_index), ':', non_background_index)
+    #tf.print('non_background_index:', tf.shape(non_background_index), ':', non_background_index)
     non_background_index = tf.squeeze(non_background_index, 1)
     #tf.print('coords:', tf.shape(coords), 'scores:', tf.shape(scores), 'labels:', tf.shape(labels))
     sampled_coords = tf.gather(coords, non_background_index)
     sampled_scores = tf.gather(scores, non_background_index)
     sampled_labels = tf.gather(labels, non_background_index)
     sampled_objs = tf.gather(objectness, non_background_index)
-    tf.print('min_obj:', tf.reduce_min(sampled_objs), 'min_score:', tf.reduce_min(sampled_scores), 'scores:', tf.shape(sampled_scores))
+    #tf.print('min_obj:', tf.reduce_min(sampled_objs), 'min_score:', tf.reduce_min(sampled_scores), 'scores:', tf.shape(sampled_scores))
 
     #tf.print('labels:', tf.shape(labels), 'scores:', tf.shape(scores), 'coords:', tf.shape(coords))
     #tf.print('sampled_labels:', tf.shape(sampled_labels), 'sampled_scores:', tf.shape(sampled_scores), 'sampled_coords:', tf.shape(sampled_coords))
@@ -351,7 +352,7 @@ def eval_step_logits(model, images, image_size, num_classes, np_anchor_boxes):
 
     true_values_list = [None, None, None]
 
-    scaled_size = image_size / anchors_gen.DOWNSAMPLE_RATIO
+    scaled_size = image_size / yolo.DOWNSAMPLE_RATIO
     num_boxes = 3
 
     anchors_reshaped = tf.reshape(np_anchor_boxes, [3, -1])
