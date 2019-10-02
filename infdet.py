@@ -78,7 +78,7 @@ def tf_left_needed_dimensions_from_tfrecord(image_size, anchors_all, output_xy_g
     ratios = tf.expand_dims(ratios, -1)
     anchors_wh = tf.gather_nd(anchors_all, non_background_index)
 
-    true_xy = (tf.sigmoid(true_bboxes[..., 0:2]) + grid_xy) * ratios
+    true_xy = (true_bboxes[..., 0:2] + grid_xy) * ratios
     true_wh = tf.math.exp(true_bboxes[..., 2:4]) * anchors_wh[..., 2:4]
 
     cx = true_xy[..., 0]
@@ -267,7 +267,7 @@ def per_image_supression(logits, image_size, num_classes):
         coords_yx = tf.stack([ymin, xmin, ymax, xmax], axis=1)
 
         scores_to_sort = selected_scores * selected_objs
-        if True:
+        if False:
             selected_indexes = tf.image.non_max_suppression(coords_yx, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
         else:
             selected_indexes = non_max_suppression(coords_yx, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)

@@ -308,7 +308,7 @@ def train():
             exit(-1)
 
         if train_num_images is None:
-            logger.error('If there is no train_num_images (tfrecord dataset), you must provide --117266,')
+            logger.error('If there is no train_num_images (tfrecord dataset), you must provide --train_num_images')
             exit(-1)
         if eval_num_images is None:
             logger.error('If there is no eval_num_images (tfrecord dataset), you must provide --steps_per_eval')
@@ -378,7 +378,7 @@ def train():
             eval_num_good_ious_metric.reset_states()
             eval_num_positive_labels_metric.reset_states()
 
-        ylo = loss.YOLOLoss(anchors_all, output_xy_grids, output_ratios, image_size, reduction=tf.keras.losses.Reduction.NONE)
+        ylo = loss.YOLOLoss(anchors_all, output_xy_grids, output_ratios, image_size, train_num_classes, reduction=tf.keras.losses.Reduction.NONE)
 
         def calculate_metrics(logits, true_values,
                 loss_metric, accuracy_metric, obj_accuracy_metric,
@@ -416,10 +416,8 @@ def train():
             accuracy_metric.update_state(y_true=true_classes, y_pred=pred_classes)
 
 
-            true_xy = (tf.sigmoid(y_true[..., 0:2]) + ylo.grid_xy) * ylo.ratios
+            true_xy = (y_true[..., 0:2] + ylo.grid_xy) * ylo.ratios
             true_wh = tf.math.exp(y_true[..., 2:4]) * ylo.anchors_wh
-
-            pred_box_wh = tf.clip_by_value(pred_box_wh, -1e8, 1e8)
 
             pred_bboxes = tf.concat([pred_box_xy, pred_box_wh], axis=-1)
             true_bboxes = tf.concat([true_xy, true_wh], axis=-1)
