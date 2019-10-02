@@ -8,6 +8,53 @@ import yolo
 
 logger = logging.getLogger('detection')
 
+def generate_anchors():
+        num_scales = 3
+        num_boxes = 3
+
+        np_anchor_boxes, np_anchor_areas, image_size = yolo.create_anchors()
+
+        anchors_reshaped = tf.reshape(np_anchor_boxes, [num_scales, num_boxes, 2])
+        anchors_abs_coords = []
+
+        scaled_size = image_size / yolo.DOWNSAMPLE_RATIO
+        output_xy_grids = []
+        output_ratios = []
+
+        for base_scale in range(num_scales):
+            output_size = int(scaled_size) * tf.math.pow(2, base_scale)
+
+            output_size_float = tf.cast(output_size, tf.float32)
+            ratio = float(image_size) / output_size_float
+
+            anchors_wh_one = anchors_reshaped[num_scales - base_scale - 1, ...]
+            anchors_wh = tf.expand_dims(anchors_wh_one, 0)
+            anchors_wh = tf.tile(anchors_wh, [output_size * output_size, 1, 1])
+            anchors_wh = tf.reshape(anchors_wh, [output_size, output_size, num_boxes, 2]) # [13, 13, 3, 2]
+
+            anchors_xy = create_xy_grid(1, output_size, num_boxes)
+            anchors_xy = tf.squeeze(anchors_xy, 0) # [13, 13, 3, 2]
+            anchors_xy_flat = tf.reshape(anchors_xy, [-1, 2])
+            output_xy_grids.append(anchors_xy_flat)
+
+            anchors_xy_centers = anchors_xy + 0.5 # centers
+            anchors_xy_centers *= ratio
+            ratios = tf.tile([ratio], [tf.shape(anchors_xy_flat)[0]])
+            output_ratios.append(ratios)
+
+            anchors_for_layer = tf.concat([anchors_xy_centers, anchors_wh], axis=-1)
+
+            anchors_flat = tf.reshape(anchors_for_layer, [-1, 4])
+
+            logger.info('base_scale: {}: output_size: {}, anchors_for_layer: {}, anchors_flat: {}'.format(base_scale, output_size, anchors_for_layer.shape, anchors_flat.shape))
+            anchors_abs_coords.append(anchors_flat)
+
+        anchors_all = tf.concat(anchors_abs_coords, axis=0)
+        output_xy_grids = tf.concat(output_xy_grids, axis=0)
+        output_ratios = tf.concat(output_ratios, axis=0)
+
+        return anchors_all, output_xy_grids, output_ratios, image_size
+
 def create_xy_grid(batch_size, output_size, anchors_per_scale):
     y = tf.tile(tf.range(output_size, dtype=tf.int32)[:, tf.newaxis], [1, output_size])
     x = tf.tile(tf.range(output_size, dtype=tf.int32)[tf.newaxis, :], [output_size, 1])
