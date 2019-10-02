@@ -91,7 +91,7 @@ class YOLOLoss:
         pred_box_xy = self.grid_xy + tf.sigmoid(y_pred[..., :2])
         pred_box_xy = pred_box_xy * self.ratios
 
-        pred_wh = tf.clip_by_value(y_pred[..., 2:4], -100, 10)
+        pred_wh = tf.clip_by_value(y_pred[..., 2:4], -10, 10)
         pred_box_wh = tf.math.exp(pred_wh) * self.anchors_wh
 
         # confidence/objectiveness
@@ -134,37 +134,9 @@ class YOLOLoss:
             smooth_true_classes = true_classes * (1.0 - label_smoothing) + 0.5 * label_smoothing
 
         class_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_classes, logits=pred_classes)
-
-        nan_obj = tf.math.is_nan(class_loss)
-        num_nans = tf.math.count_nonzero(nan_obj)
-        if num_nans != 0:
-            tf.print('nans in class_loss1:', num_nans, 'class_loss:', tf.shape(class_loss), 'total nodes:', tf.math.reduce_prod(tf.shape(class_loss)))
-
         class_loss = tf.reduce_sum(class_loss, -1)
         class_loss = tf.expand_dims(class_loss, -1)
-
-        nan_obj = tf.math.is_nan(class_loss)
-        num_nans = tf.math.count_nonzero(nan_obj)
-        if num_nans != 0:
-            tf.print('nans in class_loss2:', num_nans, 'class_loss:', tf.shape(class_loss), 'total nodes:', tf.math.reduce_prod(tf.shape(class_loss)))
-
-        class_loss1 = object_mask * class_loss
-
-        nan_obj = tf.math.is_nan(class_loss)
-        num_nans = tf.math.count_nonzero(nan_obj)
-        if num_nans != 0:
-            tf.print('nans in class_loss3:', num_nans, 'class_loss:', tf.shape(class_loss), 'total nodes:', tf.math.reduce_prod(tf.shape(class_loss)))
-        nan_obj = tf.math.is_nan(class_loss1)
-        num_nans = tf.math.count_nonzero(nan_obj)
-        if num_nans != 0:
-            tf.print('nans in class_loss4:', num_nans, 'class_loss:', tf.shape(class_loss), 'total nodes:', tf.math.reduce_prod(tf.shape(class_loss)))
-
-        nan_obj = tf.math.is_nan(object_mask)
-        num_nans = tf.math.count_nonzero(nan_obj)
-        if num_nans != 0:
-            tf.print('nans in object_mask3:', num_nans, 'object_mask:', tf.shape(object_mask), 'total nodes:', tf.math.reduce_prod(tf.shape(object_mask)))
-
-
+        class_loss = object_mask * class_loss
         class_loss = tf.reduce_sum(class_loss1, [1, 2])
 
         smooth_true_conf = true_conf
