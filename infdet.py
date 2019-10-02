@@ -63,72 +63,46 @@ def tf_read_image(filename, image_size, dtype):
 
     return filename, image
 
-def tf_left_needed_dimensions_from_tfrecord(image_size, num_classes, np_anchor_boxes, filename, image_id, image, true_values):
-    scaled_size = image_size / yolo.DOWNSAMPLE_RATIO
-    output_splits = []
-    offset = 0
-    num_scales = 3
-    num_boxes = 3
-    for base_scale in range(num_scales):
-        output_size = scaled_size * np.math.pow(2, base_scale)
-        output_splits.append(int(output_size * output_size))
+def tf_left_needed_dimensions_from_tfrecord(image_size, anchors_all, output_xy_grids, output_ratios, num_classes, filename, image_id, image, true_values):
+    non_background_index = tf.where(tf.not_equal(true_values[..., 4], 0))
 
-    anchors_reshaped = tf.reshape(np_anchor_boxes, [3, -1])
+    sampled_true_values = tf.gather_nd(true_values, non_background_index)
+
+    true_obj = sampled_true_values[:, 5]
+    true_bboxes = sampled_true_values[:, 0:4]
+    true_labels = sampled_true_values[:, 5:]
+    true_labels = tf.argmax(true_labels, axis=1)
+
+    grid_xy = tf.gather_nd(output_xy_grids, non_background_index)
+    ratios = tf.gather_nd(output_ratios, non_background_index)
+    ratios = tf.expand_dims(ratios, -1)
+    anchors_wh = tf.gather_nd(anchors_all, non_background_index)
+
+    true_xy = (true_bboxes[..., 0:2] + grid_xy) * ratios
+    true_wh = tf.math.exp(true_bboxes[..., 2:4]) * anchors_wh[..., 2:4]
+
+    cx = true_xy[..., 0]
+    cy = true_xy[..., 1]
+    w = true_wh[..., 0]
+    h = true_wh[..., 1]
+
+    x0 = cx - w/2
+    x1 = cx + w/2
+    y0 = cy - h/2
+    y1 = cy + h/2
+
+    x0 /= image_size
+    y0 /= image_size
+    x1 /= image_size
+    y1 /= image_size
+
+    boxes = tf.stack([y0, x0, y1, x1], axis=1)
+    boxes = tf.expand_dims(boxes, 0)
+
+    colors = tf.random.uniform([tf.shape(true_bboxes)[0], 4], minval=0, maxval=1, dtype=tf.dtypes.float32)
 
     image = tf.expand_dims(image, 0)
-
-    true_values = tf.expand_dims(true_values, 0)
-
-    true_values_list = list(tf.split(true_values, output_splits, axis=1))
-    for output_idx, true_values in enumerate(true_values_list):
-        output_size = int(scaled_size) * tf.math.pow(2, output_idx)
-        ratio = float(image_size) / tf.cast(output_size, tf.float32)
-
-        true_values = tf.reshape(true_values, [-1, output_size, output_size, num_boxes, 4 + 1 + num_classes])
-
-        non_background_index = tf.where(tf.not_equal(true_values[..., 4], 0))
-        box_index = non_background_index[:, 3]
-
-        sampled_true_values = tf.gather_nd(true_values, non_background_index)
-
-        true_obj = sampled_true_values[:, 5]
-        true_bboxes = sampled_true_values[:, 0:4]
-        true_labels = sampled_true_values[:, 5:]
-        true_labels = tf.argmax(true_labels, axis=1)
-
-        anchors_wh = anchors_reshaped[output_idx, :]
-
-        anchor_grid = loss._create_mesh_anchor(anchors_wh, tf.shape(true_bboxes)[0], output_size, output_size, 3)
-        anchor_grid = tf.gather_nd(anchor_grid, non_background_index)
-
-        true_xy = true_bboxes[..., 0:2] * ratio
-        true_xy = tf.reshape(true_xy, [-1, 2])
-
-        true_wh = tf.math.exp(true_bboxes[..., 2:4]) * anchor_grid
-        true_wh = tf.reshape(true_wh, [-1, 2])
-
-        cx = true_xy[..., 0]
-        cy = true_xy[..., 1]
-        w = true_wh[..., 0]
-        h = true_wh[..., 1]
-
-        x0 = cx - w/2
-        x1 = cx + w/2
-        y0 = cy - h/2
-        y1 = cy + h/2
-
-        x0 /= image_size
-        y0 /= image_size
-        x1 /= image_size
-        y1 /= image_size
-
-        boxes = tf.stack([y0, x0, y1, x1], axis=1)
-        boxes = tf.expand_dims(boxes, 0)
-
-        colors = tf.random.uniform([tf.shape(true_bboxes)[0], 4], minval=0, maxval=1, dtype=tf.dtypes.float32)
-
-        image = tf.image.draw_bounding_boxes(image,  boxes, colors)
-
+    image = tf.image.draw_bounding_boxes(image,  boxes, colors)
     image = tf.squeeze(image, 0)
     return filename, image
 
@@ -240,19 +214,13 @@ def per_image_supression(logits, image_size, num_classes):
                                         tf.greater(objectness, FLAGS.min_score),
                                         tf.greater(scores, FLAGS.min_score)))
     #non_background_index = tf.where(tf.greater(scores, FLAGS.min_score))
-    #tf.print('non_background_index:', tf.shape(non_background_index), ':', non_background_index)
-    #tf.print('non_background_index:', tf.shape(non_background_index), ':', non_background_index)
+
     non_background_index = tf.squeeze(non_background_index, 1)
-    #tf.print('coords:', tf.shape(coords), 'scores:', tf.shape(scores), 'labels:', tf.shape(labels))
+
     sampled_coords = tf.gather(coords, non_background_index)
     sampled_scores = tf.gather(scores, non_background_index)
     sampled_labels = tf.gather(labels, non_background_index)
     sampled_objs = tf.gather(objectness, non_background_index)
-    #tf.print('min_obj:', tf.reduce_min(sampled_objs), 'min_score:', tf.reduce_min(sampled_scores), 'scores:', tf.shape(sampled_scores))
-
-    #tf.print('labels:', tf.shape(labels), 'scores:', tf.shape(scores), 'coords:', tf.shape(coords))
-    #tf.print('sampled_labels:', tf.shape(sampled_labels), 'sampled_scores:', tf.shape(sampled_scores), 'sampled_coords:', tf.shape(sampled_coords))
-    #tf.print('sampled_labels:', sampled_labels, 'sampled_scores:', sampled_scores, 'sampled_coords:', sampled_coords)
 
     ret_coords, ret_scores, ret_cat_ids, ret_objs = [], [], [], []
     for cat_id in range(0, num_classes):
@@ -299,7 +267,7 @@ def per_image_supression(logits, image_size, num_classes):
         coords_yx = tf.stack([ymin, xmin, ymax, xmax], axis=1)
 
         scores_to_sort = selected_scores * selected_objs
-        if False:
+        if True:
             selected_indexes = tf.image.non_max_suppression(coords_yx, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
         else:
             selected_indexes = non_max_suppression(coords_yx, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
@@ -347,64 +315,22 @@ def per_image_supression(logits, image_size, num_classes):
     return best_coords, best_scores, best_objs, best_cat_ids
 
 @tf.function
-def eval_step_logits(model, images, image_size, num_classes, np_anchor_boxes):
-    logits = model(images, training=False)
+def eval_step_logits(model, images, image_size, num_classes, all_anchors, all_grid_xy, all_ratios):
+    pred_values = model(images, training=False)
 
-    true_values_list = [None, None, None]
+    pred_objs = tf.math.sigmoid(pred_values[..., 4])
 
-    scaled_size = image_size / yolo.DOWNSAMPLE_RATIO
-    num_boxes = 3
+    pred_bboxes = pred_values[..., 0:4]
+    pred_scores_all = tf.math.sigmoid(pred_values[..., 5:])
+    pred_scores = tf.reduce_max(pred_scores_all, axis=-1)
+    pred_labels = tf.argmax(pred_scores_all, axis=-1)
 
-    anchors_reshaped = tf.reshape(np_anchor_boxes, [3, -1])
+    all_ratios = tf.expand_dims(all_ratios, -1)
 
-    pred_bboxes_list = []
-    pred_labels_list = []
-    pred_scores_list = []
-    pred_objs_list = []
+    pred_xy = (tf.sigmoid(pred_bboxes[..., 0:2]) + all_grid_xy) * all_ratios
+    pred_wh = tf.math.exp(pred_bboxes[..., 2:4]) * all_anchors[..., 2:4]
 
-    for output_idx, (true_values, pred_values) in enumerate(zip(true_values_list, logits)):
-        output_size = int(scaled_size) * tf.math.pow(2, output_idx)
-        ratio = float(image_size) / tf.cast(output_size, tf.float32)
-
-        pred_values = tf.reshape(pred_values, [-1, output_size, output_size, num_boxes, 4 + 1 + num_classes])
-
-        obj_conf = tf.math.sigmoid(pred_values[..., 4])
-        tf.print('obj_max:', tf.reduce_max(obj_conf, axis=[1,2,3]))
-
-        pred_bboxes = pred_values[..., 0:4]
-        pred_scores_all = tf.math.sigmoid(pred_values[..., 5:])
-        pred_scores = tf.reduce_max(pred_scores_all, axis=-1)
-        pred_labels = tf.argmax(pred_scores_all, axis=-1)
-
-        pred_labels = tf.reshape(pred_labels, [tf.shape(pred_bboxes)[0], -1])
-        pred_labels_list.append(pred_labels)
-        pred_scores = tf.reshape(pred_scores, [tf.shape(pred_bboxes)[0], -1])
-        pred_scores_list.append(pred_scores)
-        pred_objs = tf.reshape(obj_conf, [tf.shape(pred_bboxes)[0], -1])
-        pred_objs_list.append(pred_objs)
-
-        anchors_wh = anchors_reshaped[output_idx, :]
-        anchors_wh = tf.reshape(anchors_wh, [3, 2])
-        pred_box_wh = tf.math.exp(pred_bboxes[..., 2:4]) * anchors_wh
-
-        grid_offset = loss._create_mesh_xy(tf.shape(pred_bboxes)[0], output_size, output_size, num_boxes)
-        pred_box_xy = grid_offset + tf.sigmoid(pred_bboxes[..., :2])
-        pred_box_xy *= ratio
-
-        pred_bboxes = tf.concat([pred_box_xy, pred_box_wh], axis=-1)
-
-        pred_bboxes = tf.reshape(pred_bboxes, [tf.shape(pred_bboxes)[0], -1, 4])
-        #logger.info('pred_labels: {}, pred_box_xy: {}, pred_box_wh: {}, pred_bboxes: {}'.format(pred_labels.shape, pred_box_xy.shape, pred_box_wh.shape, pred_bboxes.shape))
-        pred_bboxes_list.append(pred_bboxes)
-
-    #tf.print('bboxes:', pred_bboxes_list, ', scores:', pred_scores_list, ', labels:', pred_labels_list)
-
-    pred_bboxes = tf.concat(pred_bboxes_list, axis=1)
-    pred_labels = tf.concat(pred_labels_list, axis=1)
-    pred_scores = tf.concat(pred_scores_list, axis=1)
-    pred_objs = tf.concat(pred_objs_list, axis=1)
-
-    #logger.info('pred_bboxes: {}, pred_labels: {}'.format(pred_bboxes.shape, pred_labels.shape))
+    pred_bboxes = tf.concat([pred_xy, pred_wh], axis=-1)
 
     return tf.map_fn(lambda out: per_image_supression(out, image_size, num_classes),
                      (pred_bboxes, pred_scores, pred_labels, pred_objs),
@@ -413,10 +339,10 @@ def eval_step_logits(model, images, image_size, num_classes, np_anchor_boxes):
                      infer_shape=False,
                      dtype=(tf.float32, tf.float32, tf.float32, tf.int32))
 
-def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, np_anchor_boxes):
+def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_anchors, all_grid_xy, all_ratios):
     num_files = 0
     for filenames, images in dataset:
-        coords_batch, scores_batch, objs_batch, cat_ids_batch = eval_step_logits(model, images, image_size, num_classes, np_anchor_boxes)
+        coords_batch, scores_batch, objs_batch, cat_ids_batch = eval_step_logits(model, images, image_size, num_classes, all_anchors, all_grid_xy, all_ratios)
 
         num_files += len(filenames)
 
@@ -443,7 +369,6 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, np_an
                 bb = [x0, y0, x1, y1]
 
                 cat_id = cat_id.numpy()
-                area = h * w
 
                 logger.info('{}: bbox: {} -> {}, obj: {:.3f}, score: {:.3f}, cat_id: {}'.format(
                     filename,
@@ -474,7 +399,7 @@ def run_inference():
 
     dtype = tf.float32
     model = yolo.create_model(num_classes)
-    np_anchor_boxes, np_anchor_areas, image_size = yolo.create_anchors()
+    all_anchors, all_grid_xy, all_ratios, image_size = anchors_gen.generate_anchors()
 
     checkpoint = tf.train.Checkpoint(model=model)
 
@@ -521,8 +446,8 @@ def run_inference():
                     filenames.append(fn)
 
             ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=2)
-            ds = ds.map(lambda record: unpack_tfrecord(record, np_anchor_boxes, np_anchor_areas, image_size, num_classes, False, False, FLAGS.data_format), num_parallel_calls=16)
-            ds = ds.map(lambda filename, image_id, image, true_values: tf_left_needed_dimensions_from_tfrecord(image_size, num_classes, np_anchor_boxes, filename, image_id, image, true_values), num_parallel_calls=16)
+            ds = ds.map(lambda record: unpack_tfrecord(record, all_anchors, all_grid_xy, all_ratios, image_size, num_classes, False, False, FLAGS.data_format), num_parallel_calls=16)
+            ds = ds.map(lambda filename, image_id, image, true_values: tf_left_needed_dimensions_from_tfrecord(image_size, all_anchors, all_grid_xy, all_ratios, num_classes, filename, image_id, image, true_values), num_parallel_calls=16)
 
     ds = ds.batch(FLAGS.batch_size)
     ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
@@ -530,7 +455,7 @@ def run_inference():
     logger.info('Dataset has been created: num_images: {}, num_classes: {}, model_name: {}'.format(num_images, num_classes, FLAGS.model_name))
 
     os.makedirs(FLAGS.output_dir, exist_ok=True)
-    run_eval(model, ds, num_images, image_size, FLAGS.num_classes, FLAGS.output_dir, np_anchor_boxes)
+    run_eval(model, ds, num_images, image_size, FLAGS.num_classes, FLAGS.output_dir, all_anchors, all_grid_xy, all_ratios)
 
 if __name__ == '__main__':
     np.set_printoptions(formatter={'float': '{:0.4f}'.format, 'int': '{:4d}'.format}, linewidth=250, suppress=True, threshold=np.inf)
