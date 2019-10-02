@@ -62,9 +62,9 @@ class YOLOLoss:
                  grid_xy,
                  ratios,
                  image_size,
-                 obj_scale=5.,
-                 noobj_scale=4e-3,
-                 dist_scale=2.,
+                 obj_scale=1.,
+                 noobj_scale=1e-4,
+                 dist_scale=1.,
                  class_scale=1.,
                  **kwargs):
 
@@ -137,7 +137,7 @@ class YOLOLoss:
         class_loss = tf.reduce_sum(class_loss, -1)
         class_loss = tf.expand_dims(class_loss, -1)
         class_loss = object_mask * class_loss
-        class_loss = tf.reduce_sum(class_loss1, [1, 2])
+        class_loss = tf.reduce_sum(class_loss, [1, 2])
 
         smooth_true_conf = true_conf
         if True:
