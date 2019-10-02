@@ -101,7 +101,7 @@ class YOLOLoss:
         pred_classes = y_pred[..., 5:]
 
 
-        true_xy = (y_true[..., 0:2] + self.grid_xy) * self.ratios
+        true_xy = (tf.sigmoid(y_true[..., 0:2]) + self.grid_xy) * self.ratios
         true_wh = tf.math.exp(y_true[..., 2:4]) * self.anchors_wh
 
         pred_bboxes = tf.concat([pred_box_xy, pred_box_wh], axis=-1)
@@ -122,7 +122,7 @@ class YOLOLoss:
 
         l2_loss = tf.nn.l2_loss(y_pred[..., :2]) + tf.nn.l2_loss(y_pred[..., 2:4]) + tf.nn.l2_loss(y_pred[..., 4]) + tf.nn.l2_loss(y_pred[..., 5:])
 
-        dist_loss_xy = tf.nn.sigmoid_cross_entropy_with_logits(labels=y_true[..., :2], logits=y_pred[..., :2])
+        dist_loss_xy = tf.square(y_true[..., 0:2] - y_pred[..., 0:2])
         dist_loss_wh = tf.square(y_true[..., 2:4] - y_pred[..., 2:4])
         dist_loss = dist_loss_xy + dist_loss_wh
         dist_loss = dist_loss * wh_scale * object_mask

@@ -69,6 +69,10 @@ def create_xy_grid(batch_size, output_size, anchors_per_scale):
     pred_wh = (tf.exp(conv_raw_dwdh) * anchors) * stride
     pred_xywh = tf.concat([pred_xy, pred_wh], axis=-1)
 
+def logit(x):
+    x = tf.clip_by_value(x, 1e-8, 1-1e-8)
+    return tf.math.log(x / (1 - x))
+
 def generate_true_labels_for_anchors(orig_bboxes, orig_labels, anchors_all, output_xy_grids, output_ratios, image_size, num_classes):
     orig_bboxes = tf.convert_to_tensor(orig_bboxes, dtype=tf.float32)
     orig_labels = tf.convert_to_tensor(orig_labels, dtype=tf.int32)
@@ -114,8 +118,10 @@ def generate_true_labels_for_anchors(orig_bboxes, orig_labels, anchors_all, outp
     # this is offset within a cell on the particular scale measured in relative to this scale units
     # this is what sigmoid(pred_xy) should be equal to
     # loss will use tf.nn.sigmoid_cross_entropy_with_logits() to match logits (Tx, Ty) to these true values, otherwise true value should've been logit() (aka reverse sigmoid)
-    x_for_loss = cx / best_ratios - grid_x
-    y_for_loss = cy / best_ratios - grid_y
+    x_for_loss = logit(cx / best_ratios - grid_x)
+    y_for_loss = logit(cy / best_ratios - grid_y)
+    #x_for_loss = cx / best_ratios - grid_x
+    #y_for_loss = cy / best_ratios - grid_y
 
     #tf.print('x_for_loss:', x_for_loss)
     #logger.info('cx: {}, grid_x: {}, x_for_loss: {}, aw: {}, w: {}, w_for_loss: {}'.format(cx.shape, grid_x.shape, x_for_loss.shape, aw.shape, w.shape, w_for_loss.shape))

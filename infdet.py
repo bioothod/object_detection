@@ -78,7 +78,7 @@ def tf_left_needed_dimensions_from_tfrecord(image_size, anchors_all, output_xy_g
     ratios = tf.expand_dims(ratios, -1)
     anchors_wh = tf.gather_nd(anchors_all, non_background_index)
 
-    true_xy = (true_bboxes[..., 0:2] + grid_xy) * ratios
+    true_xy = (tf.sigmoid(true_bboxes[..., 0:2]) + grid_xy) * ratios
     true_wh = tf.math.exp(true_bboxes[..., 2:4]) * anchors_wh[..., 2:4]
 
     cx = true_xy[..., 0]

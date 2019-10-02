@@ -416,7 +416,7 @@ def train():
             accuracy_metric.update_state(y_true=true_classes, y_pred=pred_classes)
 
 
-            true_xy = (y_true[..., 0:2] + ylo.grid_xy) * ylo.ratios
+            true_xy = (tf.sigmoid(y_true[..., 0:2]) + ylo.grid_xy) * ylo.ratios
             true_wh = tf.math.exp(y_true[..., 2:4]) * ylo.anchors_wh
 
             pred_box_wh = tf.clip_by_value(pred_box_wh, -1e8, 1e8)
