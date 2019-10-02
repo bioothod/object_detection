@@ -197,7 +197,9 @@ def draw_bboxes(image_size, train_dataset, train_cat_names, all_anchors, all_gri
 
 def train():
     checkpoint_dir = os.path.join(FLAGS.train_dir, 'checkpoints')
+    good_checkpoint_dir = os.path.join(checkpoint_dir, 'good')
     os.makedirs(checkpoint_dir, exist_ok=True)
+    os.makedirs(good_checkpoint_dir, exist_ok=True)
 
     handler = logging.FileHandler(os.path.join(checkpoint_dir, 'train.log'), 'a')
     handler.setFormatter(__fmt)
@@ -327,7 +329,7 @@ def train():
         opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
         checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model)
-        manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=5)
+        manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=20)
 
         status = checkpoint.restore(manager.latest_checkpoint)
 
@@ -551,6 +553,7 @@ def train():
             return step
 
         min_metric = 0
+        best_saved_path = None
         num_epochs_without_improvement = 0
         initial_learning_rate_multiplier = 0.2
         learning_rate_multiplier = initial_learning_rate_multiplier
@@ -623,10 +626,13 @@ def train():
                 learning_rate.numpy(),
                 metric))
 
+            saved_path = manager.save()
+
             if metric > min_metric:
-                save_path = manager.save()
+                best_saved_path = checkpoint.save(file_prefix='{}/ckpt-{:.4f}'.format(good_checkpoint_dir, metric))
+
                 logger.info("epoch: {}, saved checkpoint: {}, eval metric: {:.4f} -> {:.4f}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}/{:.3f}, good_ios/positive: {}/{}".format(
-                    epoch, save_path, min_metric, metric, 
+                    epoch, best_saved_path, min_metric, metric,
                     eval_accuracy_metric.result(), eval_obj_accuracy_metric.result(), eval_iou_metric.result(), eval_mean_iou_metric.result(),
                     int(eval_num_good_ious_metric.result()), int(eval_num_positive_labels_metric.result())))
                 min_metric = metric
@@ -657,11 +663,11 @@ def train():
                     want_reset = True
                     learning_rate_multiplier = initial_learning_rate_multiplier
 
-                if want_reset:
+                if want_reset and best_saved_path is not None:
                     logger.info('epoch: {}, best metric: {:.5f}, learning rate: {:.2e}, restoring best checkpoint: {}'.format(
-                        epoch, min_metric, learning_rate.numpy(), manager.latest_checkpoint))
+                        epoch, min_metric, learning_rate.numpy(), best_saved_path))
 
-                    checkpoint.restore(manager.latest_checkpoint)
+                    checkpoint.restore(best_saved_path)
 
 
 if __name__ == '__main__':
