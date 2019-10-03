@@ -478,7 +478,7 @@ def train():
             variables = model.trainable_variables
             gradients = tape.gradient(total_loss, variables)
 
-            stddev = 1 / ((1 + epoch_var)**1.55)
+            stddev = 1 / ((1 + epoch_var)**0.55)
 
             clip_gradients = []
             for g, v in zip(gradients, variables):
@@ -651,7 +651,7 @@ def train():
                     if learning_rate_multiplier > 0.1:
                         learning_rate_multiplier /= 2
 
-                    want_reset = True
+                    #want_reset = True
                 elif num_epochs_without_improvement >= FLAGS.epochs_lr_update:
                     new_lr = FLAGS.initial_learning_rate
                     logger.info('epoch: {}, epochs without metric improvement: {}, best metric: {:.5f}, resetting learning rate: {:.2e} -> {:.2e}'.format(
