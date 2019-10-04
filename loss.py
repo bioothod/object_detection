@@ -46,15 +46,6 @@ def box_iou(pred_boxes, valid_true_boxes):
 
     return iou
 
-def gen_ignore_mask(input_tuple, object_mask, true_bboxes):
-    idx, pred_boxes_for_single_image = input_tuple
-    valid_true_boxes = tf.boolean_mask(true_bboxes[idx, ..., 0:4], tf.cast(object_mask[idx, ..., 0], tf.bool))
-    iou = box_iou(pred_boxes_for_single_image, valid_true_boxes)
-    best_iou = tf.reduce_max(iou, axis=-1)
-    ignore_mask_tmp = tf.cast(best_iou < 0.5, tf.float32)
-    #logger.info('pred_boxes_for_single_image: {}, valid_true_boxes: {}, iou: {}, best_iou: {}, ignore_mask_tmp: {}'.format(
-    #    pred_boxes_for_single_image.shape, valid_true_boxes.shape, iou.shape, best_iou.shape, ignore_mask_tmp.shape))
-    return ignore_mask_tmp
 
 class YOLOLoss:
     def __init__(self,
@@ -64,7 +55,7 @@ class YOLOLoss:
                  image_size,
                  num_classes,
                  obj_scale=1.,
-                 noobj_scale=1e-4,
+                 noobj_scale=1.,
                  dist_scale=1.,
                  class_scale=1.,
                  **kwargs):
@@ -85,6 +76,52 @@ class YOLOLoss:
         self.ratios = tf.expand_dims(ratios, -1) # [B, N, 1]
         self.anchors_wh = tf.expand_dims(anchors[..., :2], 0)
 
+    def gen_ignore_mask(self, input_tuple, object_mask, true_bboxes):
+        idx, pred_boxes_for_single_image = input_tuple
+        valid_true_boxes = tf.boolean_mask(true_bboxes[idx, ..., 0:4], tf.cast(object_mask[idx, ..., 0], tf.bool))
+        iou = box_iou(pred_boxes_for_single_image, valid_true_boxes)
+        best_iou = tf.reduce_max(iou, axis=-1)
+        ignore_mask_tmp = tf.cast(best_iou < 0.5, tf.float32)
+        #logger.info('pred_boxes_for_single_image: {}, valid_true_boxes: {}, iou: {}, best_iou: {}, ignore_mask_tmp: {}'.format(
+        #    pred_boxes_for_single_image.shape, valid_true_boxes.shape, iou.shape, best_iou.shape, ignore_mask_tmp.shape))
+        return ignore_mask_tmp
+
+    def focal_loss(self, y_true, y_pred, alpha=1, gamma=2):
+        focal_loss = alpha * tf.pow(tf.abs(y_true - y_pred), gamma)
+        return focal_loss
+
+    def bbox_giou(self, boxes1, boxes2):
+
+        boxes1 = tf.concat([boxes1[..., :2] - boxes1[..., 2:] * 0.5,
+                            boxes1[..., :2] + boxes1[..., 2:] * 0.5], axis=-1)
+        boxes2 = tf.concat([boxes2[..., :2] - boxes2[..., 2:] * 0.5,
+                            boxes2[..., :2] + boxes2[..., 2:] * 0.5], axis=-1)
+
+        boxes1 = tf.concat([tf.minimum(boxes1[..., :2], boxes1[..., 2:]),
+                            tf.maximum(boxes1[..., :2], boxes1[..., 2:])], axis=-1)
+        boxes2 = tf.concat([tf.minimum(boxes2[..., :2], boxes2[..., 2:]),
+                            tf.maximum(boxes2[..., :2], boxes2[..., 2:])], axis=-1)
+
+        boxes1_area = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
+        boxes2_area = (boxes2[..., 2] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 1])
+
+        left_up = tf.maximum(boxes1[..., :2], boxes2[..., :2])
+        right_down = tf.minimum(boxes1[..., 2:], boxes2[..., 2:])
+
+        inter_section = tf.maximum(right_down - left_up, 0.0)
+        inter_area = inter_section[..., 0] * inter_section[..., 1]
+        union_area = boxes1_area + boxes2_area - inter_area
+        iou = inter_area / union_area
+
+        enclose_left_up = tf.minimum(boxes1[..., :2], boxes2[..., :2])
+        enclose_right_down = tf.maximum(boxes1[..., 2:], boxes2[..., 2:])
+        enclose = tf.maximum(enclose_right_down - enclose_left_up, 0.0)
+        enclose_area = enclose[..., 0] * enclose[..., 1]
+        giou = iou - 1.0 * (enclose_area - union_area) / enclose_area
+
+        return giou
+
+
     def call(self, y_true, y_pred):
         object_mask = tf.expand_dims(y_true[..., 4], -1)
         true_conf = object_mask
@@ -98,6 +135,7 @@ class YOLOLoss:
 
         # confidence/objectiveness
         pred_box_conf = tf.expand_dims(y_pred[..., 4], -1)
+        pred_box_conf_prob = tf.sigmoid(pred_box_conf)
 
         true_classes = y_true[..., 5:]
         pred_classes = y_pred[..., 5:]
@@ -109,7 +147,37 @@ class YOLOLoss:
         pred_bboxes = tf.concat([pred_box_xy, pred_box_wh], axis=-1)
         true_bboxes = tf.concat([true_xy, true_wh], axis=-1)
 
-        ignore_mask = tf.map_fn(lambda t: gen_ignore_mask(t, object_mask, true_bboxes),
+
+
+        wh_scale = true_wh / self.image_size
+        # the smaller the box, the bigger the scale
+        wh_scale = tf.expand_dims(2 - wh_scale[..., 0] * wh_scale[..., 1], axis=-1)
+
+        giou = tf.expand_dims(self.bbox_giou(pred_bboxes, true_bboxes), axis=-1)
+        dist_loss = 1 - giou
+        dist_loss = dist_loss * wh_scale * object_mask
+        dist_loss = tf.reduce_sum(dist_loss, [1, 2])
+
+
+        smooth_true_classes = true_classes
+        if True:
+            delta = 0.01
+            smooth_true_classes = (1 - delta) * true_classes + delta * 1. / self.num_classes
+        class_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_classes, logits=pred_classes)
+        class_loss = tf.reduce_sum(class_loss, -1)
+        class_loss = tf.expand_dims(class_loss, -1)
+
+        class_loss = object_mask * class_loss
+        class_loss = tf.reduce_sum(class_loss, [1, 2])
+
+        smooth_true_conf = true_conf
+        if True:
+            delta = 0.01
+            smooth_true_conf = true_conf * (1.0 - delta) + delta / self.num_classes
+
+
+
+        ignore_mask = tf.map_fn(lambda t: self.gen_ignore_mask(t, object_mask, true_bboxes),
                             (tf.range(tf.shape(pred_bboxes)[0]), pred_bboxes),
                             parallel_iterations=32,
                             back_prop=True,
@@ -118,41 +186,17 @@ class YOLOLoss:
         ignore_mask = tf.expand_dims(ignore_mask, -1)
 
 
-        wh_scale = true_wh / self.image_size
-        # the smaller the box, the bigger the scale
-        wh_scale = tf.expand_dims(2 - wh_scale[..., 0] * wh_scale[..., 1], axis=-1)
-
-        l2_loss = tf.nn.l2_loss(y_pred[..., :2]) + tf.nn.l2_loss(y_pred[..., 2:4]) + tf.nn.l2_loss(y_pred[..., 4]) + tf.nn.l2_loss(y_pred[..., 5:])
-
-        dist_loss_xy = tf.square(y_true[..., 0:2] - y_pred[..., 0:2])
-        dist_loss_wh = tf.square(y_true[..., 2:4] - y_pred[..., 2:4])
-        dist_loss = dist_loss_xy + dist_loss_wh
-        dist_loss = dist_loss * wh_scale * object_mask
-        dist_loss = tf.reduce_sum(dist_loss, [1, 2])
-
-        smooth_true_classes = true_classes
-        if True:
-            delta = 0.01
-            smooth_true_classes = (1 - delta) * true_classes + delta * 1. / self.num_classes
-
-        class_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_classes, logits=pred_classes)
-        class_loss = tf.reduce_sum(class_loss, -1)
-        class_loss = tf.expand_dims(class_loss, -1)
-        class_loss = object_mask * class_loss
-        class_loss = tf.reduce_sum(class_loss, [1, 2])
-
-        smooth_true_conf = true_conf
-        if True:
-            label_smoothing = 0.1
-            smooth_true_conf = true_conf * (1.0 - label_smoothing) + 0.5 * label_smoothing
         conf_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_conf, logits=pred_box_conf)
 
+        focal_conf_loss = self.focal_loss(y_true=true_conf, y_pred=pred_box_conf_prob)
+        conf_loss *= focal_conf_loss
 
         conf_loss_pos = object_mask * conf_loss
         conf_loss_pos = tf.reduce_sum(conf_loss_pos, [1, 2])
 
         conf_loss_neg = (1 - object_mask) * conf_loss * ignore_mask
         conf_loss_neg = tf.reduce_sum(conf_loss_neg, [1, 2])
+
 
         total_loss = dist_loss * self.dist_scale, class_loss * self.class_scale, conf_loss_pos * self.obj_scale, conf_loss_neg * self.noobj_scale
         return total_loss
