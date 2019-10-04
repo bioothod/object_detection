@@ -339,8 +339,7 @@ def train():
             logger.info("Initializing from scratch, no latest checkpoint")
 
             if FLAGS.base_checkpoint:
-                base_checkpoint = tf.train.Checkpoint(model=model.base_model)
-                status = base_checkpoint.restore(FLAGS.base_checkpoint)
+                status = checkpoint.restore(FLAGS.base_checkpoint)
                 status.expect_partial()
 
                 logger.info("Restored base model from external checkpoint {}".format(FLAGS.base_checkpoint))
