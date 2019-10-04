@@ -211,9 +211,11 @@ def per_image_supression(logits, image_size, num_classes):
     coords, scores, labels, objectness = logits
 
     non_background_index = tf.where(tf.logical_and(
-                                        tf.greater(objectness, FLAGS.min_score),
+                                        tf.greater(objectness, 0.3),
                                         tf.greater(scores, FLAGS.min_score)))
     #non_background_index = tf.where(tf.greater(scores, FLAGS.min_score))
+    #non_background_index = tf.where(tf.greater(scores * objectness, FLAGS.min_score))
+    #non_background_index = tf.where(tf.greater(scores * objectness, 0.3))
 
     non_background_index = tf.squeeze(non_background_index, 1)
 
@@ -266,7 +268,8 @@ def per_image_supression(logits, image_size, num_classes):
 
         coords_yx = tf.stack([ymin, xmin, ymax, xmax], axis=1)
 
-        scores_to_sort = selected_scores * selected_objs
+        #scores_to_sort = selected_scores * selected_objs
+        scores_to_sort = selected_objs
         if False:
             selected_indexes = tf.image.non_max_suppression(coords_yx, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
         else:
@@ -292,7 +295,8 @@ def per_image_supression(logits, image_size, num_classes):
 
     #logger.info('ret_coords: {}, ret_scores: {}, ret_cat_ids: {}'.format(ret_coords, ret_scores, ret_cat_ids))
 
-    scores_to_sort = ret_scores * ret_objs
+    #scores_to_sort = ret_scores * ret_objs
+    scores_to_sort = ret_objs
     _, best_index = tf.math.top_k(scores_to_sort, tf.minimum(FLAGS.max_ret, tf.shape(ret_scores)[0]), sorted=True)
 
     best_scores = tf.gather(ret_scores, best_index)
