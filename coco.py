@@ -103,7 +103,11 @@ class COCO:
                     category_name = self.cats[category_id]['name']
 
                     img = self.imgs[image_id]
-                    filename = os.path.join(self.data_dir, img['file_name'])
+                    img_fn = img['file_name']
+                    if os.path.isabs(img_fn):
+                        filename = img_fn
+                    else:
+                        filename = os.path.join(self.data_dir, img_fn)
 
                     segm_mask = self.ann2mask(img, ann)
                     segm_mask_present = segm_mask is not None
@@ -136,7 +140,6 @@ class COCO:
 
             bbox = ann['bbox']
             category_id = ann['category_id']
-            segm = ann['segmentation']
 
             anns.append((bbox, category_id))
 
@@ -290,6 +293,7 @@ class COCO_Iterable:
 
         filename, image_id, anns = self.image_tuples[i]
 
+        orig_image = None
         orig_image = cv2.imread(filename, cv2.IMREAD_COLOR)
         if orig_image is None:
             self.logger.error('filename: {}, image is none'.format(filename))
@@ -303,6 +307,9 @@ class COCO_Iterable:
         for bb, cat_id in anns:
             orig_bboxes.append(bb)
             orig_cat_ids.append(cat_id)
+
+            if bb[2] > orig_image.shape[1] or bb[3] > orig_image.shape[0]:
+                self.logger.error('{}: incorrect annotation: image_shape: {}, bb: {}'.format(filename, orig_image.shape, bb))
 
         if len(orig_bboxes) == 0:
             raise ProcessingError('{}: no orig bboxes'.format(filename))
