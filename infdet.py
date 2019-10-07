@@ -14,6 +14,7 @@ import image as image_draw
 import loss
 import map_iter
 import preprocess
+import preprocess_ssd
 import yolo
 
 logger = logging.getLogger('detection')
@@ -39,6 +40,7 @@ parser.add_argument('--checkpoint', type=str, help='Load model weights from this
 parser.add_argument('--checkpoint_dir', type=str, help='Load model weights from the latest checkpoint in this directory')
 parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='Model name')
 parser.add_argument('--data_format', type=str, default='channels_last', choices=['channels_first', 'channels_last'], help='Data format: [channels_first, channels_last]')
+parser.add_argument('--orig_images', action='store_true', help='Whether to perform SSD preprocessing (orig_images training)')
 parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
 parser.add_argument('--dataset_type', type=str, choices=['files', 'tfrecords'], default='files', help='Dataset type')
 parser.add_argument('filenames', type=str, nargs='*', help='Numeric label : file path')
@@ -56,10 +58,14 @@ def tf_read_image(filename, image_size, dtype):
     image = tf.image.pad_to_bounding_box(image, tf.cast((mx - orig_image_height) / 2, tf.int32), tf.cast((mx - orig_image_width) / 2, tf.int32), mx_int, mx_int)
 
     image = tf.cast(image, dtype)
-    image -= 128.
-    image /= 128.
 
-    image = tf.image.resize_with_pad(image, image_size, image_size)
+    if FLAGS.orig_images:
+        image = preprocess_ssd.preprocess_for_eval(image, [image_size, image_size], data_format=data_format)
+    else:
+        image -= 128.
+        image /= 128.
+
+        image = tf.image.resize_with_pad(image, image_size, image_size)
 
     return filename, image
 
@@ -383,7 +389,11 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_a
             r, g, b = tf.split(image, 3, axis=-1)
             image = tf.concat([b, g, r], axis=-1)
 
-            image = image.numpy() * 128 + 128
+            if FLAGS.orig_images:
+                image = preprocess_ssd.unwhiten_image(image)
+                image = image.numpy()
+            else:
+                image = image.numpy() * 128 + 128
             image = image.astype(np.uint8)
 
             cat_names = {}
@@ -450,7 +460,7 @@ def run_inference():
                     filenames.append(fn)
 
             ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=2)
-            ds = ds.map(lambda record: unpack_tfrecord(record, all_anchors, all_grid_xy, all_ratios, image_size, num_classes, False, False, FLAGS.data_format), num_parallel_calls=16)
+            ds = ds.map(lambda record: unpack_tfrecord(record, all_anchors, all_grid_xy, all_ratios, image_size, num_classes, False, FLAGS.orig_images, FLAGS.data_format), num_parallel_calls=16)
             ds = ds.map(lambda filename, image_id, image, true_values: tf_left_needed_dimensions_from_tfrecord(image_size, all_anchors, all_grid_xy, all_ratios, num_classes, filename, image_id, image, true_values), num_parallel_calls=16)
 
     ds = ds.batch(FLAGS.batch_size)
