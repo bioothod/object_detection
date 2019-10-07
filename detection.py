@@ -555,31 +555,11 @@ def train():
         initial_learning_rate_multiplier = 0.2
         learning_rate_multiplier = initial_learning_rate_multiplier
 
-        if False:
-            with writer.as_default():
-                train_steps = run_epoch('train', train_dataset, distributed_train_step, 1)
-                from tensorflow.python.keras import backend as K
-                from tensorflow.python.ops import summary_ops_v2
-                from tensorflow.python.eager import context
-
-                with context.eager_mode():
-                    with summary_ops_v2.always_record_summaries():
-                        if not model.run_eagerly:
-                            summary_ops_v2.graph(K.get_graph(), step=0)
-
-                        summary_writable = (
-                                model._is_graph_network or  # pylint: disable=protected-access
-                                model.__class__.__name__ == 'Sequential')  # pylint: disable=protected-access
-                        if summary_writable:
-                            summary_ops_v2.keras_model('keras', model, step=0)
-
-                exit(0)
-
         def validation_metric():
             eval_acc = eval_accuracy_metric.result()
             eval_obj_acc = eval_obj_accuracy_metric.result()
             eval_iou = eval_iou_metric.result()
-            metric = eval_acc * eval_iou * eval_obj_acc
+            metric = eval_acc + eval_iou + eval_obj_acc*2
 
             return metric
 
