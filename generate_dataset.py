@@ -18,7 +18,6 @@ __handler.setFormatter(__fmt)
 logger.addHandler(__handler)
 
 import coco
-import efficientnet
 import image as image_draw
 import tfrecord_writer
 
@@ -29,7 +28,6 @@ parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel 
 parser.add_argument('--num_images_per_tfrecord', type=int, default=10000, help='Number of images in single tfsecord')
 parser.add_argument('--num_images', type=int, default=10000000, help='Total number of images to generate')
 parser.add_argument('--num_classes', type=int, required=True, help='Number of classes in the dataset')
-parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='Model name')
 parser.add_argument('--output_dir', type=str, required=True, help='Directory to save tfrecords')
 parser.add_argument('--logfile', type=str, help='Logfile')
 parser.add_argument('--original_images', action='store_true', help='Whether to store original images or augmented')
@@ -48,7 +46,9 @@ def do_work(worker_id, num_images, image_size):
     if not FLAGS.original_images:
         coco.complete_initialization(base, image_size, [], [], FLAGS.is_training)
 
-    num_images = len(base)
+    if not FLAGS.is_training:
+        num_images = len(base)
+
     num_classes = base.num_classes()
     cat_names = base.cat_names()
 
@@ -127,14 +127,14 @@ def main():
 
     os.makedirs(FLAGS.output_dir, exist_ok=True)
 
-    image_size = efficientnet.efficientnet_params(FLAGS.model_name)[2]
-    logger.info('base_model: {}, image_size: {}'.format(FLAGS.model_name, image_size))
+    image_size = 416
+    logger.info('image_size: {}'.format(image_size))
 
     mp.set_start_method('spawn')
 
     processes = []
     for i in range(FLAGS.num_cpus):
-        p = mp.Process(target=do_work, args=(i, FLAGS.num_images / FLAGS.num_cpus, image_size))
+        p = mp.Process(target=do_work, args=(i, int(FLAGS.num_images / FLAGS.num_cpus), image_size))
         p.start()
         processes.append(p)
 
