@@ -25,6 +25,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--coco_annotations', type=str, required=True, help='Path to MS COCO dataset: annotations json file')
 parser.add_argument('--coco_data_dir', type=str, required=True, help='Path to MS COCO dataset: image directory')
 parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel preprocessing jobs')
+parser.add_argument('--image_size', type=int, default=416, help='Image size')
 parser.add_argument('--num_images_per_tfrecord', type=int, default=10000, help='Number of images in single tfsecord')
 parser.add_argument('--num_images', type=int, default=10000000, help='Total number of images to generate')
 parser.add_argument('--num_classes', type=int, required=True, help='Number of classes in the dataset')
@@ -127,8 +128,7 @@ def main():
 
     os.makedirs(FLAGS.output_dir, exist_ok=True)
 
-    image_size = 416
-    logger.info('image_size: {}'.format(image_size))
+    logger.info('image_size: {}'.format(FLAGS.image_size))
 
     mp.set_start_method('spawn')
 
@@ -138,7 +138,7 @@ def main():
         if FLAGS.is_training:
             num = int(FLAGS.num_images / FLAGS.num_cpus)
 
-        p = mp.Process(target=do_work, args=(i, FLAGS.num_cpus, num, image_size))
+        p = mp.Process(target=do_work, args=(i, FLAGS.num_cpus, num, FLAGS.image_size))
         p.start()
         processes.append(p)
 
