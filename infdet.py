@@ -1,4 +1,5 @@
 import argparse
+import cv2
 import logging
 import os
 import sys
@@ -33,6 +34,7 @@ parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel 
 parser.add_argument('--num_classes', type=int, required=True, help='Number of the output classes in the model')
 parser.add_argument('--max_ret', type=int, default=100, help='Maximum number of returned boxes')
 parser.add_argument('--min_score', type=float, default=0.7, help='Minimal class probability')
+parser.add_argument('--min_obj_score', type=float, default=0.3, help='Minimal class probability')
 parser.add_argument('--min_size', type=float, default=10, help='Minimal size of the bounding box')
 parser.add_argument('--iou_threshold', type=float, default=0.45, help='Minimal IoU threshold for non-maximum suppression')
 parser.add_argument('--output_dir', type=str, required=True, help='Path to directory, where images will be stored')
@@ -41,6 +43,7 @@ parser.add_argument('--checkpoint_dir', type=str, help='Load model weights from 
 parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='Model name')
 parser.add_argument('--data_format', type=str, default='channels_last', choices=['channels_first', 'channels_last'], help='Data format: [channels_first, channels_last]')
 parser.add_argument('--orig_images', action='store_true', help='Whether to perform SSD preprocessing (orig_images training)')
+parser.add_argument('--do_not_step_labels', action='store_true', help='Whether to reduce labels by 1, i.e. when 0 is background class')
 parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
 parser.add_argument('--dataset_type', type=str, choices=['files', 'tfrecords'], default='files', help='Dataset type')
 parser.add_argument('filenames', type=str, nargs='*', help='Numeric label : file path')
@@ -217,7 +220,7 @@ def per_image_supression(logits, image_size, num_classes):
     coords, scores, labels, objectness = logits
 
     non_background_index = tf.where(tf.logical_and(
-                                        tf.greater(objectness, 0.3),
+                                        tf.greater(objectness, FLAGS.min_obj_score),
                                         tf.greater(scores, FLAGS.min_score)))
     #non_background_index = tf.where(tf.greater(scores, FLAGS.min_score))
     #non_background_index = tf.where(tf.greater(scores * objectness, FLAGS.min_score))
@@ -386,15 +389,14 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_a
 
                 anns.append((bb, cat_id))
 
-            r, g, b = tf.split(image, 3, axis=-1)
-            image = tf.concat([b, g, r], axis=-1)
-
             if FLAGS.orig_images:
-                image = preprocess_ssd.unwhiten_image(image)
+                image = preprocess_ssd.denormalize_image(image)
                 image = image.numpy()
             else:
                 image = image.numpy() * 128 + 128
+
             image = image.astype(np.uint8)
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
             cat_names = {}
             dst_filename = os.path.basename(filename)
@@ -413,7 +415,7 @@ def run_inference():
 
     dtype = tf.float32
     model = yolo.create_model(num_classes)
-    all_anchors, all_grid_xy, all_ratios, image_size = anchors_gen.generate_anchors()
+    all_anchors, all_grid_xy, all_ratios, image_size = anchors_gen.generate_anchors(-1)
 
     checkpoint = tf.train.Checkpoint(model=model)
 
@@ -460,8 +462,13 @@ def run_inference():
                     filenames.append(fn)
 
             ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=2)
-            ds = ds.map(lambda record: unpack_tfrecord(record, all_anchors, all_grid_xy, all_ratios, image_size, num_classes, False, FLAGS.orig_images, FLAGS.data_format), num_parallel_calls=16)
-            ds = ds.map(lambda filename, image_id, image, true_values: tf_left_needed_dimensions_from_tfrecord(image_size, all_anchors, all_grid_xy, all_ratios, num_classes, filename, image_id, image, true_values), num_parallel_calls=16)
+            ds = ds.map(lambda record: unpack_tfrecord(record, all_anchors, all_grid_xy, all_ratios,
+                        image_size, num_classes, False,
+                        FLAGS.orig_images, FLAGS.data_format, FLAGS.do_not_step_labels),
+                num_parallel_calls=16)
+            ds = ds.map(lambda filename, image_id, image, true_values: tf_left_needed_dimensions_from_tfrecord(image_size, all_anchors, all_grid_xy, all_ratios, num_classes,
+                        filename, image_id, image, true_values),
+                num_parallel_calls=16)
 
     ds = ds.batch(FLAGS.batch_size)
     ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
