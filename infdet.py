@@ -44,6 +44,7 @@ parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='M
 parser.add_argument('--data_format', type=str, default='channels_last', choices=['channels_first', 'channels_last'], help='Data format: [channels_first, channels_last]')
 parser.add_argument('--orig_images', action='store_true', help='Whether to perform SSD preprocessing (orig_images training)')
 parser.add_argument('--do_not_step_labels', action='store_true', help='Whether to reduce labels by 1, i.e. when 0 is background class')
+parser.add_argument('--no_channel_swap', action='store_true', help='When set, do not perform rgb-bgr conversion, needed, when using ')
 parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
 parser.add_argument('--dataset_type', type=str, choices=['files', 'tfrecords'], default='files', help='Dataset type')
 parser.add_argument('filenames', type=str, nargs='*', help='Numeric label : file path')
@@ -63,7 +64,7 @@ def tf_read_image(filename, image_size, dtype):
     image = tf.cast(image, dtype)
 
     if FLAGS.orig_images:
-        image = preprocess_ssd.preprocess_for_eval(image, [image_size, image_size], data_format=data_format)
+        image = preprocess_ssd.preprocess_for_eval(image, [image_size, image_size], data_format=FLAGS.data_format)
     else:
         image -= 128.
         image /= 128.
@@ -396,7 +397,9 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_a
                 image = image.numpy() * 128 + 128
 
             image = image.astype(np.uint8)
-            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
+            if not FLAGS.no_channel_swap:
+                image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
             cat_names = {}
             dst_filename = os.path.basename(filename)
@@ -404,7 +407,6 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_a
             image_draw.draw_im(image, anns, dst_filename, cat_names)
 
         return
-            #for cat_id in range(num_classes)
 
 def run_inference():
     num_classes = FLAGS.num_classes
