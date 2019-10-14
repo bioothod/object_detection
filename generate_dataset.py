@@ -30,7 +30,7 @@ parser.add_argument('--num_images', type=int, default=10000000, help='Total numb
 parser.add_argument('--num_classes', type=int, required=True, help='Number of classes in the dataset')
 parser.add_argument('--output_dir', type=str, required=True, help='Directory to save tfrecords')
 parser.add_argument('--logfile', type=str, help='Logfile')
-parser.add_argument('--original_images', action='store_true', help='Whether to store original images or augmented')
+parser.add_argument('--orig_images', action='store_true', help='Whether to store original images or augmented')
 parser.add_argument('--is_training', action='store_true', help='Training/evaluation augmentation')
 FLAGS = parser.parse_args()
 
@@ -40,10 +40,10 @@ def _int64_feature(value):
 def _bytes_feature(value):
     return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
 
-def do_work(worker_id, num_images, image_size):
+def do_work(worker_id, step, num_images, image_size):
     base = coco.create_coco_iterable(FLAGS.coco_annotations, FLAGS.coco_data_dir, logger)
 
-    if not FLAGS.original_images:
+    if not FLAGS.orig_images:
         coco.complete_initialization(base, image_size, [], [], FLAGS.is_training)
 
     if not FLAGS.is_training:
@@ -61,11 +61,11 @@ def do_work(worker_id, num_images, image_size):
     bboxes = 0
 
     start_time = time.time()
-    for idx in range(num_images):
+    for idx in range(worker_id, num_images, step):
         idx = idx % num_images
 
         try:
-            if not FLAGS.original_images:
+            if not FLAGS.orig_images:
                 filename, image_id, image, true_bboxes, true_labels = base.process_image(idx, base.train_augmentation, return_orig_format=True)
             else:
                 filename, image_id, image, true_bboxes, true_labels = base.process_image(idx, None, return_orig_format=True)
@@ -75,7 +75,7 @@ def do_work(worker_id, num_images, image_size):
         processed += 1
         bboxes += np.count_nonzero(true_labels)
 
-        if not FLAGS.original_images:
+        if not FLAGS.orig_images:
             image = image * 128 + 128
 
         image = image.astype(np.uint8)
@@ -134,7 +134,11 @@ def main():
 
     processes = []
     for i in range(FLAGS.num_cpus):
-        p = mp.Process(target=do_work, args=(i, int(FLAGS.num_images / FLAGS.num_cpus), image_size))
+        num = FLAGS.num_images
+        if FLAGS.is_training:
+            num = int(FLAGS.num_images / FLAGS.num_cpus)
+
+        p = mp.Process(target=do_work, args=(i, FLAGS.num_cpus, num, image_size))
         p.start()
         processes.append(p)
 
