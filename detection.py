@@ -21,10 +21,10 @@ import preprocess_ssd
 import yolo
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--train_coco_annotations', type=str, required=True, help='Path to MS COCO dataset: annotations json file')
-parser.add_argument('--train_coco_data_dir', type=str, required=True, help='Path to MS COCO dataset: image directory')
-parser.add_argument('--eval_coco_annotations', type=str, required=True, help='Path to MS COCO dataset: annotations json file')
-parser.add_argument('--eval_coco_data_dir', type=str, required=True, help='Path to MS COCO dataset: image directory')
+parser.add_argument('--train_coco_annotations', type=str, help='Path to MS COCO dataset: annotations json file')
+parser.add_argument('--train_coco_data_dir', type=str, help='Path to MS COCO dataset: image directory')
+parser.add_argument('--eval_coco_annotations', type=str, help='Path to MS COCO dataset: annotations json file')
+parser.add_argument('--eval_coco_data_dir', type=str, help='Path to MS COCO dataset: image directory')
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch.')
 parser.add_argument('--num_epochs', type=int, default=1000, help='Number of epochs to run.')
 parser.add_argument('--epoch', type=int, default=0, help='Initial epoch\'s number')
@@ -46,11 +46,13 @@ parser.add_argument('--dataset_type', type=str, choices=['files', 'tfrecords'], 
 parser.add_argument('--train_tfrecord_dir', type=str, help='Directory containing training TFRecords')
 parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
 parser.add_argument('--num_classes', type=int, help='Number of classes in the dataset')
+parser.add_argument('--image_size', type=int, default=0, help='Use this image size, if 0 - use default')
 parser.add_argument('--orig_images', action='store_true', help='Whether tfrecords contain original unscaled images')
+parser.add_argument('--do_not_step_labels', action='store_true', help='Whether to reduce labels by 1, i.e. when 0 is background class')
 parser.add_argument('--train_num_images', type=int, help='Number of images in train epoch')
 parser.add_argument('--eval_num_images', type=int, help='Number of images in eval epoch')
 
-def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_ratios, image_size, num_classes, is_training, orig_images, data_format):
+def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_ratios, image_size, num_classes, is_training, orig_images, data_format, do_not_step_labels):
     features = tf.io.parse_single_example(serialized_example,
             features={
                 'image_id': tf.io.FixedLenFeature([], tf.int64),
@@ -64,8 +66,9 @@ def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_rat
     orig_bboxes = tf.reshape(orig_bboxes, [-1, 4])
 
     orig_labels = tf.io.decode_raw(features['true_labels'], tf.int32)
-    # labels should start from zero, originally zero was background for SSD training
-    orig_labels -= 1
+    if not do_not_step_labels:
+        # labels should start from zero, originally zero was background for SSD training
+        orig_labels -= 1
 
     filename = features['filename']
     image_id = features['image_id']
@@ -103,8 +106,8 @@ def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_rat
         if is_training:
             image, new_labels, new_bboxes = preprocess_ssd.preprocess_for_train(image, orig_labels, coords_yx,
                     [image_size, image_size], data_format=data_format)
-            yminf, xminf, ymaxf, xmaxf = tf.split(new_bboxes, num_or_size_splits=4, axis=1)
 
+            yminf, xminf, ymaxf, xmaxf = tf.split(new_bboxes, num_or_size_splits=4, axis=1)
             orig_labels = new_labels
         else:
             image = preprocess_ssd.preprocess_for_eval(image, [image_size, image_size], data_format=data_format)
@@ -225,15 +228,8 @@ def train():
         global_step = tf.Variable(1, dtype=tf.int64, name='global_step', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
         learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
 
-        train_base = coco.create_coco_iterable(FLAGS.train_coco_annotations, FLAGS.train_coco_data_dir, logger)
-        eval_base = coco.create_coco_iterable(FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, logger)
-
-        num_classes = train_base.num_classes()
-        if num_classes != FLAGS.num_classes:
-            num_classes = FLAGS.num_classes
-
-        model = yolo.create_model(num_classes)
-        anchors_all, output_xy_grids, output_ratios, image_size = anchors_gen.generate_anchors()
+        model = yolo.create_model(FLAGS.num_classes)
+        anchors_all, output_xy_grids, output_ratios, image_size = anchors_gen.generate_anchors(FLAGS.image_size)
 
         def create_dataset(name, base, is_training):
             coco.complete_initialization(base, image_size, np_anchor_boxes, np_anchor_areas, is_training)
@@ -272,8 +268,10 @@ def train():
                 if os.path.isfile(fn):
                     filenames.append(fn)
 
-            ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=2)
-            ds = ds.map(lambda record: unpack_tfrecord(record, anchors_all, output_xy_grids, output_ratios, image_size, num_classes, is_training, FLAGS.orig_images, FLAGS.data_format),
+            ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
+            ds = ds.map(lambda record: unpack_tfrecord(record, anchors_all, output_xy_grids, output_ratios,
+                            image_size, num_classes, is_training,
+                            FLAGS.orig_images, FLAGS.data_format, FLAGS.do_not_step_labels),
                     num_parallel_calls=FLAGS.num_cpus)
             if is_training:
                 ds = ds.shuffle(200)
@@ -287,6 +285,9 @@ def train():
             return ds
 
         if FLAGS.dataset_type == 'files':
+            train_base = coco.create_coco_iterable(FLAGS.train_coco_annotations, FLAGS.train_coco_data_dir, logger)
+            eval_base = coco.create_coco_iterable(FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, logger)
+
             train_dataset, train_num_images, train_num_classes, train_cat_names = create_dataset('train', train_base, is_training=True)
             eval_dataset, eval_num_images, eval_num_classes, eval_cat_names = create_dataset('eval', eval_base, is_training=False)
         elif FLAGS.dataset_type == 'tfrecords':
