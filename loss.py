@@ -161,8 +161,8 @@ class YOLOLoss:
 
         smooth_true_classes = true_classes
         if True:
-            delta = 0.01
-            smooth_true_classes = (1 - delta) * true_classes + delta * 1. / self.num_classes
+            delta = 0.04
+            smooth_true_classes = (1 - delta) * true_classes + delta / self.num_classes
         class_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_classes, logits=pred_classes)
         class_loss = tf.reduce_sum(class_loss, -1)
         class_loss = tf.expand_dims(class_loss, -1)
@@ -172,8 +172,8 @@ class YOLOLoss:
 
         smooth_true_conf = true_conf
         if True:
-            delta = 0.01
-            smooth_true_conf = true_conf * (1.0 - delta) + delta / self.num_classes
+            delta = 0.04
+            smooth_true_conf = (1 - delta) * true_conf + delta / 2 # 2 - is number of classes for objectness
 
 
 
