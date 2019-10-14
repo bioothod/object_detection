@@ -8,11 +8,13 @@ import yolo
 
 logger = logging.getLogger('detection')
 
-def generate_anchors():
+def generate_anchors(ext_image_size):
         num_scales = 3
         num_boxes = 3
 
         np_anchor_boxes, np_anchor_areas, image_size = yolo.create_anchors()
+        if ext_image_size > 0:
+            image_size = ext_image_size
 
         anchors_reshaped = tf.reshape(np_anchor_boxes, [num_scales, num_boxes, 2])
         anchors_abs_coords = []
