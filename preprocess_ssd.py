@@ -372,13 +372,18 @@ def _mean_image_subtraction(image, means):
     channels[i] -= means[i]
   return tf.concat(axis=2, values=channels)
 
-def unwhiten_image(image):
+def denormalize_image(image):
   means=[_R_MEAN, _G_MEAN, _B_MEAN]
   num_channels = image.get_shape().as_list()[-1]
   channels = tf.split(axis=2, num_or_size_splits=num_channels, value=image)
   for i in range(num_channels):
     channels[i] += means[i]
-  return tf.concat(axis=2, values=channels)
+  image = tf.concat(axis=2, values=channels)
+  return image
+
+def normalize_image(image):
+  image = _mean_image_subtraction(image, [_R_MEAN, _G_MEAN, _B_MEAN])
+  return image
 
 def random_flip_left_right(image, bboxes):
   with tf.name_scope('random_flip_left_right'):
@@ -392,7 +397,7 @@ def random_flip_left_right(image, bboxes):
     bboxes = tf.cond(mirror_cond, lambda: mirror_bboxes, lambda: bboxes)
     return result, bboxes
 
-def preprocess_for_train(image, labels, bboxes, out_shape, data_format='channels_first', scope='ssd_preprocessing_train', output_rgb=True):
+def preprocess_for_train(image, labels, bboxes, out_shape, data_format='channels_last', scope='ssd_preprocessing_train', output_rgb=True):
   """Preprocesses the given image for training.
 
   Args:
@@ -432,7 +437,7 @@ def preprocess_for_train(image, labels, bboxes, out_shape, data_format='channels
     random_sample_flip_resized_image.set_shape([None, None, 3])
 
     final_image = tf.cast(tf.image.convert_image_dtype(random_sample_flip_resized_image, orig_dtype, saturate=True), tf.float32)
-    final_image = _mean_image_subtraction(final_image, [_R_MEAN, _G_MEAN, _B_MEAN])
+    final_image = normalize_image(final_image)
 
     final_image.set_shape(out_shape + [3])
     if not output_rgb:
@@ -442,7 +447,7 @@ def preprocess_for_train(image, labels, bboxes, out_shape, data_format='channels
       final_image = tf.transpose(final_image, perm=(2, 0, 1))
     return final_image, labels, bboxes
 
-def preprocess_for_eval(image, out_shape, data_format='channels_first', scope='ssd_preprocessing_eval', output_rgb=True):
+def preprocess_for_eval(image, out_shape, data_format='channels_last', scope='ssd_preprocessing_eval', output_rgb=True):
   """Preprocesses the given image for evaluation.
 
   Args:
@@ -457,7 +462,7 @@ def preprocess_for_eval(image, out_shape, data_format='channels_first', scope='s
     image = tf.image.resize(image, out_shape, method=tf.image.ResizeMethod.BILINEAR)
     image.set_shape(out_shape + [3])
 
-    image = _mean_image_subtraction(image, [_R_MEAN, _G_MEAN, _B_MEAN])
+    image = normalize_image(image)
     if not output_rgb:
       image_channels = tf.unstack(image, axis=-1, name='split_rgb')
       image = tf.stack([image_channels[2], image_channels[1], image_channels[0]], axis=-1, name='merge_bgr')
@@ -466,7 +471,7 @@ def preprocess_for_eval(image, out_shape, data_format='channels_first', scope='s
       image = tf.transpose(image, perm=(2, 0, 1))
     return image
 
-def preprocess_image(image, labels, bboxes, out_shape, is_training=False, data_format='channels_first', output_rgb=True):
+def preprocess_image(image, labels, bboxes, out_shape, is_training=False, data_format='channels_last', output_rgb=True):
   """Preprocesses the given image.
 
   Args:
