@@ -176,9 +176,9 @@ def get_training_augmentation(image_size, bbox_params):
         A.PadIfNeeded(min_height=image_size, min_width=image_size, always_apply=True, border_mode=0),
         A.OneOf(
             [
-                A.RandomScale(scale_limit=0.3, interpolation=cv2.INTER_LANCZOS4),
+                A.RandomScale(scale_limit=(0.9, 1.1), interpolation=cv2.INTER_CUBIC),
                 A.RandomCrop(height=image_size, width=image_size),
-        ], p=0.5),
+        ], p=1),
 
         A.OneOf([
             A.Compose([
@@ -197,10 +197,14 @@ def get_training_augmentation(image_size, bbox_params):
                         A.RandomContrast(limit=0.05, p=1),
                         A.HueSaturationValue(hue_shift_limit=7, sat_shift_limit=10, val_shift_limit=7, p=1),
             ], bbox_params),
-        ], p=0.5),
+        ], p=0.2),
 
         A.PadIfNeeded(min_height=image_size, min_width=image_size, always_apply=True, border_mode=0),
-        A.LongestMaxSize(max_size=image_size, interpolation=cv2.INTER_LANCZOS4, always_apply=True),
+        A.OneOf(
+            [
+                A.LongestMaxSize(max_size=image_size, interpolation=cv2.INTER_CUBIC),
+                A.RandomCrop(height=image_size, width=image_size),
+        ], p=1),
         A.PadIfNeeded(min_height=image_size, min_width=image_size, always_apply=True, border_mode=0),
     ]
 
@@ -210,7 +214,7 @@ def get_training_augmentation(image_size, bbox_params):
 def get_validation_augmentation(image_size, bbox_params):
     test_transform = [
         A.PadIfNeeded(image_size, image_size),
-        A.Resize(height=image_size, width=image_size, interpolation=cv2.INTER_LANCZOS4, always_apply=True),
+        A.Resize(height=image_size, width=image_size, interpolation=cv2.INTER_CUBIC, always_apply=True),
     ]
     return A.Compose(test_transform, bbox_params)
 
