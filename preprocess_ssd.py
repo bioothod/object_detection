@@ -341,36 +341,17 @@ def ssd_random_sample_patch_wrapper(image, labels, bboxes):
                 lambda : (orgi_image, orgi_labels, orgi_bboxes))
 
 def _mean_image_subtraction(image, means):
-  """Subtracts the given means from each image channel.
-
-  For example:
-    means = [123.68, 116.779, 103.939]
-    image = _mean_image_subtraction(image, means)
-
-  Note that the rank of `image` must be known.
-
-  Args:
-    image: a tensor of size [height, width, C].
-    means: a C-vector of values to subtract from each channel.
-
-  Returns:
-    the centered image.
-
-  Raises:
-    ValueError: If the rank of `image` is unknown, if `image` has a rank other
-      than three or if the number of channels in `image` doesn't match the
-      number of values in `means`.
-  """
-  if image.get_shape().ndims != 3:
-    raise ValueError('Input must be of size [height, width, C>0]')
+  ndims = image.get_shape().ndims
+  if ndims != 3 and ndims != 4:
+    raise ValueError('Input must be of size [?, height, width, C>0]')
   num_channels = image.get_shape().as_list()[-1]
   if len(means) != num_channels:
-    raise ValueError('len(means) must match the number of channels')
+    raise ValueError('len(means)={} must match the number of channels={}'.format(len(means), num_channels))
 
-  channels = tf.split(axis=2, num_or_size_splits=num_channels, value=image)
+  channels = tf.split(axis=-1, num_or_size_splits=num_channels, value=image)
   for i in range(num_channels):
     channels[i] -= means[i]
-  return tf.concat(axis=2, values=channels)
+  return tf.concat(axis=-1, values=channels)
 
 def denormalize_image(image):
   means=[_R_MEAN, _G_MEAN, _B_MEAN]
@@ -382,7 +363,8 @@ def denormalize_image(image):
   return image
 
 def normalize_image(image):
-  image = _mean_image_subtraction(image, [_R_MEAN, _G_MEAN, _B_MEAN])
+  #image = _mean_image_subtraction(image, [_R_MEAN, _G_MEAN, _B_MEAN])
+  image -= [_R_MEAN, _G_MEAN, _B_MEAN]
   return image
 
 def random_flip_left_right(image, bboxes):
