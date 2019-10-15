@@ -44,11 +44,23 @@ parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='M
 parser.add_argument('--data_format', type=str, default='channels_last', choices=['channels_first', 'channels_last'], help='Data format: [channels_first, channels_last]')
 parser.add_argument('--orig_images', action='store_true', help='Whether to perform SSD preprocessing (orig_images training)')
 parser.add_argument('--do_not_step_labels', action='store_true', help='Whether to reduce labels by 1, i.e. when 0 is background class')
-parser.add_argument('--no_channel_swap', action='store_true', help='When set, do not perform rgb-bgr conversion, needed, when using ')
+parser.add_argument('--no_channel_swap', action='store_true', help='When set, do not perform rgb-bgr conversion, needed, when using files as input')
+parser.add_argument('--freeze', action='store_true', help='Save frozen protobuf near checkpoint')
 parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
 parser.add_argument('--dataset_type', type=str, choices=['files', 'tfrecords'], default='files', help='Dataset type')
 parser.add_argument('filenames', type=str, nargs='*', help='Numeric label : file path')
 FLAGS = parser.parse_args()
+
+def normalize_image(image, dtype):
+    image = tf.cast(image, dtype)
+
+    if FLAGS.orig_images:
+        image = preprocess_ssd.normalize_image(image)
+    else:
+        image -= 128.
+        image /= 128.
+
+    return image
 
 def tf_read_image(filename, image_size, dtype):
     image = tf.io.read_file(filename)
@@ -61,15 +73,9 @@ def tf_read_image(filename, image_size, dtype):
     mx_int = tf.cast(mx, tf.int32)
     image = tf.image.pad_to_bounding_box(image, tf.cast((mx - orig_image_height) / 2, tf.int32), tf.cast((mx - orig_image_width) / 2, tf.int32), mx_int, mx_int)
 
-    image = tf.cast(image, dtype)
+    image = tf.image.resize_with_pad(image, image_size, image_size)
 
-    if FLAGS.orig_images:
-        image = preprocess_ssd.preprocess_for_eval(image, [image_size, image_size], data_format=FLAGS.data_format)
-    else:
-        image -= 128.
-        image /= 128.
-
-        image = tf.image.resize_with_pad(image, image_size, image_size)
+    image = normalize_image(image, dtype)
 
     return filename, image
 
@@ -426,6 +432,39 @@ def run_inference():
     elif FLAGS.checkpoint_dir:
         checkpoint_prefix = tf.train.latest_checkpoint(FLAGS.checkpoint_dir)
 
+    if FLAGS.freeze:
+        with tf.compat.v1.Session() as sess:
+            images = tf.keras.layers.Input(shape=(image_size * image_size * 3), name='input/images_rgb', dtype=tf.uint8)
+            images = tf.reshape(images, [-1, image_size, image_size, 3])
+            images = normalize_image(images, dtype)
+
+            model = yolo.create_model(num_classes)
+            all_anchors, all_grid_xy, all_ratios, image_size = anchors_gen.generate_anchors(-1)
+
+            checkpoint = tf.train.Checkpoint(model=model)
+
+            coords_batch, scores_batch, objs_batch, cat_ids_batch = eval_step_logits(model, images, image_size, FLAGS.num_classes, all_anchors, all_grid_xy, all_ratios)
+
+            coords_batch = tf.identity(coords_batch, name='output/coords')
+            scores_batch = tf.identity(scores_batch, name='output/scores')
+            objs_batch = tf.identity(objs_batch, name='output/objectness')
+            cat_ids_batch = tf.identity(cat_ids_batch, name='output/category_ids')
+
+            sess.run([tf.compat.v1.global_variables_initializer(), tf.compat.v1.local_variables_initializer()])
+
+            status = checkpoint.restore(checkpoint_prefix)
+            status.assert_existing_objects_matched().expect_partial()
+            logger.info("Restored from external checkpoint {}".format(checkpoint_prefix))
+
+            output_graph_def = tf.compat.v1.graph_util.convert_variables_to_constants(sess, sess.graph.as_graph_def(), ['output/coords', 'output/scores', 'output/objectness', 'output/category_ids'])
+
+        output = '{}-{}.frozen.pb'.format(checkpoint_prefix, tf.__version__)
+        filename = tf.io.write_graph(output_graph_def, os.path.dirname(output), os.path.basename(output), as_text=False)
+
+        print('Saved graph as {}'.format(os.path.abspath(filename)))
+        return
+
+
     status = checkpoint.restore(checkpoint_prefix)
     status.assert_existing_objects_matched().expect_partial()
     logger.info("Restored from external checkpoint {}".format(checkpoint_prefix))
@@ -478,6 +517,7 @@ def run_inference():
     logger.info('Dataset has been created: num_images: {}, num_classes: {}, model_name: {}'.format(num_images, num_classes, FLAGS.model_name))
 
     os.makedirs(FLAGS.output_dir, exist_ok=True)
+
     run_eval(model, ds, num_images, image_size, FLAGS.num_classes, FLAGS.output_dir, all_anchors, all_grid_xy, all_ratios)
 
 if __name__ == '__main__':
