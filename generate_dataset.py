@@ -31,7 +31,7 @@ parser.add_argument('--num_images', type=int, default=10000000, help='Total numb
 parser.add_argument('--num_classes', type=int, required=True, help='Number of classes in the dataset')
 parser.add_argument('--output_dir', type=str, required=True, help='Directory to save tfrecords')
 parser.add_argument('--logfile', type=str, help='Logfile')
-parser.add_argument('--orig_images', action='store_true', help='Whether to store original images or augmented')
+parser.add_argument('--do_augmentation', action='store_true', help='Whether to store original images or augmented')
 parser.add_argument('--is_training', action='store_true', help='Training/evaluation augmentation')
 FLAGS = parser.parse_args()
 
@@ -44,7 +44,7 @@ def _bytes_feature(value):
 def do_work(worker_id, step, num_images, image_size):
     base = coco.create_coco_iterable(FLAGS.coco_annotations, FLAGS.coco_data_dir, logger)
 
-    if not FLAGS.orig_images:
+    if not FLAGS.do_augmentation:
         coco.complete_initialization(base, image_size, [], [], FLAGS.is_training)
 
     if not FLAGS.is_training:
@@ -63,10 +63,10 @@ def do_work(worker_id, step, num_images, image_size):
 
     start_time = time.time()
     for idx in range(worker_id, num_images, step):
-        idx = idx % num_images
+        idx = idx % len(base)
 
         try:
-            if not FLAGS.orig_images:
+            if not FLAGS.do_augmentation:
                 filename, image_id, image, true_bboxes, true_labels = base.process_image(idx, base.train_augmentation, return_orig_format=True)
             else:
                 filename, image_id, image, true_bboxes, true_labels = base.process_image(idx, None, return_orig_format=True)
@@ -75,9 +75,6 @@ def do_work(worker_id, step, num_images, image_size):
 
         processed += 1
         bboxes += np.count_nonzero(true_labels)
-
-        if not FLAGS.orig_images:
-            image = image * 128 + 128
 
         image = image.astype(np.uint8)
         image_enc = cv2.imencode('.png', image)[1].tostring()
@@ -135,8 +132,6 @@ def main():
     processes = []
     for i in range(FLAGS.num_cpus):
         num = FLAGS.num_images
-        if FLAGS.is_training:
-            num = int(FLAGS.num_images / FLAGS.num_cpus)
 
         p = mp.Process(target=do_work, args=(i, FLAGS.num_cpus, num, FLAGS.image_size))
         p.start()

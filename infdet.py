@@ -42,7 +42,6 @@ parser.add_argument('--checkpoint', type=str, help='Load model weights from this
 parser.add_argument('--checkpoint_dir', type=str, help='Load model weights from the latest checkpoint in this directory')
 parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='Model name')
 parser.add_argument('--data_format', type=str, default='channels_last', choices=['channels_first', 'channels_last'], help='Data format: [channels_first, channels_last]')
-parser.add_argument('--orig_images', action='store_true', help='Whether to perform SSD preprocessing (orig_images training)')
 parser.add_argument('--do_not_step_labels', action='store_true', help='Whether to reduce labels by 1, i.e. when 0 is background class')
 parser.add_argument('--no_channel_swap', action='store_true', help='When set, do not perform rgb-bgr conversion, needed, when using files as input')
 parser.add_argument('--freeze', action='store_true', help='Save frozen protobuf near checkpoint')
@@ -54,12 +53,7 @@ FLAGS = parser.parse_args()
 def normalize_image(image, dtype):
     image = tf.cast(image, dtype)
 
-    if FLAGS.orig_images:
-        image = preprocess_ssd.normalize_image(image)
-    else:
-        image -= 128.
-        image /= 128.
-
+    image = preprocess_ssd.normalize_image(image)
     return image
 
 def tf_read_image(filename, image_size, dtype):
@@ -396,12 +390,8 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_a
 
                 anns.append((bb, cat_id))
 
-            if FLAGS.orig_images:
-                image = preprocess_ssd.denormalize_image(image)
-                image = image.numpy()
-            else:
-                image = image.numpy() * 128 + 128
-
+            image = preprocess_ssd.denormalize_image(image)
+            image = image.numpy()
             image = image.astype(np.uint8)
 
             if not FLAGS.no_channel_swap:
@@ -505,7 +495,7 @@ def run_inference():
             ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=2)
             ds = ds.map(lambda record: unpack_tfrecord(record, all_anchors, all_grid_xy, all_ratios,
                         image_size, num_classes, False,
-                        FLAGS.orig_images, FLAGS.data_format, FLAGS.do_not_step_labels),
+                        FLAGS.data_format, FLAGS.do_not_step_labels),
                 num_parallel_calls=16)
             ds = ds.map(lambda filename, image_id, image, true_values: tf_left_needed_dimensions_from_tfrecord(image_size, all_anchors, all_grid_xy, all_ratios, num_classes,
                         filename, image_id, image, true_values),

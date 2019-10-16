@@ -47,12 +47,11 @@ parser.add_argument('--train_tfrecord_dir', type=str, help='Directory containing
 parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
 parser.add_argument('--num_classes', type=int, help='Number of classes in the dataset')
 parser.add_argument('--image_size', type=int, default=0, help='Use this image size, if 0 - use default')
-parser.add_argument('--orig_images', action='store_true', help='Whether tfrecords contain original unscaled images')
 parser.add_argument('--do_not_step_labels', action='store_true', help='Whether to reduce labels by 1, i.e. when 0 is background class')
 parser.add_argument('--train_num_images', type=int, help='Number of images in train epoch')
 parser.add_argument('--eval_num_images', type=int, help='Number of images in eval epoch')
 
-def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_ratios, image_size, num_classes, is_training, orig_images, data_format, do_not_step_labels):
+def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_ratios, image_size, num_classes, is_training, data_format, do_not_step_labels):
     features = tf.io.parse_single_example(serialized_example,
             features={
                 'image_id': tf.io.FixedLenFeature([], tf.int64),
@@ -100,23 +99,16 @@ def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_rat
     yminf = (cy - h/2) / image_height
     ymaxf = (cy + h/2) / image_height
 
-    if orig_images:
-        coords_yx = tf.concat([yminf, xminf, ymaxf, xmaxf], axis=1)
+    coords_yx = tf.concat([yminf, xminf, ymaxf, xmaxf], axis=1)
 
-        if is_training:
-            image, new_labels, new_bboxes = preprocess_ssd.preprocess_for_train(image, orig_labels, coords_yx,
-                    [image_size, image_size], data_format=data_format)
+    if is_training:
+        image, new_labels, new_bboxes = preprocess_ssd.preprocess_for_train(image, orig_labels, coords_yx,
+                [image_size, image_size], data_format=data_format)
 
-            yminf, xminf, ymaxf, xmaxf = tf.split(new_bboxes, num_or_size_splits=4, axis=1)
-            orig_labels = new_labels
-        else:
-            image = preprocess_ssd.preprocess_for_eval(image, [image_size, image_size], data_format=data_format)
+        yminf, xminf, ymaxf, xmaxf = tf.split(new_bboxes, num_or_size_splits=4, axis=1)
+        orig_labels = new_labels
     else:
-        image = tf.cast(image, tf.float32)
-        image -= 128.
-        image /= 128.
-
-        image = tf.image.resize_with_pad(image, image_size, image_size)
+        image = preprocess_ssd.preprocess_for_eval(image, [image_size, image_size], data_format=data_format)
 
     cx = (xminf + xmaxf) * image_size / 2
     cy = (yminf + ymaxf) * image_size / 2
@@ -133,11 +125,6 @@ def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_rat
 
 def calc_epoch_steps(num_files):
     return (num_files + FLAGS.batch_size - 1) // FLAGS.batch_size
-
-def smooth_l1_loss(x):
-    square_loss   = 0.5*x**2
-    absolute_loss = tf.abs(x)
-    return tf.where(tf.less(absolute_loss, 1), square_loss, absolute_loss-0.5)
 
 def draw_bboxes(image_size, train_dataset, train_cat_names, all_anchors, all_grid_xy, all_ratios):
     data_dir = os.path.join(FLAGS.train_dir, 'tmp')
@@ -271,7 +258,7 @@ def train():
             ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
             ds = ds.map(lambda record: unpack_tfrecord(record, anchors_all, output_xy_grids, output_ratios,
                             image_size, num_classes, is_training,
-                            FLAGS.orig_images, FLAGS.data_format, FLAGS.do_not_step_labels),
+                            FLAGS.data_format, FLAGS.do_not_step_labels),
                     num_parallel_calls=FLAGS.num_cpus)
             if is_training:
                 ds = ds.shuffle(200)
