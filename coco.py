@@ -176,27 +176,19 @@ def get_training_augmentation(image_size, bbox_params):
         A.PadIfNeeded(min_height=image_size, min_width=image_size, always_apply=True, border_mode=0),
         A.OneOf(
             [
+                A.RandomScale(scale_limit=(0.1, 0.3), interpolation=cv2.INTER_CUBIC),
+                A.RandomScale(scale_limit=(0.1, 0.5), interpolation=cv2.INTER_CUBIC),
                 A.RandomScale(scale_limit=(0.9, 1.1), interpolation=cv2.INTER_CUBIC),
                 A.RandomCrop(height=image_size, width=image_size),
         ], p=1),
 
         A.OneOf([
-            A.Compose([
-                        A.CLAHE(p=1),
-                        A.RandomBrightness(limit=0.05, p=1),
-                        A.RandomGamma(gamma_limit=(40, 60), p=1),
-            ], bbox_params),
-
-            A.Compose([
-                        A.Blur(blur_limit=5, p=1),
-                        A.MotionBlur(blur_limit=5, p=1),
-                        A.MedianBlur(blur_limit=5, p=1),
-            ], bbox_params),
-
-            A.Compose([
-                        A.RandomContrast(limit=0.05, p=1),
-                        A.HueSaturationValue(hue_shift_limit=7, sat_shift_limit=10, val_shift_limit=7, p=1),
-            ], bbox_params),
+                A.CLAHE(p=1),
+                A.RandomBrightness(limit=0.01, p=1),
+                A.Blur(blur_limit=5, p=1),
+                A.MotionBlur(blur_limit=5, p=1),
+                A.MedianBlur(blur_limit=5, p=1),
+                A.RandomContrast(limit=0.01, p=1),
         ], p=0.2),
 
         A.PadIfNeeded(min_height=image_size, min_width=image_size, always_apply=True, border_mode=0),
@@ -218,25 +210,6 @@ def get_validation_augmentation(image_size, bbox_params):
     ]
     return A.Compose(test_transform, bbox_params)
 
-def preprocess_input(img, **kwargs):
-    #logger.info('preprocess: img: {}/{}, kwargs: {}'.format(img.shape, img.dtype, kwargs))
-
-    img = img.astype(np.float32)
-
-    #vgg_means = np.array([91.4953, 103.8827, 131.0912], dtype=np.float32)
-    #img -= vgg_means
-    #img /= 255.
-    img -= 128.
-    img /= 128.
-
-    return img
-
-def get_preprocessing(preprocessing_fn, bbox_params):
-    transform = [
-        A.Lambda(image=preprocessing_fn),
-    ]
-    return A.Compose(transform, bbox_params)
-
 class COCO_Iterable:
     def __init__(self, ann_path, data_dir, logger, np_anchor_boxes=None, np_anchor_areas=None):
         self.logger = logger
@@ -248,7 +221,6 @@ class COCO_Iterable:
 
         self.train_augmentation = None
         self.eval_augmentation = None
-        self.preprocessing = None
 
         self.coco = COCO(ann_path, data_dir, logger)
         self.image_tuples = self.coco.get_images()
@@ -266,7 +238,7 @@ class COCO_Iterable:
     def num_classes(self):
         return len(self.cats)
 
-    def set_augmentation(self, image_size=None, train_augmentation=None, eval_augmentation=None, preprocessing=None):
+    def set_augmentation(self, image_size=None, train_augmentation=None, eval_augmentation=None):
         if not self.image_size:
             self.image_size = image_size
 
@@ -275,9 +247,6 @@ class COCO_Iterable:
 
         if not self.eval_augmentation:
             self.eval_augmentation = eval_augmentation
-
-        if not self.preprocessing:
-            self.preprocessing = preprocessing
 
     def set_anchors(self, np_anchor_boxes=None, np_anchor_areas=None):
         if self.np_anchor_boxes is None:
@@ -327,8 +296,6 @@ class COCO_Iterable:
 
         if augmentation:
             annotations = augmentation(**annotations)
-        if self.preprocessing:
-            annotations = self.preprocessing(**annotations)
 
         image = annotations['image']
         bboxes = annotations['bboxes']
@@ -336,7 +303,7 @@ class COCO_Iterable:
 
         if return_orig_format:
             if len(bboxes) == 0:
-                raise ProcessingError('{}: there are no bboxes after preprocessing'.format(filename))
+                raise ProcessingError('{}: there are no bboxes after augmentation'.format(filename))
 
             bboxes = np.array(bboxes)
             x0 = np.array(bboxes[:, 0], dtype=np.float32)
@@ -476,7 +443,5 @@ def complete_initialization(coco_base, image_size, np_anchor_boxes, np_anchor_ar
 	    train_augmentation = get_validation_augmentation(image_size, bbox_params)
     eval_augmentation = get_validation_augmentation(image_size, bbox_params)
 
-    preprocessing = get_preprocessing(preprocess_input, bbox_params)
-
-    coco_base.set_augmentation(image_size, train_augmentation, eval_augmentation, preprocessing)
+    coco_base.set_augmentation(image_size, train_augmentation, eval_augmentation)
     coco_base.set_anchors(np_anchor_boxes, np_anchor_areas)
