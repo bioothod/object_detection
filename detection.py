@@ -15,8 +15,6 @@ import anchors_gen
 import coco
 import image as image_draw
 import loss
-import map_iter
-import preprocess
 import preprocess_ssd
 import yolo
 
