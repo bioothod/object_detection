@@ -32,6 +32,16 @@ def draw_text(ax, xy, txt, sz=14):
     text = ax.text(*xy, txt, verticalalignment='top', color='white', fontsize=sz, weight='normal')
     draw_outline(text, 1)
 
+def draw_kp(ax, kp):
+    kp = kp.reshape([-1, 2])
+
+    for xy in kp:
+        cr = patches.Circle(xy, 10, color='r')
+        ax.add_artist(cr)
+
+    poly = patches.Polygon(kp, fill=False)
+    ax.add_artist(poly)
+
 def bb_hw(a):
     # returned coordinates must be x, y, w, h
     #
@@ -46,21 +56,23 @@ def draw_im(im, ann, dst, cat_names):
     fig, ax = show_img(im, figsize=(10, 10))
 
     color_map = {}
-    for b, c in ann:
-        b = bb_hw(b)
+    for bb, kp, c in ann:
+        bb = bb_hw(bb)
 
         color = color_map.get(c)
         if color is None:
             color = np.random.rand(3,)
             color_map[c] = color
 
-        draw_rect(ax, b, color)
+        draw_rect(ax, bb, color)
+
+        draw_kp(ax, kp)
 
         if True:
             if c in cat_names:
-                draw_text(ax, b[:2], cat_names[c], sz=16)
+                draw_text(ax, bb[:2], cat_names[c], sz=16)
             else:
-                draw_text(ax, b[:2], str(c), sz=16)
+                draw_text(ax, bb[:2], str(c), sz=16)
 
     plt.savefig(dst)
     plt.close(fig)

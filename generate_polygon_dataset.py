@@ -9,6 +9,8 @@ import multiprocessing as mp
 import numpy as np
 import tensorflow as tf
 
+import albumentations as A
+
 logger = logging.getLogger('generate')
 logger.propagate = False
 logger.setLevel(logging.INFO)
@@ -41,11 +43,43 @@ def _int64_feature(value):
 def _bytes_feature(value):
     return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
 
+def get_training_augmentation(image_size):
+    train_transform = [
+        A.HorizontalFlip(p=0.5),
+        A.PadIfNeeded(min_height=image_size, min_width=image_size, always_apply=True, border_mode=0),
+
+        A.OneOf(
+            [
+                A.RandomScale(scale_limit=0.9, interpolation=cv2.INTER_CUBIC),
+                #A.RandomScale(scale_limit=(0.4, 0.7), interpolation=cv2.INTER_CUBIC),
+                #A.RandomScale(scale_limit=(0.9, 1.1), interpolation=cv2.INTER_CUBIC),
+        ], p=1),
+
+        A.ShiftScaleRotate(p=0.8),
+
+        A.OneOf([
+                A.CLAHE(p=1),
+                A.RandomBrightness(limit=0.01, p=1),
+                A.Blur(blur_limit=5, p=1),
+                A.MotionBlur(blur_limit=5, p=1),
+                A.MedianBlur(blur_limit=5, p=1),
+                A.RandomContrast(limit=0.01, p=1),
+        ], p=0.3),
+
+        A.PadIfNeeded(min_height=image_size, min_width=image_size, always_apply=True, border_mode=0),
+        A.LongestMaxSize(max_size=image_size, interpolation=cv2.INTER_CUBIC),
+    ]
+
+    kparams = A.KeypointParams(format='xy', remove_invisible=False)
+
+    return A.Compose(train_transform, keypoint_params=kparams)
+
 def do_work(worker_id, step, num_images, image_size):
     base = coco.create_coco_iterable(FLAGS.coco_annotations, FLAGS.coco_data_dir, logger)
 
     if FLAGS.do_augmentation:
-        coco.complete_initialization(base, image_size, [], [], FLAGS.is_training)
+        train_aug = get_training_augmentation(image_size)
+        coco.complete_initialization(base, image_size, [], [], FLAGS.is_training, train_augmentation=train_aug)
 
     if not FLAGS.is_training:
         num_images = len(base)

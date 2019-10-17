@@ -138,10 +138,7 @@ class COCO:
             if iscrowd != 0:
                 continue
 
-            bbox = ann['bbox']
-            category_id = ann['category_id']
-
-            anns.append((bbox, category_id))
+            anns.append(ann)
 
         img = self.imgs[image_id]
         filename = os.path.join(self.data_dir, img['file_name'])
@@ -277,9 +274,15 @@ class COCO_Iterable:
 
         orig_bboxes = []
         orig_cat_ids = []
-        for bb, cat_id in anns:
+        orig_keypoints = []
+        for ann in anns:
+            bb = ann['bbox']
+            kp = ann['keypoints']
+            cat_id = ann['category_id']
+
             orig_bboxes.append(bb)
             orig_cat_ids.append(cat_id)
+            orig_keypoints += kp
 
             if bb[2] > orig_image.shape[1] or bb[3] > orig_image.shape[0]:
                 self.logger.error('{}: incorrect annotation: image_shape: {}, bb: {}'.format(filename, orig_image.shape, bb))
@@ -292,6 +295,7 @@ class COCO_Iterable:
             'image': orig_image,
             'bboxes': orig_bboxes,
             'category_id': orig_cat_ids,
+            'keypoints': orig_keypoints,
         }
 
         if augmentation:
@@ -300,28 +304,41 @@ class COCO_Iterable:
         image = annotations['image']
         bboxes = annotations['bboxes']
         cat_ids = annotations['category_id']
+        keypoints = annotations['keypoints']
 
         if return_orig_format:
-            if len(bboxes) == 0:
-                raise ProcessingError('{}: there are no bboxes after augmentation'.format(filename))
+            true_keypoints = np.array([keypoints])
 
-            bboxes = np.array(bboxes)
-            x0 = np.array(bboxes[:, 0], dtype=np.float32)
-            y0 = np.array(bboxes[:, 1], dtype=np.float32)
-            w = np.array(bboxes[:, 2], dtype=np.float32)
-            h = np.array(bboxes[:, 3], dtype=np.float32)
+            if False:
+                if len(bboxes) == 0:
+                    raise ProcessingError('{}: there are no bboxes after augmentation'.format(filename))
 
-            cx = x0 + w/2
-            cy = y0 + h/2
-            true_bboxes = np.stack([cx, cy, h, w], axis=1)
+                bboxes = np.array(bboxes)
+                x0 = np.array(bboxes[:, 0], dtype=np.float32)
+                y0 = np.array(bboxes[:, 1], dtype=np.float32)
+                w = np.array(bboxes[:, 2], dtype=np.float32)
+                h = np.array(bboxes[:, 3], dtype=np.float32)
 
-            #self.logger.info('x0: {}, y0: {}, cx: {}, cy: {}, true_bboxes: {}'.format(x0, y0, cx, cy, true_bboxes))
-            #exit(-1)
+                cx = x0 + w/2
+                cy = y0 + h/2
+                true_bboxes = np.stack([cx, cy, h, w], axis=1)
+            else:
+                xmin = true_keypoints[..., 0].min()
+                xmax = true_keypoints[..., 0].max()
+                ymin = true_keypoints[..., 1].min()
+                ymax = true_keypoints[..., 1].max()
+
+                cx = (xmin + xmax) / 2
+                cy = (ymin + ymax) / 2
+                w = xmax - xmin
+                h = ymax - ymin
+
+                true_bboxes = np.array([[cx, cy, h, w]])
 
             true_labels = np.array([self.cats[cat_id] for cat_id in cat_ids], dtype=np.int32)
 
             #self.logger.info('{}: classes: {}\n{}'.format(filename, true_labels, true_bboxes))
-            return filename, image_id, image, true_bboxes, true_labels
+            return filename, image_id, image, true_bboxes, true_labels, true_keypoints
 
         max_ious = np.zeros((self.np_anchor_boxes.shape[0]), dtype=np.float32)
         max_per_bbox_ious = np.zeros((self.np_anchor_boxes.shape[0]), dtype=np.float32)
@@ -430,17 +447,19 @@ class COCO_Iterable:
 def create_coco_iterable(ann_path, data_dir, logger):
     return COCO_Iterable(ann_path, data_dir, logger)
 
-def complete_initialization(coco_base, image_size, np_anchor_boxes, np_anchor_areas, is_training):
+def complete_initialization(coco_base, image_size, np_anchor_boxes, np_anchor_areas, is_training, train_augmentation=None):
     bbox_params = A.BboxParams(
             format='coco',
             min_area=0,
             min_visibility=0.6,
             label_fields=['category_id'])
 
-    if is_training:
-	    train_augmentation = get_training_augmentation(image_size, bbox_params)
-    else:
-	    train_augmentation = get_validation_augmentation(image_size, bbox_params)
+    if train_augmentation is None:
+        if is_training:
+            train_augmentation = get_training_augmentation(image_size, bbox_params)
+        else:
+            train_augmentation = get_validation_augmentation(image_size, bbox_params)
+
     eval_augmentation = get_validation_augmentation(image_size, bbox_params)
 
     coco_base.set_augmentation(image_size, train_augmentation, eval_augmentation)

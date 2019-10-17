@@ -42,7 +42,7 @@ parser.add_argument('--min_eval_metric', default=0.2, type=float, help='Minimal 
 parser.add_argument('--negative_positive_rate', default=2, type=float, help='Negative to positive anchors ratio')
 parser.add_argument('--epochs_lr_update', default=10, type=int, help='Maximum number of epochs without improvement used to reset or decrease learning rate')
 parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16 training/inference')
-parser.add_argument('--dataset_type', type=str, choices=['files', 'tfrecords'], default='tfrecords', help='Dataset type')
+parser.add_argument('--dataset_type', type=str, choices=['tfrecords'], default='tfrecords', help='Dataset type')
 parser.add_argument('--train_tfrecord_dir', type=str, help='Directory containing training TFRecords')
 parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
 parser.add_argument('--num_classes', type=int, help='Number of classes in the dataset')
@@ -58,6 +58,7 @@ def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_rat
                 'filename': tf.io.FixedLenFeature([], tf.string),
                 'true_labels': tf.io.FixedLenFeature([], tf.string),
                 'true_bboxes': tf.io.FixedLenFeature([], tf.string),
+                'true_keypoints': tf.io.FixedLenFeature([], tf.string),
                 'image': tf.io.FixedLenFeature([], tf.string),
             })
 
@@ -195,16 +196,9 @@ def train():
     handler.setFormatter(__fmt)
     logger.addHandler(handler)
 
-    #logger.info('threads: inter(between): {}, intra(within): {}'.format(tf.config.threading.get_inter_op_parallelism_threads(), tf.config.threading.get_intra_op_parallelism_threads()))
-    #tf.config.threading.set_inter_op_parallelism_threads(10)
-    #tf.config.threading.set_intra_op_parallelism_threads(10)
-
-    num_replicas = 1
-    #dstrategy = None
     dstrategy = tf.distribute.MirroredStrategy()
     num_replicas = dstrategy.num_replicas_in_sync
     with dstrategy.scope():
-    #if True:
         FLAGS.initial_learning_rate *= num_replicas
         FLAGS.batch_size *= num_replicas
 
@@ -217,36 +211,6 @@ def train():
 
         model = yolo.create_model(FLAGS.num_classes)
         anchors_all, output_xy_grids, output_ratios, image_size = anchors_gen.generate_anchors(FLAGS.image_size)
-
-        def create_dataset(name, base, is_training):
-            coco.complete_initialization(base, image_size, np_anchor_boxes, np_anchor_areas, is_training)
-
-            num_images = len(base)
-            num_classes = base.num_classes()
-            cat_names = base.cat_names()
-
-            ds = map_iter.from_indexable(base,
-                    num_parallel_calls=FLAGS.num_cpus,
-                    output_types=(tf.string, tf.int64, tf.float32, tf.float32, tf.int32),
-                    output_shapes=(
-                        tf.TensorShape([]),
-                        tf.TensorShape([]),
-                        tf.TensorShape([image_size, image_size, 3]),
-                        tf.TensorShape([num_anchors, 4]),
-                        tf.TensorShape([num_anchors]),
-                    ))
-
-            if is_training:
-                ds = ds.shuffle(200)
-
-            ds = ds.batch(FLAGS.batch_size)
-            ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
-            #ds = dstrategy.experimental_distribute_dataset(ds)
-
-            logger.info('{} dataset has been created, images: {}, classes: {}'.format(name, num_images, num_classes))
-
-            return ds, num_images, num_classes, cat_names
-
 
         def create_dataset_from_tfrecord(name, dataset_dir, image_size, num_classes, is_training):
             filenames = []
@@ -271,13 +235,7 @@ def train():
 
             return ds
 
-        if FLAGS.dataset_type == 'files':
-            train_base = coco.create_coco_iterable(FLAGS.train_coco_annotations, FLAGS.train_coco_data_dir, logger)
-            eval_base = coco.create_coco_iterable(FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, logger)
-
-            train_dataset, train_num_images, train_num_classes, train_cat_names = create_dataset('train', train_base, is_training=True)
-            eval_dataset, eval_num_images, eval_num_classes, eval_cat_names = create_dataset('eval', eval_base, is_training=False)
-        elif FLAGS.dataset_type == 'tfrecords':
+        if FLAGS.dataset_type == 'tfrecords':
             train_num_images = FLAGS.train_num_images
             eval_num_images = FLAGS.eval_num_images
             train_num_classes = FLAGS.num_classes
