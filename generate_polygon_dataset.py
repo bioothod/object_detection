@@ -107,6 +107,9 @@ def do_work(worker_id, step, num_images, image_size):
         except coco.ProcessingError as e:
             continue
 
+        assert true_bboxes.dtype == np.float32
+        assert true_keypoints.dtype == np.float32
+
         processed += 1
         bboxes += np.count_nonzero(true_labels)
 
@@ -129,7 +132,6 @@ def do_work(worker_id, step, num_images, image_size):
             logger.info('{}: true anchors: {}'.format(dst, new_anns))
 
             image_draw.draw_im(image, new_anns, dst, {})
-
 
         example = tf.train.Example(features=tf.train.Features(feature={
             'image_id': _int64_feature(image_id),
