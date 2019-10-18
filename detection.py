@@ -12,7 +12,6 @@ logger = logging.getLogger('detection')
 
 
 import anchors_gen
-import coco
 import image as image_draw
 import loss
 import preprocess_ssd
@@ -59,8 +58,12 @@ def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_rat
                 'true_keypoints': tf.io.FixedLenFeature([], tf.string),
                 'image': tf.io.FixedLenFeature([], tf.string),
             })
+    filename = features['filename']
 
+    orig_keypoints = tf.io.decode_raw(features['true_keypoints'], tf.float32)
     orig_bboxes = tf.io.decode_raw(features['true_bboxes'], tf.float32)
+
+    orig_keypoints = tf.reshape(orig_keypoints, [-1, 2])
     orig_bboxes = tf.reshape(orig_bboxes, [-1, 4])
 
     orig_labels = tf.io.decode_raw(features['true_labels'], tf.int32)
@@ -68,7 +71,6 @@ def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_rat
         # labels should start from zero, originally zero was background for SSD training
         orig_labels -= 1
 
-    filename = features['filename']
     image_id = features['image_id']
     image = tf.image.decode_jpeg(features['image'], channels=3)
 
