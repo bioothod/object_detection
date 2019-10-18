@@ -307,7 +307,7 @@ class COCO_Iterable:
         keypoints = annotations['keypoints']
 
         if return_orig_format:
-            true_keypoints = np.array([keypoints])
+            true_keypoints = np.array([keypoints], dtype=np.float32)
 
             if False:
                 if len(bboxes) == 0:
@@ -328,12 +328,21 @@ class COCO_Iterable:
                 ymin = true_keypoints[..., 1].min()
                 ymax = true_keypoints[..., 1].max()
 
+                if xmin < 0:
+                    xmin = 0
+                if ymin < 0:
+                    ymin = 0
+                if xmax > image.shape[1]:
+                    xmax = image.shape[1]
+                if ymax > image.shape[0]:
+                    ymax = image.shape[0]
+
                 cx = (xmin + xmax) / 2
                 cy = (ymin + ymax) / 2
                 w = xmax - xmin
                 h = ymax - ymin
 
-                true_bboxes = np.array([[cx, cy, h, w]])
+                true_bboxes = np.array([[cx, cy, h, w]], dtype=np.float32)
 
             true_labels = np.array([self.cats[cat_id] for cat_id in cat_ids], dtype=np.int32)
 
