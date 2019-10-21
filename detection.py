@@ -12,6 +12,7 @@ logger = logging.getLogger('detection')
 
 
 import anchors_gen
+import encoder
 import image as image_draw
 import loss
 import preprocess_ssd
@@ -55,15 +56,15 @@ def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_rat
                 'filename': tf.io.FixedLenFeature([], tf.string),
                 'true_labels': tf.io.FixedLenFeature([], tf.string),
                 'true_bboxes': tf.io.FixedLenFeature([], tf.string),
-                'true_keypoints': tf.io.FixedLenFeature([], tf.string),
+                #'true_keypoints': tf.io.FixedLenFeature([], tf.string),
                 'image': tf.io.FixedLenFeature([], tf.string),
             })
     filename = features['filename']
 
-    orig_keypoints = tf.io.decode_raw(features['true_keypoints'], tf.float32)
-    orig_bboxes = tf.io.decode_raw(features['true_bboxes'], tf.float32)
+    #orig_keypoints = tf.io.decode_raw(features['true_keypoints'], tf.float32)
+    #orig_keypoints = tf.reshape(orig_keypoints, [-1, 2])
 
-    orig_keypoints = tf.reshape(orig_keypoints, [-1, 2])
+    orig_bboxes = tf.io.decode_raw(features['true_bboxes'], tf.float32)
     orig_bboxes = tf.reshape(orig_bboxes, [-1, 4])
 
     orig_labels = tf.io.decode_raw(features['true_labels'], tf.int32)
@@ -209,8 +210,10 @@ def train():
         global_step = tf.Variable(1, dtype=tf.int64, name='global_step', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
         learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
 
-        model = yolo.create_model(FLAGS.num_classes)
-        anchors_all, output_xy_grids, output_ratios, image_size = anchors_gen.generate_anchors(FLAGS.image_size)
+        image_size = FLAGS.image_size
+        model = encoder.create_model(FLAGS.model_name, FLAGS.num_classes)
+        image_size = model.image_size
+        anchors_all, output_xy_grids, output_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
 
         def create_dataset_from_tfrecord(name, dataset_dir, image_size, num_classes, is_training):
             filenames = []
@@ -285,10 +288,13 @@ def train():
             logger.info("Initializing from scratch, no latest checkpoint")
 
             if FLAGS.base_checkpoint:
-                status = checkpoint.restore(FLAGS.base_checkpoint)
+                base_checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model.body)
+                status = base_checkpoint.restore(FLAGS.base_checkpoint)
                 status.expect_partial()
 
-                logger.info("Restored base model from external checkpoint {}".format(FLAGS.base_checkpoint))
+                saved_path = manager.save()
+                logger.info("Restored base model from external checkpoint {} and saved object-based checkpoint {}".format(FLAGS.base_checkpoint, saved_path))
+                exit(0)
 
         loss_metric = tf.keras.metrics.Mean(name='train_loss')
         accuracy_metric = tf.keras.metrics.BinaryAccuracy(name='train_accuracy')

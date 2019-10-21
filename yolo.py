@@ -208,8 +208,8 @@ class DarknetUpsampling(tf.keras.layers.Layer):
         self.conv = DarknetConv(params, num_features, kernel_size=(1, 1), strides=(1, 1), padding='SAME')
         self.upsampling = tf.keras.layers.UpSampling2D(2)
 
-    def call(self, input_tensor, training):
-        x = self.conv(input_tensor, training)
+    def call(self, inputs, training):
+        x = self.conv(inputs, training)
         x = self.upsampling(x)
         return x
 
@@ -247,16 +247,15 @@ class DarknetHead(tf.keras.layers.Layer):
 
 
 class Yolo3(tf.keras.Model):
-    def __init__(self, params, num_classes, **kwargs):
+    def __init__(self, params, image_size, num_classes, **kwargs):
         super(Yolo3, self).__init__(**kwargs)
 
         self.num_classes = num_classes
         self.body = DarknetBody(params)
         self.head = DarknetHead(params, num_classes)
 
-    def load_darknet_params(self, weights_file, skip_detect_layer=False):
-        weight_reader = WeightReader(weights_file)
-        weight_reader.load_weights(self, skip_detect_layer)
+        output_size = image_size / 32
+        self.output_sizes = [int(np.math.pow(2, i) * output_size) for i in range(3)]
 
     def call(self, input_tensor, training):
         s3, s4, s5 = self.body(input_tensor, training)
@@ -274,7 +273,7 @@ class Yolo3(tf.keras.Model):
 def local_relu(x):
     return x * tf.nn.sigmoid(x)
 
-def create_model(num_classes):
+def create_model(image_size, num_classes):
     data_format='channels_last'
 
     if data_format == 'channels_first':
@@ -293,26 +292,5 @@ def create_model(num_classes):
         relu_fn=local_relu)
 
 
-    model = Yolo3(params, num_classes)
+    model = Yolo3(params, image_size, num_classes)
     return model
-
-DOWNSAMPLE_RATIO = 32
-
-def create_anchors():
-    anchors_dict = {
-        '0': [
-            [(10, 13), (16, 30), (33, 23), (30, 61), (62, 45), (59, 119), (116, 90), (156, 198), (373, 326)],
-            416,
-        ],
-        '1': [
-            [(17, 18), (28, 24), (36, 34), (42, 44), (56, 51), (72, 66), (90, 95), (92, 154), (139, 281)],
-            352,
-        ],
-    }
-
-    anchors, image_size = anchors_dict["0"]
-    # _,_,W,H format
-    anchors = np.array(anchors, dtype=np.float32)
-    areas = anchors[:, 0] * anchors[:, 1]
-
-    return anchors, areas, image_size

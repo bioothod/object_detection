@@ -1,0 +1,9 @@
+Cython
+numpy
+pandas
+scikit-learn
+Pillow
+tfa-nightly
+tensorflow-datasets
+matplotlib
+git+https://github.com/albu/albumentations

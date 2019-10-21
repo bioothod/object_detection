@@ -4,28 +4,36 @@ import numpy as np
 import tensorflow as tf
 
 import loss
-import yolo
 
 logger = logging.getLogger('detection')
 
-def generate_anchors(ext_image_size):
+
+def create_anchors():
+    anchors_dict = {
+        '0': [(10, 13), (16, 30), (33, 23), (30, 61), (62, 45), (59, 119), (116, 90), (156, 198), (373, 326)],
+        '1': [(17, 18), (28, 24), (36, 34), (42, 44), (56, 51), (72, 66), (90, 95), (92, 154), (139, 281)],
+    }
+
+    anchors = anchors_dict["0"]
+    # _,_,W,H format
+    anchors = np.array(anchors, dtype=np.float32)
+    areas = anchors[:, 0] * anchors[:, 1]
+
+    return anchors, areas
+
+def generate_anchors(image_size, output_sizes):
         num_scales = 3
         num_boxes = 3
 
-        np_anchor_boxes, np_anchor_areas, image_size = yolo.create_anchors()
-        if ext_image_size > 0:
-            image_size = ext_image_size
+        np_anchor_boxes, np_anchor_areas = create_anchors()
 
         anchors_reshaped = tf.reshape(np_anchor_boxes, [num_scales, num_boxes, 2])
         anchors_abs_coords = []
 
-        scaled_size = image_size / yolo.DOWNSAMPLE_RATIO
         output_xy_grids = []
         output_ratios = []
 
-        for base_scale in range(num_scales):
-            output_size = int(scaled_size) * tf.math.pow(2, base_scale)
-
+        for base_scale, output_size in zip(range(num_scales), output_sizes):
             output_size_float = tf.cast(output_size, tf.float32)
             ratio = float(image_size) / output_size_float
 
@@ -55,7 +63,7 @@ def generate_anchors(ext_image_size):
         output_xy_grids = tf.concat(output_xy_grids, axis=0)
         output_ratios = tf.concat(output_ratios, axis=0)
 
-        return anchors_all, output_xy_grids, output_ratios, image_size
+        return anchors_all, output_xy_grids, output_ratios
 
 def create_xy_grid(batch_size, output_size, anchors_per_scale):
     y = tf.tile(tf.range(output_size, dtype=tf.int32)[:, tf.newaxis], [1, output_size])
@@ -81,8 +89,6 @@ def generate_true_labels_for_anchors(orig_bboxes, orig_labels, anchors_all, outp
 
     num_scales = 3
     num_boxes = 3
-
-    scaled_size = image_size / yolo.DOWNSAMPLE_RATIO
 
     ious = loss.box_iou(orig_bboxes, anchors_all)
     #logger.info('ious: {}, orig_bboxes: {}, anchors_all: {}, output_xy_grids: {}, output_ratios: {}'.format(
