@@ -66,7 +66,8 @@ def draw_im(im, ann, dst, cat_names):
 
         draw_rect(ax, bb, color)
 
-        draw_kp(ax, kp)
+        if kp is not None:
+            draw_kp(ax, kp)
 
         if True:
             if c in cat_names:
