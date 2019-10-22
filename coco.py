@@ -1,4 +1,3 @@
-import anchor
 import cv2
 import json
 import os
@@ -166,6 +165,31 @@ class COCO:
 
 def round_clip_0_1(x, **kwargs):
     return x.round().clip(0, 1)
+
+def calc_iou(box, boxes, area):
+    bx0 = boxes[:, 0] - boxes[:, 3]/2
+    bx1 = boxes[:, 0] + boxes[:, 3]/2
+    by0 = boxes[:, 1] - boxes[:, 2]/2
+    by1 = boxes[:, 1] + boxes[:, 2]/2
+
+    x0 = box[0] - box[3]/2
+    x1 = box[0] + box[3]/2
+    y0 = box[1] - box[2]/2
+    y1 = box[1] + box[2]/2
+    box_area = box[2] * box[3]
+
+    xx0 = np.maximum(x0, bx0)
+    yy0 = np.maximum(y0, by0)
+    xx1 = np.minimum(x1, bx1)
+    yy1 = np.minimum(y1, by1)
+
+    w = np.maximum(0, xx1 - xx0 + 1)
+    h = np.maximum(0, yy1 - yy0 + 1)
+
+    inter = w * h
+    ovr = inter / (box_area + area - inter)
+    return ovr
+
 
 def get_training_augmentation(image_size, bbox_params):
     train_transform = [
@@ -399,7 +423,7 @@ class COCO_Iterable:
 
             box = np.array([cx, cy, h, w])
 
-            iou = anchor.calc_iou(box, self.np_anchor_boxes, self.np_anchor_areas)
+            iou = calc_iou(box, self.np_anchor_boxes, self.np_anchor_areas)
 
             assert iou.shape == max_ious.shape
 
