@@ -213,6 +213,11 @@ def train():
         image_size = FLAGS.image_size
         model = encoder.create_model(FLAGS.model_name, FLAGS.num_classes)
         image_size = model.image_size
+        if model.output_sizes is None:
+            dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
+            dstrategy.experimental_run_v2(lambda m, inp: m(inp, True), args=(model, dummy_input))
+            logger.info('model output sizes: {}'.format(model.output_sizes))
+
         anchors_all, output_xy_grids, output_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
 
         def create_dataset_from_tfrecord(name, dataset_dir, image_size, num_classes, is_training):

@@ -190,8 +190,9 @@ class EfnYolo(tf.keras.layers.Layer):
                 'efficientnet-b1': [8, 16, 32],
                 'efficientnet-b2': [9, 18, 36],
                 'efficientnet-b4': [12, 24, 48],
+                'efficientnet-b6': [17, 34, 68],
         }
-        self.output_sizes = os[params.model_name]
+        self.output_sizes = os.get(params.model_name, None)
 
     def call(self, inputs, training):
         l = self.body(inputs, training)
