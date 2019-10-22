@@ -11,12 +11,10 @@ from collections import defaultdict
 
 import anchors_gen
 import coco
+import encoder
 import image as image_draw
 import loss
-import map_iter
-import preprocess
 import preprocess_ssd
-import yolo
 
 logger = logging.getLogger('detection')
 logger.propagate = False
@@ -43,6 +41,7 @@ parser.add_argument('--checkpoint_dir', type=str, help='Load model weights from 
 parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='Model name')
 parser.add_argument('--data_format', type=str, default='channels_last', choices=['channels_first', 'channels_last'], help='Data format: [channels_first, channels_last]')
 parser.add_argument('--do_not_step_labels', action='store_true', help='Whether to reduce labels by 1, i.e. when 0 is background class')
+parser.add_argument('--skip_checkpoint_assertion', action='store_true', help='Skip checkpoint assertion, needed for older models on objdet3/4')
 parser.add_argument('--no_channel_swap', action='store_true', help='When set, do not perform rgb-bgr conversion, needed, when using files as input')
 parser.add_argument('--freeze', action='store_true', help='Save frozen protobuf near checkpoint')
 parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
@@ -388,7 +387,7 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_a
                     filename,
                     coord, bb, objs, score, cat_id))
 
-                anns.append((bb, cat_id))
+                anns.append((bb, None, cat_id))
 
             image = preprocess_ssd.denormalize_image(image)
             image = image.numpy()
@@ -408,12 +407,10 @@ def run_inference():
     num_classes = FLAGS.num_classes
     num_images = len(FLAGS.filenames)
 
-    if FLAGS.eval_coco_annotations:
-        eval_base = coco.create_coco_iterable(FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, logger)
-
     dtype = tf.float32
-    model = yolo.create_model(num_classes)
-    all_anchors, all_grid_xy, all_ratios, image_size = anchors_gen.generate_anchors(-1)
+    model = encoder.create_model(FLAGS.model_name, FLAGS.num_classes)
+    image_size = model.image_size
+    all_anchors, all_grid_xy, all_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
 
     checkpoint = tf.train.Checkpoint(model=model)
 
@@ -428,8 +425,9 @@ def run_inference():
             images = tf.reshape(images, [-1, image_size, image_size, 3])
             images = normalize_image(images, dtype)
 
-            model = yolo.create_model(num_classes)
-            all_anchors, all_grid_xy, all_ratios, image_size = anchors_gen.generate_anchors(-1)
+            model = encoder.create_model(FLAGS.model_name, FLAGS.num_classes)
+            image_size = model.image_size
+            all_anchors, all_grid_xy, all_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
 
             checkpoint = tf.train.Checkpoint(model=model)
 
@@ -456,50 +454,39 @@ def run_inference():
 
 
     status = checkpoint.restore(checkpoint_prefix)
-    status.assert_existing_objects_matched().expect_partial()
+    if FLAGS.skip_checkpoint_assertion:
+        status.assert_existing_objects_matched().expect_partial()
     logger.info("Restored from external checkpoint {}".format(checkpoint_prefix))
 
     if FLAGS.eval_coco_annotations:
+        eval_base = coco.create_coco_iterable(FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, logger)
+
         coco.complete_initialization(eval_base, image_size, anchors_boxes, anchor_areas, False)
 
         num_images = len(eval_base)
         num_classes = eval_base.num_classes()
         cat_names = eval_base.cat_names()
 
-        ds = map_iter.from_indexable(eval_base,
-                num_parallel_calls=FLAGS.num_cpus,
-                output_types=(tf.string, tf.int64, tf.float32, tf.float32, tf.int32),
-                output_shapes=(
-                    tf.TensorShape([]),
-                    tf.TensorShape([]),
-                    tf.TensorShape([image_size, image_size, 3]),
-                    tf.TensorShape([num_anchors, 4]),
-                    tf.TensorShape([num_anchors]),
-                ))
-        ds = ds.map(lambda filename, image_id, image, true_bboxes, true_labels:
-                    tf_left_needed_dimensions(image_size, filename, image_id, image, true_bboxes, true_labels),
-                num_parallel_calls=FLAGS.num_cpus)
-    else:
-        if FLAGS.dataset_type == 'files':
-            ds = tf.data.Dataset.from_tensor_slices((FLAGS.filenames))
-            ds = ds.map(lambda fn: tf_read_image(fn, image_size, dtype), num_parallel_calls=FLAGS.num_cpus)
-        elif FLAGS.dataset_type == 'tfrecords':
-            from detection import unpack_tfrecord
+    if FLAGS.dataset_type == 'files':
+        ds = tf.data.Dataset.from_tensor_slices((FLAGS.filenames))
+        ds = ds.map(lambda fn: tf_read_image(fn, image_size, dtype), num_parallel_calls=FLAGS.num_cpus)
+    elif FLAGS.dataset_type == 'tfrecords':
+        from detection import unpack_tfrecord
 
-            filenames = []
-            for fn in os.listdir(FLAGS.eval_tfrecord_dir):
-                fn = os.path.join(FLAGS.eval_tfrecord_dir, fn)
-                if os.path.isfile(fn):
-                    filenames.append(fn)
+        filenames = []
+        for fn in os.listdir(FLAGS.eval_tfrecord_dir):
+            fn = os.path.join(FLAGS.eval_tfrecord_dir, fn)
+            if os.path.isfile(fn):
+                filenames.append(fn)
 
-            ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=2)
-            ds = ds.map(lambda record: unpack_tfrecord(record, all_anchors, all_grid_xy, all_ratios,
-                        image_size, num_classes, False,
-                        FLAGS.data_format, FLAGS.do_not_step_labels),
-                num_parallel_calls=16)
-            ds = ds.map(lambda filename, image_id, image, true_values: tf_left_needed_dimensions_from_tfrecord(image_size, all_anchors, all_grid_xy, all_ratios, num_classes,
-                        filename, image_id, image, true_values),
-                num_parallel_calls=16)
+        ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=2)
+        ds = ds.map(lambda record: unpack_tfrecord(record, all_anchors, all_grid_xy, all_ratios,
+                    image_size, num_classes, False,
+                    FLAGS.data_format, FLAGS.do_not_step_labels),
+            num_parallel_calls=16)
+        ds = ds.map(lambda filename, image_id, image, true_values: tf_left_needed_dimensions_from_tfrecord(image_size, all_anchors, all_grid_xy, all_ratios, num_classes,
+                    filename, image_id, image, true_values),
+            num_parallel_calls=16)
 
     ds = ds.batch(FLAGS.batch_size)
     ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
