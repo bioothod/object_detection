@@ -3,6 +3,7 @@ import cv2
 import logging
 import os
 import sys
+import time
 
 import numpy as np
 import tensorflow as tf
@@ -26,7 +27,7 @@ logger.addHandler(__handler)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--eval_coco_annotations', type=str, help='Path to MS COCO dataset: annotations json file')
-parser.add_argument('--eval_coco_data_dir', type=str, help='Path to MS COCO dataset: image directory')
+parser.add_argument('--eval_coco_data_dir', type=str, default='/', help='Path to MS COCO dataset: image directory')
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch')
 parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel preprocessing jobs')
 parser.add_argument('--num_classes', type=int, required=True, help='Number of the output classes in the model')
@@ -275,17 +276,22 @@ def per_image_supression(logits, image_size, num_classes):
         ymin = cy - h/2
         ymax = cy + h/2
 
+        xmin = tf.maximum(0., xmin)
+        ymin = tf.maximum(0., ymin)
+        xmax = tf.minimum(float(image_size), xmax)
+        ymax = tf.minimum(float(image_size), ymax)
+
         coords_yx = tf.stack([ymin, xmin, ymax, xmax], axis=1)
 
         #scores_to_sort = selected_scores * selected_objs
         scores_to_sort = selected_objs
-        if False:
+        if True:
             selected_indexes = tf.image.non_max_suppression(coords_yx, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
         else:
             selected_indexes = non_max_suppression(coords_yx, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
 
         #logger.info('selected_indexes: {}, selected_coords: {}, selected_scores: {}'.format(selected_indexes, selected_coords, selected_scores))
-        selected_coords = tf.gather(selected_coords, selected_indexes)
+        selected_coords = tf.gather(coords_yx, selected_indexes)
         selected_scores = tf.gather(selected_scores, selected_indexes)
         selected_objs = tf.gather(selected_objs, selected_indexes)
 
@@ -352,18 +358,21 @@ def eval_step_logits(model, images, image_size, num_classes, all_anchors, all_gr
                      infer_shape=False,
                      dtype=(tf.float32, tf.float32, tf.float32, tf.int32))
 
-def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_anchors, all_grid_xy, all_ratios):
+def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_anchors, all_grid_xy, all_ratios, cat_names):
     num_files = 0
     for filenames, images in dataset:
+        start_time = time.time()
         coords_batch, scores_batch, objs_batch, cat_ids_batch = eval_step_logits(model, images, image_size, num_classes, all_anchors, all_grid_xy, all_ratios)
-
         num_files += len(filenames)
+        time_per_image_ms = (time.time() - start_time) / len(filenames) * 1000
+
+        logger.info('batch images: {}, total_processed: {}, time_per_image: {:.1f} ms'.format(len(filenames), num_files, time_per_image_ms))
 
         for filename, image, coords, scores, objectness, cat_ids in zip(filenames, images, coords_batch, scores_batch, objs_batch, cat_ids_batch):
             filename = str(filename.numpy(), 'utf8')
 
             good_scores = np.count_nonzero((scores.numpy() > 0))
-            logger.info('{}: scores: {}'.format(filename, good_scores))
+            logger.info('{}: scores: {}, time_per_image: {:.1f} ms'.format(filename, good_scores, time_per_image_ms))
 
             anns = []
 
@@ -371,21 +380,13 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_a
                 if score.numpy() == 0:
                     break
 
-                coord = coord.numpy()
-
-                cx, cy, w, h = coord
-                x0 = cx - w/2
-                x1 = cx + w/2
-                y0 = cy - h/2
-                y1 = cy + h/2
-
-                bb = [x0, y0, x1, y1]
+                bb = coord.numpy()
+                ymin, xmin, ymax, xmax = bb
+                bb = [xmin, ymin, xmax, ymax]
 
                 cat_id = cat_id.numpy()
 
-                logger.info('{}: bbox: {} -> {}, obj: {:.3f}, score: {:.3f}, cat_id: {}'.format(
-                    filename,
-                    coord, bb, objs, score, cat_id))
+                logger.info('{}: bbox: {}, obj: {:.3f}, score: {:.3f}, cat_id: {}'.format(filename, bb, objs, score, cat_id))
 
                 anns.append((bb, None, cat_id))
 
@@ -396,12 +397,11 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_a
             if not FLAGS.no_channel_swap:
                 image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
-            cat_names = {}
             dst_filename = os.path.basename(filename)
             dst_filename = os.path.join(FLAGS.output_dir, dst_filename)
             image_draw.draw_im(image, anns, dst_filename, cat_names)
 
-        return
+        #return
 
 def run_inference():
     num_classes = FLAGS.num_classes
@@ -455,13 +455,15 @@ def run_inference():
 
     status = checkpoint.restore(checkpoint_prefix)
     if FLAGS.skip_checkpoint_assertion:
+        status.expect_partial()
+    else:
         status.assert_existing_objects_matched().expect_partial()
     logger.info("Restored from external checkpoint {}".format(checkpoint_prefix))
 
+    cat_names = {}
+
     if FLAGS.eval_coco_annotations:
         eval_base = coco.create_coco_iterable(FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, logger)
-
-        coco.complete_initialization(eval_base, image_size, anchors_boxes, anchor_areas, False)
 
         num_images = len(eval_base)
         num_classes = eval_base.num_classes()
@@ -495,7 +497,7 @@ def run_inference():
 
     os.makedirs(FLAGS.output_dir, exist_ok=True)
 
-    run_eval(model, ds, num_images, image_size, FLAGS.num_classes, FLAGS.output_dir, all_anchors, all_grid_xy, all_ratios)
+    run_eval(model, ds, num_images, image_size, FLAGS.num_classes, FLAGS.output_dir, all_anchors, all_grid_xy, all_ratios, cat_names)
 
 if __name__ == '__main__':
     np.set_printoptions(formatter={'float': '{:0.4f}'.format, 'int': '{:4d}'.format}, linewidth=250, suppress=True, threshold=np.inf)
