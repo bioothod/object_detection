@@ -19,10 +19,6 @@ import preprocess_ssd
 import yolo
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--train_coco_annotations', type=str, help='Path to MS COCO dataset: annotations json file')
-parser.add_argument('--train_coco_data_dir', type=str, help='Path to MS COCO dataset: image directory')
-parser.add_argument('--eval_coco_annotations', type=str, help='Path to MS COCO dataset: annotations json file')
-parser.add_argument('--eval_coco_data_dir', type=str, help='Path to MS COCO dataset: image directory')
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch.')
 parser.add_argument('--num_epochs', type=int, default=1000, help='Number of epochs to run.')
 parser.add_argument('--epoch', type=int, default=0, help='Initial epoch\'s number')
@@ -45,32 +41,24 @@ parser.add_argument('--train_tfrecord_dir', type=str, help='Directory containing
 parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
 parser.add_argument('--num_classes', type=int, help='Number of classes in the dataset')
 parser.add_argument('--image_size', type=int, default=0, help='Use this image size, if 0 - use default')
-parser.add_argument('--do_not_step_labels', action='store_true', help='Whether to reduce labels by 1, i.e. when 0 is background class')
 parser.add_argument('--train_num_images', type=int, help='Number of images in train epoch')
 parser.add_argument('--eval_num_images', type=int, help='Number of images in eval epoch')
 
-def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_ratios, image_size, num_classes, is_training, data_format, do_not_step_labels):
+def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_ratios, image_size, num_classes, is_training, data_format):
     features = tf.io.parse_single_example(serialized_example,
             features={
                 'image_id': tf.io.FixedLenFeature([], tf.int64),
                 'filename': tf.io.FixedLenFeature([], tf.string),
                 'true_labels': tf.io.FixedLenFeature([], tf.string),
                 'true_bboxes': tf.io.FixedLenFeature([], tf.string),
-                #'true_keypoints': tf.io.FixedLenFeature([], tf.string),
                 'image': tf.io.FixedLenFeature([], tf.string),
             })
     filename = features['filename']
 
-    #orig_keypoints = tf.io.decode_raw(features['true_keypoints'], tf.float32)
-    #orig_keypoints = tf.reshape(orig_keypoints, [-1, 2])
-
     orig_bboxes = tf.io.decode_raw(features['true_bboxes'], tf.float32)
     orig_bboxes = tf.reshape(orig_bboxes, [-1, 4])
 
-    orig_labels = tf.io.decode_raw(features['true_labels'], tf.int32)
-    if not do_not_step_labels:
-        # labels should start from zero, originally zero was background for SSD training
-        orig_labels -= 1
+    true_text_labels = tf.strings.split(features['true_labels'], '<SEP>')
 
     image_id = features['image_id']
     image = tf.image.decode_jpeg(features['image'], channels=3)
@@ -119,16 +107,16 @@ def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_rat
 
     orig_bboxes = tf.concat([cx, cy, w, h], axis=1)
 
-    true_values = anchors_gen.generate_true_labels_for_anchors(orig_bboxes, orig_labels,
+    true_values = anchors_gen.generate_true_values_for_anchors(orig_bboxes,
             anchors_all, output_xy_grids, output_ratios,
             image_size, num_classes)
 
-    return filename, image_id, image, true_values
+    return filename, image_id, image, true_values, true_text_labels
 
 def calc_epoch_steps(num_files):
     return (num_files + FLAGS.batch_size - 1) // FLAGS.batch_size
 
-def draw_bboxes(image_size, train_dataset, train_cat_names, all_anchors, all_grid_xy, all_ratios):
+def draw_bboxes(image_size, train_dataset, all_anchors, all_grid_xy, all_ratios):
     data_dir = os.path.join(FLAGS.train_dir, 'tmp')
     os.makedirs(data_dir, exist_ok=True)
 
@@ -136,8 +124,9 @@ def draw_bboxes(image_size, train_dataset, train_cat_names, all_anchors, all_gri
     all_grid_xy = all_grid_xy.numpy()
     all_ratios = all_ratios.numpy()
 
-    for filename, image_id, image, true_values in train_dataset.unbatch().take(20):
+    for filename, image_id, image, true_values, true_text_labels in train_dataset.unbatch().take(20):
         filename = str(filename.numpy(), 'utf8')
+        labels = [str(s, 'utf8') for s in true_text_labels.numpy()]
 
         dst = '{}/{}.png'.format(data_dir, image_id.numpy())
 
@@ -147,8 +136,6 @@ def draw_bboxes(image_size, train_dataset, train_cat_names, all_anchors, all_gri
         #logger.info('{}: true_values: {}, non_background_index: {}'.format(filename, true_values.shape, non_background_index.shape))
 
         bboxes = true_values[non_background_index, 0:4]
-        labels = true_values[non_background_index, 5:]
-        labels = np.argmax(labels, axis=1)
 
         anchors = all_anchors[non_background_index, :]
         grid_xy = all_grid_xy[non_background_index, :]
@@ -178,7 +165,7 @@ def draw_bboxes(image_size, train_dataset, train_cat_names, all_anchors, all_gri
         bb = np.stack([x0, y0, x1, y1], axis=1)
         new_anns = []
         for _bb, l in zip(bb, labels):
-            new_anns.append((_bb, l))
+            new_anns.append((_bb, None, l))
 
         logger.info('{}: true anchors: {}'.format(dst, len(new_anns)))
 
@@ -230,7 +217,7 @@ def train():
             ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
             ds = ds.map(lambda record: unpack_tfrecord(record, anchors_all, output_xy_grids, output_ratios,
                             image_size, num_classes, is_training,
-                            FLAGS.data_format, FLAGS.do_not_step_labels),
+                            FLAGS.data_format),
                     num_parallel_calls=FLAGS.num_cpus)
             if is_training:
                 ds = ds.shuffle(200)
@@ -305,7 +292,6 @@ def train():
         accuracy_metric = tf.keras.metrics.BinaryAccuracy(name='train_accuracy')
         obj_accuracy_metric = tf.keras.metrics.BinaryAccuracy(name='train_objectness_accuracy')
         iou_metric = tf.keras.metrics.Mean(name='train_best_iou')
-        mean_iou_metric = tf.keras.metrics.Mean(name='train_mean_iou')
         num_good_ious_metric = tf.keras.metrics.Mean(name='eval_num_good_ious')
         num_positive_labels_metric = tf.keras.metrics.Mean(name='eval_num_positive_labels_ious')
 
@@ -313,7 +299,6 @@ def train():
         eval_accuracy_metric = tf.keras.metrics.BinaryAccuracy(name='eval_accuracy')
         eval_obj_accuracy_metric = tf.keras.metrics.BinaryAccuracy(name='eval_objectness_accuracy')
         eval_iou_metric = tf.keras.metrics.Mean(name='eval_best_iou')
-        eval_mean_iou_metric = tf.keras.metrics.Mean(name='eval_mean_iou')
         eval_num_good_ious_metric = tf.keras.metrics.Mean(name='eval_num_good_ious')
         eval_num_positive_labels_metric = tf.keras.metrics.Mean(name='eval_num_positive_labels_ious')
 
@@ -322,7 +307,6 @@ def train():
             accuracy_metric.reset_states()
             obj_accuracy_metric.reset_states()
             iou_metric.reset_states()
-            mean_iou_metric.reset_states()
             num_good_ious_metric.reset_states()
             num_positive_labels_metric.reset_states()
 
@@ -330,7 +314,6 @@ def train():
             eval_accuracy_metric.reset_states()
             eval_obj_accuracy_metric.reset_states()
             eval_iou_metric.reset_states()
-            eval_mean_iou_metric.reset_states()
             eval_num_good_ious_metric.reset_states()
             eval_num_positive_labels_metric.reset_states()
 
@@ -338,7 +321,7 @@ def train():
 
         def calculate_metrics(logits, true_values,
                 loss_metric, accuracy_metric, obj_accuracy_metric,
-                iou_metric, mean_iou_metric, num_good_ious_metric, num_positive_labels_metric):
+                iou_metric, num_good_ious_metric, num_positive_labels_metric):
             dist_loss, class_loss, conf_loss_pos, conf_loss_neg = ylo.call(y_true=true_values, y_pred=logits)
 
             dist_loss = tf.nn.compute_average_loss(dist_loss, global_batch_size=FLAGS.batch_size)
@@ -388,13 +371,9 @@ def train():
                 best_ious_padded = tf.pad(best_ious,
                         [[0, tf.cast(tf.math.count_nonzero(object_mask), tf.int32) - tf.shape(valid_true_boxes)[0]]],
                         constant_values=-1.)
-                mean_ious = tf.reduce_mean(ious, axis=[0])
-                mean_ious_padded = tf.pad(mean_ious,
-                        [[0, tf.cast(tf.math.count_nonzero(object_mask), tf.int32) - tf.shape(valid_true_boxes)[0]]],
-                        constant_values=-1.)
-                return best_ious_padded, mean_ious_padded
+                return best_ious_padded
 
-            best_ious, mean_ious = tf.map_fn(lambda t: get_best_ious(t, object_mask, true_bboxes),
+            best_ious = tf.map_fn(lambda t: get_best_ious(t, object_mask, true_bboxes),
                                 (tf.range(tf.shape(pred_bboxes)[0]), pred_bboxes),
                                 parallel_iterations=32,
                                 back_prop=False,
@@ -405,11 +384,6 @@ def train():
             best_ious = tf.gather_nd(best_ious, best_ious_index)
             iou_metric.update_state(best_ious)
 
-            mean_ious = tf.reshape(mean_ious, [-1])
-            mean_ious_index = tf.where(mean_ious >= 0)
-            mean_ious = tf.gather_nd(mean_ious, mean_ious_index)
-            mean_iou_metric.update_state(mean_ious)
-
             good_ious = tf.where(best_ious > 0.5)
             num_good_ious_metric.update_state(tf.shape(good_ious)[0])
 
@@ -417,18 +391,18 @@ def train():
 
         epoch_var = tf.Variable(0, dtype=tf.float32, name='epoch_number', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
 
-        def eval_step(filenames, images, true_values):
+        def eval_step(filenames, images, true_values, true_text_labels):
             logits = model(images, training=False)
             dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = calculate_metrics(logits, true_values,
-                    eval_loss_metric, eval_accuracy_metric, eval_obj_accuracy_metric, eval_iou_metric, eval_mean_iou_metric,
+                    eval_loss_metric, eval_accuracy_metric, eval_obj_accuracy_metric, eval_iou_metric,
                     eval_num_good_ious_metric, eval_num_positive_labels_metric)
             return dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss
 
-        def train_step(filenames, images, true_values):
+        def train_step(filenames, images, true_values, true_text_labels):
             with tf.GradientTape() as tape:
                 logits = model(images, training=True)
                 dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = calculate_metrics(logits, true_values,
-                        loss_metric, accuracy_metric, obj_accuracy_metric, iou_metric, mean_iou_metric,
+                        loss_metric, accuracy_metric, obj_accuracy_metric, iou_metric,
                         num_good_ious_metric, num_positive_labels_metric)
 
             variables = model.trainable_variables
@@ -477,7 +451,7 @@ def train():
             accs = []
 
             step = 0
-            for filenames, image_ids, images, true_values in dataset:
+            for filenames, image_ids, images, true_values, true_text_labels in dataset:
                 # In most cases, the default data format NCHW instead of NHWC should be
                 # used for a significant performance boost on GPU/TPU. NHWC should be used
                 # only if the network needs to be run on CPU since the pooling operations
@@ -486,13 +460,13 @@ def train():
                     images = tf.transpose(images, [0, 3, 1, 2])
 
 
-                dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = step_func(args=(filenames, images, true_values))
+                dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = step_func(args=(filenames, images, true_values, true_text_labels))
                 if (name == 'train' and step % FLAGS.print_per_train_steps == 0) or np.isnan(total_loss.numpy()):
-                    logger.info('{}: {}: step: {}/{}, dist_loss: {:.2e}, class_loss: {:.2e}, conf_loss: {:.2e}/{:.2e}, total_loss: {:.2e}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}/{:.3f}, good_ios/pos: {}/{}'.format(
+                    logger.info('{}: {}: step: {}/{}, dist_loss: {:.2e}, class_loss: {:.2e}, conf_loss: {:.2e}/{:.2e}, total_loss: {:.2e}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}, good_ios/pos: {}/{}'.format(
                         name, int(epoch_var.numpy()), step, max_steps,
                         dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss,
                         accuracy_metric.result(), obj_accuracy_metric.result(),
-                        iou_metric.result(), mean_iou_metric.result(),
+                        iou_metric.result(),
                         int(num_good_ious_metric.result()), int(num_positive_labels_metric.result()),
                         ))
 
@@ -549,12 +523,12 @@ def train():
 
             metric = validation_metric()
 
-            logger.info('epoch: {}, train: steps: {}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}/{:.3f}, good_ios/pos: {}/{}, loss: {:.2e}, eval: accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}/{:.3f}, good_ios/pos: {}/{}, loss: {:.2e}, lr: {:.2e}, val_metric: {:.3f}'.format(
+            logger.info('epoch: {}, train: steps: {}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}, good_ios/pos: {}/{}, loss: {:.2e}, eval: accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}, good_ios/pos: {}/{}, loss: {:.2e}, lr: {:.2e}, val_metric: {:.3f}'.format(
                 epoch, global_step.numpy(),
-                accuracy_metric.result(), obj_accuracy_metric.result(), iou_metric.result(), mean_iou_metric.result(),
+                accuracy_metric.result(), obj_accuracy_metric.result(), iou_metric.result(),
                 int(num_good_ious_metric.result()), int(num_positive_labels_metric.result()),
                 loss_metric.result(),
-                eval_accuracy_metric.result(), eval_obj_accuracy_metric.result(), eval_iou_metric.result(), eval_mean_iou_metric.result(),
+                eval_accuracy_metric.result(), eval_obj_accuracy_metric.result(), eval_iou_metric.result(),
                 int(eval_num_good_ious_metric.result()), int(eval_num_positive_labels_metric.result()),
                 eval_loss_metric.result(),
                 learning_rate.numpy(),
@@ -565,9 +539,9 @@ def train():
             if metric > min_metric:
                 best_saved_path = checkpoint.save(file_prefix='{}/ckpt-{:.4f}'.format(good_checkpoint_dir, metric))
 
-                logger.info("epoch: {}, saved checkpoint: {}, eval metric: {:.4f} -> {:.4f}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}/{:.3f}, good_ios/positive: {}/{}".format(
+                logger.info("epoch: {}, saved checkpoint: {}, eval metric: {:.4f} -> {:.4f}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}, good_ios/positive: {}/{}".format(
                     epoch, best_saved_path, min_metric, metric,
-                    eval_accuracy_metric.result(), eval_obj_accuracy_metric.result(), eval_iou_metric.result(), eval_mean_iou_metric.result(),
+                    eval_accuracy_metric.result(), eval_obj_accuracy_metric.result(), eval_iou_metric.result()
                     int(eval_num_good_ious_metric.result()), int(eval_num_positive_labels_metric.result())))
                 min_metric = metric
                 num_epochs_without_improvement = 0

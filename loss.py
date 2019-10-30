@@ -57,7 +57,6 @@ class YOLOLoss:
                  obj_scale=1.,
                  noobj_scale=1.,
                  dist_scale=1.,
-                 class_scale=1.,
                  **kwargs):
 
         #super(YOLOLoss, self).__init__(**kwargs)
@@ -68,7 +67,6 @@ class YOLOLoss:
         self.obj_scale = obj_scale
         self.noobj_scale = noobj_scale
         self.dist_scale = dist_scale
-        self.class_scale = class_scale
 
         # added batch dimension
         self.grid_xy = tf.expand_dims(grid_xy, 0)
@@ -159,17 +157,6 @@ class YOLOLoss:
         dist_loss = tf.reduce_sum(dist_loss, [1, 2])
 
 
-        smooth_true_classes = true_classes
-        if True:
-            delta = 0.04
-            smooth_true_classes = (1 - delta) * true_classes + delta / self.num_classes
-        class_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_classes, logits=pred_classes)
-        class_loss = tf.reduce_sum(class_loss, -1)
-        class_loss = tf.expand_dims(class_loss, -1)
-
-        class_loss = object_mask * class_loss
-        class_loss = tf.reduce_sum(class_loss, [1, 2])
-
         smooth_true_conf = true_conf
         if True:
             delta = 0.04
@@ -198,5 +185,5 @@ class YOLOLoss:
         conf_loss_neg = tf.reduce_sum(conf_loss_neg, [1, 2])
 
 
-        total_loss = dist_loss * self.dist_scale, class_loss * self.class_scale, conf_loss_pos * self.obj_scale, conf_loss_neg * self.noobj_scale
+        total_loss = dist_loss * self.dist_scale, conf_loss_pos * self.obj_scale, conf_loss_neg * self.noobj_scale
         return total_loss

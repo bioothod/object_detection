@@ -8,11 +8,6 @@ from collections import defaultdict
 
 import numpy as np
 
-from matplotlib.collections import PatchCollection
-from matplotlib.patches import Polygon
-
-from pycocotools import mask as maskUtils
-
 import albumentations as A
 
 class ProcessingError(Exception):
@@ -26,43 +21,6 @@ class COCO:
         self.logger = logger
 
         self.load_instance_json(ann_path)
-
-    def ann2rle(self, img, ann):
-        if not 'segmentation' in ann:
-            return None
-
-        if type(ann['segmentation']) == list:
-            segm = ann['segmentation']
-            # polygon
-            #for seg in segm:
-            #    poly = np.array(seg).reshape((int(len(seg)/2), 2))
-                #polygons.append(Polygon(poly))
-                #color.append(c)
-
-            rles = maskUtils.frPyObjects(segm, img['height'], img['width'])
-            rle = maskUtils.merge(rles)
-        else:
-            # mask
-            if type(ann['segmentation']['counts']) == list:
-                rle = maskUtils.frPyObjects([ann['segmentation']], img['height'], img['width'])
-            else:
-                rle = [ann['segmentation']]
-
-        return rle
-
-    def ann2mask(self, img, ann):
-        rle = self.ann2rle(img, ann)
-        if rle is None:
-            return None
-
-        return maskUtils.decode(rle)
-
-    def merge_masks(self, img, anns):
-        rles = []
-        for ann in anns:
-            rles.append(self.ann2rle(img, ann))
-
-        maskUtils.merge(rles)
 
     def load_instance_json(self, ann_path):
         self.dataset = json.load(open(ann_path, 'r'))
@@ -92,34 +50,6 @@ class COCO:
         self.cat2mgs = catToImgs
         self.imgs = imgs
         self.cats = cats
-
-        if False:
-            num = 0
-            for image_id, anns in self.img2anns.items():
-                for ann in anns:
-                    bbox = ann['bbox']
-                    category_id = ann['category_id']
-                    category_name = self.cats[category_id]['name']
-
-                    img = self.imgs[image_id]
-                    img_fn = img['file_name']
-                    if os.path.isabs(img_fn):
-                        filename = img_fn
-                    else:
-                        filename = os.path.join(self.data_dir, img_fn)
-
-                    segm_mask = self.ann2mask(img, ann)
-                    segm_mask_present = segm_mask is not None
-
-                    self.logger.info('image: {}, {}x{}, filename: {}, bbox: {}, category: {}/{}, segm mask: {}'.format
-                            (image_id, img['height'], img['width'], filename, bbox, category_name, category_id, segm_mask_present))
-
-                num += 1
-                if num > 2:
-                    break
-
-            self.logger.info('annotations: {}, images: {}, categories: {}'.format(len(self.anns), len(self.imgs), len(self.cats)))
-            category_names = [c['name'] for c in self.cats.values()]
 
     def num_images(self):
         return len(self.img2anns)
@@ -151,45 +81,229 @@ class COCO:
             tuples.append(t)
 
         random.shuffle(tuples)
-
-        if False:
-            image_id = 283290
-            annotations = self.img2anns[image_id]
-            t = self.gen_anns_for_id(image_id, annotations)
-
-            self.logger.info('image_id: {}, anns: {}'.format(image_id, t))
-
-            tuples = [t] + tuples
-
         return tuples
 
-def round_clip_0_1(x, **kwargs):
-    return x.round().clip(0, 1)
+def get_text_bbox_params():
+    return A.BboxParams(
+            format='coco',
+            min_area=0,
+            min_visibility=0.9,
+            label_fields=['texts'])
 
-def calc_iou(box, boxes, area):
-    bx0 = boxes[:, 0] - boxes[:, 3]/2
-    bx1 = boxes[:, 0] + boxes[:, 3]/2
-    by0 = boxes[:, 1] - boxes[:, 2]/2
-    by1 = boxes[:, 1] + boxes[:, 2]/2
+def get_text_train_augmentation(image_size):
+    bbox_params = get_text_bbox_params()
 
-    x0 = box[0] - box[3]/2
-    x1 = box[0] + box[3]/2
-    y0 = box[1] - box[2]/2
-    y1 = box[1] + box[2]/2
-    box_area = box[2] * box[3]
+    train_transform = [
+        A.RandomRotate90(p=0.3),
+        A.ShiftScaleRotate(rotate_limit=5, p=0.8),
 
-    xx0 = np.maximum(x0, bx0)
-    yy0 = np.maximum(y0, by0)
-    xx1 = np.minimum(x1, bx1)
-    yy1 = np.minimum(y1, by1)
+        A.OneOf([
+                A.CLAHE(p=1),
+                A.RandomBrightness(limit=0.01, p=1),
+                A.Blur(blur_limit=5, p=1),
+                #A.MedianBlur(blur_limit=5, p=1),
+                A.RandomContrast(limit=0.01, p=1),
+        ], p=0),
 
-    w = np.maximum(0, xx1 - xx0 + 1)
-    h = np.maximum(0, yy1 - yy0 + 1)
+    ]
 
-    inter = w * h
-    ovr = inter / (box_area + area - inter)
-    return ovr
+    return A.Compose(train_transform, bbox_params)
 
+
+def get_text_eval_augmentation(image_size):
+    bbox_params = get_text_bbox_params()
+
+    eval_transform = [
+        A.PadIfNeeded(image_size, image_size),
+        A.LongestMaxSize(max_size=image_size, interpolation=cv2.INTER_CUBIC),
+    ]
+    return A.Compose(eval_transform, bbox_params)
+
+class COCOText:
+    def __init__(self, ann_path, train_data_dir, eval_data_dir, logger):
+        self.logger = logger
+
+        self.load_instance_json(ann_path, train_data_dir, eval_data_dir)
+
+    def load_instance_json(self, ann_path, train_data_dir, eval_data_dir):
+        self.dataset = json.load(open(ann_path, 'r'))
+
+        def image_dict():
+            return {
+                    'anns': [],
+            }
+
+        train_images = defaultdict(image_dict)
+        eval_images = defaultdict(image_dict)
+
+        skipped_images = 0
+        train_anns = 0
+        eval_anns = 0
+
+        imgs = self.dataset['imgs']
+        anns = self.dataset['anns']
+        img2anns = self.dataset['imgToAnns']
+
+        #self.logger.info('dataset keys: {}, images: {}, anns: {}'.format(self.dataset.keys(), len(imgs), len(anns)))
+
+        for image_id_str, image_ctl in imgs.items():
+            image_id = int(image_id_str)
+
+            is_training = True
+            if image_ctl['set'] == 'val':
+                is_training = False
+                ctl = eval_images[image_id]
+            else:
+                ctl = train_images[image_id]
+
+            ctl['image_id'] = image_id
+
+            filename = '{:012d}.jpg'.format(image_id)
+            train_fn = os.path.join(train_data_dir, filename)
+            eval_fn = os.path.join(eval_data_dir, filename)
+
+            if os.path.exists(train_fn):
+                ctl['filename'] = train_fn
+            elif os.path.exists(eval_fn):
+                ctl['filename'] = eval_fn
+            else:
+                skipped_images += 1
+                continue
+
+            ann_ids = img2anns[image_id_str]
+
+            for ann_id in ann_ids:
+                ann = anns[str(ann_id)]
+
+                mask = ann['mask']
+                text_class = ann['class']
+                bbox = ann['bbox']
+                image_id = ann['image_id']
+                ann_id = ann['id']
+                language = ann['language']
+                area = ann['area']
+                text = ann['utf8_string']
+                legibility = ann['legibility']
+
+                if text == '':
+                    ann['utf8_string'] = '<SKIP>'
+
+                ctl['anns'].append(ann)
+
+                if is_training:
+                    train_anns += 1
+                else:
+                    eval_anns += 1
+
+            if is_training:
+                train_images[image_id] = ctl
+            else:
+                eval_images[image_id] = ctl
+
+        self.train_images = list(train_images.values())
+        self.eval_images = list(eval_images.values())
+
+        self.logger.info('scanned {}: train: images: {}, anns: {}, eval: images: {}, anns: {}, skipped_images: {}'.format(
+            ann_path,
+            len(self.train_images), train_anns,
+            len(self.eval_images), eval_anns,
+            skipped_images))
+
+        image_id = 475485
+        def print_text(image_id):
+            ctl = train_images.get(image_id)
+            if ctl is None:
+                ctl = eval_images.get(image_id)
+            if ctl is None:
+                return None
+
+            texts = []
+            for ann in ctl['anns']:
+                if ann['legibility'] == 'legible':
+                    texts.append(ann['utf8_string'])
+
+            return texts
+
+        #self.logger.info('{}: {}'.format(image_id, print_text(image_id)))
+
+    def num_images(self, is_training):
+        if is_training:
+            return len(self.train_images)
+        else:
+            return len(self.eval_images)
+
+    def process_image(self, idx, is_training, augmentation):
+        start_time = time.time()
+
+        if is_training:
+            image_ctl = self.train_images[idx]
+        else:
+            image_ctl = self.eval_images[idx]
+
+        filename = image_ctl['filename']
+        image_id = image_ctl['image_id']
+        anns = image_ctl['anns']
+
+        orig_image = None
+        orig_image = cv2.imread(filename, cv2.IMREAD_COLOR)
+        if orig_image is None:
+            self.logger.error('filename: {}, image is none'.format(filename))
+            exit(-1)
+
+        orig_image = cv2.cvtColor(orig_image, cv2.COLOR_BGR2RGB)
+        orig_image = orig_image.astype(np.uint8)
+
+        orig_bboxes = []
+        orig_texts = []
+        for ann in anns:
+            bb = ann['bbox']
+            text = ann['utf8_string']
+
+            if bb[0] < 0:
+                bb[0] = 0
+            if bb[1] < 0:
+                bb[1] = 0
+
+            if bb[0] + bb[2] > orig_image.shape[1]:
+                bb[2] = orig_image.shape[1] - bb[0] - 1
+            if bb[1] + bb[3] > orig_image.shape[0]:
+                bb[3] = orig_image.shape[0] - bb[1] - 1
+
+            orig_bboxes.append(bb)
+            orig_texts.append(text)
+
+
+        if len(orig_bboxes) == 0:
+            raise ProcessingError('{}: no orig bboxes'.format(filename))
+
+        start_aug_time = time.time()
+        annotations = {
+            'image': orig_image,
+            'bboxes': orig_bboxes,
+            'texts': orig_texts,
+        }
+
+        if augmentation:
+            annotations = augmentation(**annotations)
+
+        image = annotations['image']
+        bboxes = annotations['bboxes']
+        texts = annotations['texts']
+
+        if len(bboxes) == 0:
+            raise ProcessingError('{}: there are no bboxes after augmentation'.format(filename))
+
+        bboxes = np.array(bboxes)
+        x0 = np.array(bboxes[:, 0], dtype=np.float32)
+        y0 = np.array(bboxes[:, 1], dtype=np.float32)
+        w = np.array(bboxes[:, 2], dtype=np.float32)
+        h = np.array(bboxes[:, 3], dtype=np.float32)
+
+        cx = x0 + w/2
+        cy = y0 + h/2
+        bboxes = np.stack([cx, cy, h, w], axis=1)
+
+        return filename, image_id, image, bboxes, texts
 
 def get_training_augmentation(image_size, bbox_params):
     train_transform = [
@@ -232,11 +346,8 @@ def get_validation_augmentation(image_size, bbox_params):
     return A.Compose(test_transform, bbox_params)
 
 class COCO_Iterable:
-    def __init__(self, ann_path, data_dir, logger, np_anchor_boxes=None, np_anchor_areas=None):
+    def __init__(self, ann_path, data_dir, logger):
         self.logger = logger
-
-        self.np_anchor_boxes = np_anchor_boxes
-        self.np_anchor_areas = np_anchor_areas
 
         self.image_size = None
 
@@ -269,20 +380,13 @@ class COCO_Iterable:
         if not self.eval_augmentation:
             self.eval_augmentation = eval_augmentation
 
-    def set_anchors(self, np_anchor_boxes=None, np_anchor_areas=None):
-        if self.np_anchor_boxes is None:
-            self.np_anchor_boxes = np_anchor_boxes
-
-        if self.np_anchor_areas is None:
-            self.np_anchor_areas = np_anchor_areas
-
     def cat_names(self):
         return self.coco.cat_names()
 
     def __len__(self):
         return len(self.image_tuples)
 
-    def process_image(self, i, augmentation, return_orig_format=False):
+    def process_image(self, i, augmentation):
         start_time = time.time()
 
         filename, image_id, anns = self.image_tuples[i]
@@ -301,7 +405,6 @@ class COCO_Iterable:
         orig_keypoints = []
         for ann in anns:
             bb = ann['bbox']
-            kp = ann['keypoints']
             cat_id = ann['category_id']
 
             orig_bboxes.append(bb)
@@ -319,7 +422,6 @@ class COCO_Iterable:
             'image': orig_image,
             'bboxes': orig_bboxes,
             'category_id': orig_cat_ids,
-            'keypoints': orig_keypoints,
         }
 
         if augmentation:
@@ -328,159 +430,28 @@ class COCO_Iterable:
         image = annotations['image']
         bboxes = annotations['bboxes']
         cat_ids = annotations['category_id']
-        keypoints = annotations['keypoints']
 
-        if return_orig_format:
-            true_keypoints = np.array([keypoints], dtype=np.float32)
+        if len(bboxes) == 0:
+            raise ProcessingError('{}: there are no bboxes after augmentation'.format(filename))
 
-            if False:
-                if len(bboxes) == 0:
-                    raise ProcessingError('{}: there are no bboxes after augmentation'.format(filename))
+        bboxes = np.array(bboxes)
+        x0 = np.array(bboxes[:, 0], dtype=np.float32)
+        y0 = np.array(bboxes[:, 1], dtype=np.float32)
+        w = np.array(bboxes[:, 2], dtype=np.float32)
+        h = np.array(bboxes[:, 3], dtype=np.float32)
 
-                bboxes = np.array(bboxes)
-                x0 = np.array(bboxes[:, 0], dtype=np.float32)
-                y0 = np.array(bboxes[:, 1], dtype=np.float32)
-                w = np.array(bboxes[:, 2], dtype=np.float32)
-                h = np.array(bboxes[:, 3], dtype=np.float32)
+        cx = x0 + w/2
+        cy = y0 + h/2
+        true_bboxes = np.stack([cx, cy, h, w], axis=1)
 
-                cx = x0 + w/2
-                cy = y0 + h/2
-                true_bboxes = np.stack([cx, cy, h, w], axis=1)
-            else:
-                xmin = true_keypoints[..., 0].min()
-                xmax = true_keypoints[..., 0].max()
-                ymin = true_keypoints[..., 1].min()
-                ymax = true_keypoints[..., 1].max()
+        true_labels = np.array([self.cats[cat_id] for cat_id in cat_ids], dtype=np.int32)
 
-                if xmin < 0:
-                    xmin = 0
-                if ymin < 0:
-                    ymin = 0
-                if xmax > image.shape[1]:
-                    xmax = image.shape[1]
-                if ymax > image.shape[0]:
-                    ymax = image.shape[0]
-
-                cx = (xmin + xmax) / 2
-                cy = (ymin + ymax) / 2
-                w = xmax - xmin
-                h = ymax - ymin
-
-                true_bboxes = np.array([[cx, cy, h, w]], dtype=np.float32)
-
-            true_labels = np.array([self.cats[cat_id] for cat_id in cat_ids], dtype=np.int32)
-
-            #self.logger.info('{}: classes: {}\n{}'.format(filename, true_labels, true_bboxes))
-            return filename, image_id, image, true_bboxes, true_labels, true_keypoints
-
-        max_ious = np.zeros((self.np_anchor_boxes.shape[0]), dtype=np.float32)
-        max_per_bbox_ious = np.zeros((self.np_anchor_boxes.shape[0]), dtype=np.float32)
-
-        true_bboxes = self.np_anchor_boxes.copy()
-        true_labels = np.zeros((self.np_anchor_boxes.shape[0]))
-
-        def update_true_arrays(filename, image_id, image, box, iou, cat_id, max_iou_threshold, last):
-            converted_cat_id = self.cats[cat_id]
-
-            # only select anchor index to update if appropriate anchors have large IoU and IoU for this anchor is larger than that for previous true boxes,
-            # and if previous (smaller intersections) were not in fact maximum intersection
-            idx = iou > max_iou_threshold
-            #update_idx = idx & (iou > max_ious) & (max_per_bbox_ious == 0)
-            update_idx = idx & (iou > max_ious)
-            if last and False:
-                if update_idx.sum() == 0:
-                    update_idx = idx & (iou > max_ious)
-
-            assert update_idx.shape == max_ious.shape
-
-            binary_update_idx = update_idx.astype(int)
-            masked_iou = iou * binary_update_idx
-            max_update = masked_iou.argmax()
-            max_per_bbox_ious[max_update] = iou[max_update]
-
-            true_bboxes[update_idx] = box
-            true_labels[update_idx] = converted_cat_id
-            num_p = update_idx.sum()
-
-            self.logger.debug('{}: image_id: {}, image: {}, bbox: {}, threshold: {}, positive: {}, update: {}, max_iou: {}, max_saved_iou: {}'.format(
-                filename, image_id, image.shape, box, max_iou_threshold,
-                idx.sum(), update_idx.sum(),
-                np.max(iou), np.max(max_ious)))
-
-            max_ious[update_idx] = iou[update_idx]
-            return num_p
-
-        good_bboxes = []
-        for bb, cat_id in zip(bboxes, cat_ids):
-            if bb[2] <= 3 or bb[3] <= 3:
-                continue
-
-            good_bboxes.append(bb)
-            x0, y0, w, h = bb
-
-            cx = x0 + w/2
-            cy = y0 + h/2
-
-            box = np.array([cx, cy, h, w])
-
-            iou = calc_iou(box, self.np_anchor_boxes, self.np_anchor_areas)
-
-            assert iou.shape == max_ious.shape
-
-            accepted_ious = [0.5]
-            for accepted_iou in accepted_ious:
-                num_p = update_true_arrays(filename, image_id, image, box, iou, cat_id, accepted_iou, accepted_iou == accepted_ious[-1])
-                if num_p != 0:
-                    break
-
-        if true_labels.sum() != 0:
-            self.good_bboxes += 1
-            return filename, image_id, image, true_bboxes, true_labels
-
-        if len(good_bboxes) > 0:
-            self.failed_bboxes += 1
-
-            if self.failed_bboxes % 1000 == 0:
-                total_bboxes = self.good_bboxes + self.failed_bboxes
-                self.logger.info('good_bboxes: {}/{:.4f}, failed_bboxes: {}/{:.4f}, total_bboxes: {}'.format(
-                    self.good_bboxes, self.good_bboxes/total_bboxes, self.failed_bboxes, self.failed_bboxes/total_bboxes, total_bboxes))
-
-            areas = [bb[2] * bb[3] for bb in good_bboxes]
-
-            self.logger.debug('{}: image_id: {}, image: {}, bboxes: {}, labels: {}, aug bboxes: {} -> {}/{}, num_positive: {}, num_negatives: {}, time: {:.1f}/{:.1f} ms, bboxes: {}, areas: {}'.format(
-                    filename, image_id, image.shape,
-                    true_bboxes.shape, true_labels.shape,
-                    len(anns), len(bboxes), len(good_bboxes),
-                    np.where(true_labels > 0)[0].shape[0], np.where(true_labels == 0)[0].shape[0],
-                    (time.time() - start_aug_time) * 1000.,
-                    (time.time() - start_time) * 1000.,
-                    good_bboxes, areas))
-
-        raise ProcessingError('there are no true labels')
-
-    def __getitem__(self, i):
-        if self.np_anchor_areas is None or self.np_anchor_boxes is None:
-            raise ValueError('COCO iterable is not initialized: np_anchor_areas: {}, np_anchor_boxes: {}'.format(self.np_anchor_areas, self.np_anchor_boxes))
-
-        augment = self.train_augmentation
-        while True:
-            try:
-                return self.process_image(i, augment)
-            except ProcessingError as e:
-                if e.message == 'no orig bboxes':
-                    i = np.random.randint(len(self.image_tuples))
-                else:
-                    if augment == self.train_augmentation:
-                        augment = self.eval_augmentation
-                    else:
-                        augment = self.train_augmentation
-                        i = np.random.randint(len(self.image_tuples))
-
+        return filename, image_id, image, true_bboxes, true_labels
 
 def create_coco_iterable(ann_path, data_dir, logger):
     return COCO_Iterable(ann_path, data_dir, logger)
 
-def complete_initialization(coco_base, image_size, np_anchor_boxes, np_anchor_areas, is_training, train_augmentation=None):
+def complete_initialization(coco_base, image_size, is_training, train_augmentation=None):
     bbox_params = A.BboxParams(
             format='coco',
             min_area=0,
@@ -496,4 +467,3 @@ def complete_initialization(coco_base, image_size, np_anchor_boxes, np_anchor_ar
     eval_augmentation = get_validation_augmentation(image_size, bbox_params)
 
     coco_base.set_augmentation(image_size, train_augmentation, eval_augmentation)
-    coco_base.set_anchors(np_anchor_boxes, np_anchor_areas)

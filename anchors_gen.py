@@ -79,13 +79,11 @@ def create_xy_grid(batch_size, output_size, anchors_per_scale):
     pred_wh = (tf.exp(conv_raw_dwdh) * anchors) * stride
     pred_xywh = tf.concat([pred_xy, pred_wh], axis=-1)
 
-def generate_true_labels_for_anchors(orig_bboxes, orig_labels, anchors_all, output_xy_grids, output_ratios, image_size, num_classes):
+def generate_true_values_for_anchors(orig_bboxes, anchors_all, output_xy_grids, output_ratios, image_size, num_classes):
     orig_bboxes = tf.convert_to_tensor(orig_bboxes, dtype=tf.float32)
-    orig_labels = tf.convert_to_tensor(orig_labels, dtype=tf.int32)
 
     #num_examples = 9
     #orig_bboxes = tf.zeros([num_examples, 4], dtype=tf.float32)
-    #orig_labels = tf.ones([num_examples,], dtype=tf.int32)
 
     num_scales = 3
     num_boxes = 3
@@ -130,13 +128,12 @@ def generate_true_labels_for_anchors(orig_bboxes, orig_labels, anchors_all, outp
 
     bboxes_for_loss = tf.concat([x_for_loss, y_for_loss, w_for_loss, h_for_loss], axis=1)
     objs_for_loss = tf.ones_like(x_for_loss)
-    labels_for_loss = tf.one_hot(orig_labels, num_classes, dtype=tf.float32)
-    values_for_loss = tf.concat([bboxes_for_loss, objs_for_loss, labels_for_loss], axis=1)
+    values_for_loss = tf.concat([bboxes_for_loss, objs_for_loss], axis=1)
 
     update_idx = tf.expand_dims(best_anchors_index, 1)
 
-    logger.info('update true_values: bboxes: {}, objs: {}, labels: {}, values: {}, update_idx: {}'.format(
-        bboxes_for_loss.shape, objs_for_loss.shape, labels_for_loss.shape, values_for_loss.shape, update_idx.shape))
+    logger.info('update true_values: bboxes: {}, objs: {}, values: {}, update_idx: {}'.format(
+        bboxes_for_loss.shape, objs_for_loss.shape, values_for_loss.shape, update_idx.shape))
     output = tf.tensor_scatter_nd_update(true_values_for_loss, update_idx, values_for_loss)
 
     return output

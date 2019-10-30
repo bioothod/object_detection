@@ -69,7 +69,9 @@ def draw_im(im, ann, dst, cat_names):
         if kp is not None:
             draw_kp(ax, kp)
 
-        if True:
+        if type(c) == str:
+            draw_text(ax, bb[:2], c, sz=8)
+        else:
             if c in cat_names:
                 draw_text(ax, bb[:2], cat_names[c], sz=16)
             else:
