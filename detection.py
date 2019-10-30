@@ -39,12 +39,11 @@ parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16
 parser.add_argument('--dataset_type', type=str, choices=['tfrecords'], default='tfrecords', help='Dataset type')
 parser.add_argument('--train_tfrecord_dir', type=str, help='Directory containing training TFRecords')
 parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
-parser.add_argument('--num_classes', type=int, help='Number of classes in the dataset')
 parser.add_argument('--image_size', type=int, default=0, help='Use this image size, if 0 - use default')
 parser.add_argument('--train_num_images', type=int, help='Number of images in train epoch')
 parser.add_argument('--eval_num_images', type=int, help='Number of images in eval epoch')
 
-def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_ratios, image_size, num_classes, is_training, data_format):
+def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_ratios, image_size, is_training, data_format):
     features = tf.io.parse_single_example(serialized_example,
             features={
                 'image_id': tf.io.FixedLenFeature([], tf.int64),
@@ -107,11 +106,11 @@ def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_rat
 
     orig_bboxes = tf.concat([cx, cy, w, h], axis=1)
 
-    true_values = anchors_gen.generate_true_values_for_anchors(orig_bboxes,
+    true_values, true_texts = anchors_gen.generate_true_values_for_anchors(orig_bboxes,
             anchors_all, output_xy_grids, output_ratios,
-            image_size, num_classes)
+            image_size)
 
-    return filename, image_id, image, true_values, true_text_labels
+    return filename, image_id, image, true_values, true_texts
 
 def calc_epoch_steps(num_files):
     return (num_files + FLAGS.batch_size - 1) // FLAGS.batch_size
@@ -124,17 +123,18 @@ def draw_bboxes(image_size, train_dataset, all_anchors, all_grid_xy, all_ratios)
     all_grid_xy = all_grid_xy.numpy()
     all_ratios = all_ratios.numpy()
 
-    for filename, image_id, image, true_values, true_text_labels in train_dataset.unbatch().take(20):
+    for filename, image_id, image, true_values, true_texts in train_dataset.unbatch().take(20):
         filename = str(filename.numpy(), 'utf8')
-        labels = [str(s, 'utf8') for s in true_text_labels.numpy()]
 
         dst = '{}/{}.png'.format(data_dir, image_id.numpy())
 
         true_values = true_values.numpy()
+        true_texts = true_texts.numpy()
 
         non_background_index = np.where(true_values[..., 4] != 0)[0]
         #logger.info('{}: true_values: {}, non_background_index: {}'.format(filename, true_values.shape, non_background_index.shape))
 
+        labels = true_texts[non_background_index]
         bboxes = true_values[non_background_index, 0:4]
 
         anchors = all_anchors[non_background_index, :]
@@ -172,7 +172,7 @@ def draw_bboxes(image_size, train_dataset, all_anchors, all_grid_xy, all_ratios)
         image = image.numpy() * 128. + 128
         image = image.astype(np.uint8)
         image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        image_draw.draw_im(image, new_anns, dst, train_cat_names)
+        image_draw.draw_im(image, new_anns, dst, {})
 
 def train():
     checkpoint_dir = os.path.join(FLAGS.train_dir, 'checkpoints')
@@ -198,7 +198,7 @@ def train():
         learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
 
         image_size = FLAGS.image_size
-        model = encoder.create_model(FLAGS.model_name, FLAGS.num_classes)
+        model = encoder.create_model(FLAGS.model_name)
         image_size = model.image_size
         if model.output_sizes is None:
             dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
@@ -207,7 +207,7 @@ def train():
 
         anchors_all, output_xy_grids, output_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
 
-        def create_dataset_from_tfrecord(name, dataset_dir, image_size, num_classes, is_training):
+        def create_dataset_from_tfrecord(name, dataset_dir, image_size, is_training):
             filenames = []
             for fn in os.listdir(dataset_dir):
                 fn = os.path.join(dataset_dir, fn)
@@ -216,7 +216,7 @@ def train():
 
             ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
             ds = ds.map(lambda record: unpack_tfrecord(record, anchors_all, output_xy_grids, output_ratios,
-                            image_size, num_classes, is_training,
+                            image_size, is_training,
                             FLAGS.data_format),
                     num_parallel_calls=FLAGS.num_cpus)
             if is_training:
@@ -233,20 +233,14 @@ def train():
         if FLAGS.dataset_type == 'tfrecords':
             train_num_images = FLAGS.train_num_images
             eval_num_images = FLAGS.eval_num_images
-            train_num_classes = FLAGS.num_classes
-            train_cat_names = {}
 
-            train_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir, image_size, train_num_classes, is_training=True)
-            eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, image_size, train_num_classes, is_training=False)
+            train_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir, image_size, is_training=True)
+            eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, image_size, is_training=False)
 
 
-        if False:
-            draw_bboxes(image_size, train_dataset, train_cat_names, anchors_all, output_xy_grids, output_ratios)
+        if True:
+            draw_bboxes(image_size, train_dataset, anchors_all, output_xy_grids, output_ratios)
             exit(0)
-
-        if train_num_classes is None:
-            logger.error('If there is no train_num_classes (tfrecord dataset), you must provide --num_classes')
-            exit(-1)
 
         if train_num_images is None:
             logger.error('If there is no train_num_images (tfrecord dataset), you must provide --train_num_images')
@@ -317,19 +311,18 @@ def train():
             eval_num_good_ious_metric.reset_states()
             eval_num_positive_labels_metric.reset_states()
 
-        ylo = loss.YOLOLoss(anchors_all, output_xy_grids, output_ratios, image_size, train_num_classes, reduction=tf.keras.losses.Reduction.NONE)
+        ylo = loss.YOLOLoss(anchors_all, output_xy_grids, output_ratios, image_size, reduction=tf.keras.losses.Reduction.NONE)
 
         def calculate_metrics(logits, true_values,
                 loss_metric, accuracy_metric, obj_accuracy_metric,
                 iou_metric, num_good_ious_metric, num_positive_labels_metric):
-            dist_loss, class_loss, conf_loss_pos, conf_loss_neg = ylo.call(y_true=true_values, y_pred=logits)
+            dist_loss, conf_loss_pos, conf_loss_neg = ylo.call(y_true=true_values, y_pred=logits)
 
             dist_loss = tf.nn.compute_average_loss(dist_loss, global_batch_size=FLAGS.batch_size)
-            class_loss = tf.nn.compute_average_loss(class_loss, global_batch_size=FLAGS.batch_size)
             conf_loss_pos = tf.nn.compute_average_loss(conf_loss_pos, global_batch_size=FLAGS.batch_size)
             conf_loss_neg = tf.nn.compute_average_loss(conf_loss_neg, global_batch_size=FLAGS.batch_size)
 
-            total_loss = dist_loss + class_loss + conf_loss_pos + conf_loss_neg
+            total_loss = dist_loss + conf_loss_pos + conf_loss_neg
             loss_metric.update_state(total_loss)
 
             y_true = true_values
@@ -349,11 +342,6 @@ def train():
             pred_box_conf = tf.boolean_mask(tf.expand_dims(y_pred[..., 4], -1), object_mask_bool)
             pred_box_conf = tf.math.sigmoid(pred_box_conf)
             obj_accuracy_metric.update_state(y_true=true_obj_mask, y_pred=pred_box_conf)
-
-            true_classes = tf.boolean_mask(y_true[..., 5:], object_mask_bool)
-            pred_classes = tf.boolean_mask(tf.math.sigmoid(y_pred[..., 5:]), object_mask_bool)
-            accuracy_metric.update_state(y_true=true_classes, y_pred=pred_classes)
-
 
             true_xy = (y_true[..., 0:2] + ylo.grid_xy) * ylo.ratios
             true_wh = tf.math.exp(y_true[..., 2:4]) * ylo.anchors_wh
@@ -387,21 +375,21 @@ def train():
             good_ious = tf.where(best_ious > 0.5)
             num_good_ious_metric.update_state(tf.shape(good_ious)[0])
 
-            return dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss
+            return dist_loss, conf_loss_pos, conf_loss_neg, total_loss
 
         epoch_var = tf.Variable(0, dtype=tf.float32, name='epoch_number', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
 
         def eval_step(filenames, images, true_values, true_text_labels):
             logits = model(images, training=False)
-            dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = calculate_metrics(logits, true_values,
+            dist_loss, conf_loss_pos, conf_loss_neg, total_loss = calculate_metrics(logits, true_values,
                     eval_loss_metric, eval_accuracy_metric, eval_obj_accuracy_metric, eval_iou_metric,
                     eval_num_good_ious_metric, eval_num_positive_labels_metric)
-            return dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss
+            return dist_loss, conf_loss_pos, conf_loss_neg, total_loss
 
         def train_step(filenames, images, true_values, true_text_labels):
             with tf.GradientTape() as tape:
                 logits = model(images, training=True)
-                dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = calculate_metrics(logits, true_values,
+                dist_loss, conf_loss_pos, conf_loss_neg, total_loss = calculate_metrics(logits, true_values,
                         loss_metric, accuracy_metric, obj_accuracy_metric, iou_metric,
                         num_good_ious_metric, num_positive_labels_metric)
 
@@ -424,27 +412,25 @@ def train():
 
             global_step.assign_add(1)
 
-            return dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss
+            return dist_loss, conf_loss_pos, conf_loss_neg, total_loss
 
         @tf.function
         def distributed_train_step(args):
-            dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = dstrategy.experimental_run_v2(train_step, args=args)
+            dist_loss, conf_loss_pos, conf_loss_neg, total_loss = dstrategy.experimental_run_v2(train_step, args=args)
             dist_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, dist_loss, axis=None)
-            class_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, class_loss, axis=None)
             conf_loss_pos = dstrategy.reduce(tf.distribute.ReduceOp.SUM, conf_loss_pos, axis=None)
             conf_loss_neg = dstrategy.reduce(tf.distribute.ReduceOp.SUM, conf_loss_neg, axis=None)
             total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, total_loss, axis=None)
-            return dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss
+            return dist_loss, conf_loss_pos, conf_loss_neg, total_loss
 
         @tf.function
         def distributed_eval_step(args):
-            dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = dstrategy.experimental_run_v2(eval_step, args=args)
+            dist_loss, conf_loss_pos, conf_loss_neg, total_loss = dstrategy.experimental_run_v2(eval_step, args=args)
             dist_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, dist_loss, axis=None)
-            class_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, class_loss, axis=None)
             conf_loss_pos = dstrategy.reduce(tf.distribute.ReduceOp.SUM, conf_loss_pos, axis=None)
             conf_loss_neg = dstrategy.reduce(tf.distribute.ReduceOp.SUM, conf_loss_neg, axis=None)
             total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, total_loss, axis=None)
-            return dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss
+            return dist_loss, conf_loss_pos, conf_loss_neg, total_loss
 
         def run_epoch(name, dataset, step_func, max_steps):
             losses = []
@@ -460,11 +446,11 @@ def train():
                     images = tf.transpose(images, [0, 3, 1, 2])
 
 
-                dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss = step_func(args=(filenames, images, true_values, true_text_labels))
+                dist_loss, conf_loss_pos, conf_loss_neg, total_loss = step_func(args=(filenames, images, true_values, true_text_labels))
                 if (name == 'train' and step % FLAGS.print_per_train_steps == 0) or np.isnan(total_loss.numpy()):
-                    logger.info('{}: {}: step: {}/{}, dist_loss: {:.2e}, class_loss: {:.2e}, conf_loss: {:.2e}/{:.2e}, total_loss: {:.2e}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}, good_ios/pos: {}/{}'.format(
+                    logger.info('{}: {}: step: {}/{}, dist_loss: {:.2e}, conf_loss: {:.2e}/{:.2e}, total_loss: {:.2e}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}, good_ios/pos: {}/{}'.format(
                         name, int(epoch_var.numpy()), step, max_steps,
-                        dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss,
+                        dist_loss, conf_loss_pos, conf_loss_neg, total_loss,
                         accuracy_metric.result(), obj_accuracy_metric.result(),
                         iou_metric.result(),
                         int(num_good_ious_metric.result()), int(num_positive_labels_metric.result()),

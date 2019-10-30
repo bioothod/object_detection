@@ -10,7 +10,8 @@ logger = logging.getLogger('detection')
 GlobalParams = collections.namedtuple('GlobalParams', [
     'batch_norm_momentum', 'batch_norm_epsilon', 'data_format',
     'relu_fn',
-    'l2_reg_weight', 'spatial_dims', 'channel_axis', 'model_name'
+    'l2_reg_weight', 'spatial_dims', 'channel_axis', 'model_name',
+    'obj_score_threshold'
 ])
 
 GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
@@ -125,103 +126,11 @@ class DarknetUpsampling(tf.keras.layers.Layer):
         x = self.upsampling(x)
         return x
 
-class Attention(tf.keras.layers.Layer):
-    def __init__(self, params, image_size, upscaled_image_size, anchors, grid_xy, ratios, **kwargs):
-        super(Attention, self).__init__(**kwargs)
-
-        self.image_size = image_size
-        self.upscaled_image_size = upscaled_image_size
-        self.scale = float(self.upscaled_image_size) / float(self.image_size)
-
-        self.grid_xy = tf.expand_dims(grid_xy, 0)
-        self.ratios = tf.expand_dims(ratios, 0)
-        self.ratios = tf.expand_dims(ratios, -1) # [B, N, 1]
-        self.anchors_wh = tf.expand_dims(anchors[..., :2], 0)
-
-        self.relu_fn = params.relu_fn or local_swish
-
-        self.bn = tf.keras.layers.BatchNormalization(
-            axis=params.channel_axis,
-            momentum=params.batch_norm_momentum,
-            epsilon=params.batch_norm_epsilon)
-
-        self.dense_y = tf.keras.layers.Dense(128, activation=self.relu_fn)
-        self.logits = tf.keras.layers.Dense(128, activation=self.relu_fn)
-    
-    def gaussian_masks(mu, sigma, dim, dim_tile):
-        r = tf.cast(tf.range(dim), tf.float32)
-        r = tf.expand_dims(r, 0)
-        r = tf.tile(r, [tf.shape(mu)[0], 1])
-
-        sigma = tf.expand_dims(sigma, -1)
-        mu = tf.expand_dims(mu, -1)
-
-        centers = r - mu
-        mask = tf.exp(-.5 * tf.square(centers / sigma))
-        mask = tf.expand_dims(mask, -1)
-        mask = tf.tile(mask, [1, 1, dim_tile])
-        return mask
-
-    def generate_masks(params, mu_h, sigma_h, mu_w, sigma_w):
-        b, h, w, c = params
-
-        mask_h = gaussian_masks(mu_h, sigma_h, h, w)
-        mask_w = gaussian_masks(mu_w, sigma_w, w, h)
-
-        mask_w = tf.transpose(mask_w, (0, 2, 1))
-        mask = mask_h * mask_w
-
-        mask = tf.expand_dims(mask, -1)
-        mask = tf.tile(mask, [1, 1, 1, c])
-
-        return mask
-
-    def call(self, inputs, training):
-        obj_score = inputs[..., 4]
-        class_score = inputs[..., 5:]
-
-        inputs_xy = inputs[..., :2]
-        inputs_wh = inputs[..., 2:4]
-
-        pred_box_xy = self.grid_xy + tf.sigmoid(inputs_xy)
-        pred_box_xy = pred_box_xy * self.ratios
-        pred_box_wh = tf.math.exp(inputs_wh) * self.anchors_wh
-
-
-        sigma_w = pred_box_wh[..., 0] * self.scale
-        sigma_h = pred_box_wh[..., 1] * self.scale
-        mu_w = pred_box_xy[..., 0] * self.scale
-        mu_h = pred_box_xy[..., 1] * self.scale
-
-        b = tf.shape(inputs)[0]
-        masks = self.generate_masks([b, self.upscaled_image_size, self.upscaled_image_size, 3], mu_h, sigma_h, mu_w, sigma_w)
-
-        x = tf.bn(inputs, training)
-        x = tf.relu_fn(x)
-
-        x = tf.reshape(x, [-1, x.shape[-1]])
-        y = self.dense_y(x)
-
-        logits = tf.layers.dense(y, 1, activation = None)
-
-        logits = tf.reshape(logits, [-1, input_features.shape[1], 1])
-        alphas = tf.nn.softmax(logits, axis = 1)
-
-        if reduce_output:
-            att_seq = tf.reduce_sum(input_features * alphas, axis = 1)
-        else:
-            att_seq = input_features * alphas
-
-
-        logging.info('att: input_features: {}, alphas: {}, output: {}'.format(input_features, alphas, att_seq))
-        return att_seq, alphas
-
-
 class EfnHead(tf.keras.layers.Layer):
-    def __init__(self, params, num_classes, **kwargs):
+    def __init__(self, params, **kwargs):
         super(EfnHead, self).__init__(**kwargs)
 
-        num_features = 3 * (num_classes + 1 + 4)
+        num_features = 3 * (1 + 4)
 
         self.stage2_conv5 = DarknetConv5(params, [512, 1024, 512, 1024, 512])
         self.stage2_conv2 = DarknetConv2(params, [1024, num_features], name="detection_layer_1")
@@ -269,13 +178,11 @@ class EfnHead(tf.keras.layers.Layer):
         return stage2_output, stage1_output, stage0_output
 
 class EfnYolo(tf.keras.layers.Layer):
-    def __init__(self, params, num_classes, **kwargs):
+    def __init__(self, params, **kwargs):
         super(EfnYolo, self).__init__(**kwargs)
 
-        self.num_classes = num_classes
-
         self.body = EfnBody(params)
-        self.head = EfnHead(params, num_classes)
+        self.head = EfnHead(params)
 
         self.image_size = self.body.image_size
         os = {
@@ -296,13 +203,112 @@ class EfnYolo(tf.keras.layers.Layer):
         batch_size = tf.shape(inputs)[0]
         outputs = []
         for output in [f2, f1, f0]:
-            flat = tf.reshape(output, [batch_size, -1, 4+1+self.num_classes])
+            flat = tf.reshape(output, [batch_size, -1, 4+1])
             outputs.append(flat)
 
         outputs = tf.concat(outputs, axis=1)
         return outputs
 
-def create_model(model_name, num_classes):
+class EfnText(tf.keras.layers.Layer):
+    def __init__(self, params, model_name, image_size, upscaled_image_size, anchors, grid_xy, ratios, **kwargs):
+        super(Attention, self).__init__(**kwargs)
+
+        self.params = params
+
+        self.object_model = EfnYolo(params)
+
+        self.image_size = image_size
+        self.upscaled_image_size = upscaled_image_size
+        self.scale = float(self.upscaled_image_size) / float(self.image_size)
+
+        self.grid_xy = tf.expand_dims(grid_xy, 0)
+        self.ratios = tf.expand_dims(ratios, 0)
+        self.ratios = tf.expand_dims(ratios, -1) # [B, N, 1]
+        self.anchors_wh = tf.expand_dims(anchors[..., :2], 0)
+
+        self.relu_fn = params.relu_fn or local_swish
+
+        self.bn = tf.keras.layers.BatchNormalization(
+            axis=params.channel_axis,
+            momentum=params.batch_norm_momentum,
+            epsilon=params.batch_norm_epsilon)
+
+        self.dense_y = tf.keras.layers.Dense(128, activation=self.relu_fn)
+        self.logits = tf.keras.layers.Dense(128, activation=self.relu_fn)
+
+    def gaussian_masks(mu, sigma, dim, dim_tile):
+        r = tf.cast(tf.range(dim), tf.float32)
+        r = tf.expand_dims(r, 0)
+        r = tf.tile(r, [tf.shape(mu)[0], 1])
+
+        sigma = tf.expand_dims(sigma, -1)
+        mu = tf.expand_dims(mu, -1)
+
+        centers = r - mu
+        mask = tf.exp(-.5 * tf.square(centers / sigma))
+        mask = tf.expand_dims(mask, -1)
+        mask = tf.tile(mask, [1, 1, dim_tile])
+        return mask
+
+    def generate_masks(params, mu_h, sigma_h, mu_w, sigma_w):
+        b, h, w, c = params
+
+        mask_h = gaussian_masks(mu_h, sigma_h, h, w)
+        mask_w = gaussian_masks(mu_w, sigma_w, w, h)
+
+        mask_w = tf.transpose(mask_w, (0, 2, 1))
+        mask = mask_h * mask_w
+
+        mask = tf.expand_dims(mask, -1)
+        mask = tf.tile(mask, [1, 1, 1, c])
+
+        return mask
+
+    def call(self, inputs, training):
+        object_outputs = self.object_model(inputs, training)
+
+        obj_score = object_outputs[..., 4]
+
+        non_background_index = tf.where(obj_score > self.params.obj_score_threshold)
+        object_outputs = tf.gather_nd(object_outputs, non_background_index)
+
+        inputs_xy = object_outputs[..., :2]
+        inputs_wh = object_outputs[..., 2:4]
+
+        pred_box_xy = self.grid_xy + tf.sigmoid(inputs_xy)
+        pred_box_xy = pred_box_xy * self.ratios
+        pred_box_wh = tf.math.exp(inputs_wh) * self.anchors_wh
+
+
+        sigma_w = pred_box_wh[..., 0] * self.scale
+        sigma_h = pred_box_wh[..., 1] * self.scale
+        mu_w = pred_box_xy[..., 0] * self.scale
+        mu_h = pred_box_xy[..., 1] * self.scale
+
+        b = tf.shape(inputs)[0]
+        masks = self.generate_masks([b, self.upscaled_image_size, self.upscaled_image_size, 3], mu_h, sigma_h, mu_w, sigma_w)
+
+        x = tf.bn(inputs, training)
+        x = tf.relu_fn(x)
+
+        x = tf.reshape(x, [-1, x.shape[-1]])
+        y = self.dense_y(x)
+
+        logits = tf.layers.dense(y, 1, activation = None)
+
+        logits = tf.reshape(logits, [-1, input_features.shape[1], 1])
+        alphas = tf.nn.softmax(logits, axis = 1)
+
+        if reduce_output:
+            att_seq = tf.reduce_sum(input_features * alphas, axis = 1)
+        else:
+            att_seq = input_features * alphas
+
+
+        logging.info('att: input_features: {}, alphas: {}, output: {}'.format(input_features, alphas, att_seq))
+        return att_seq, alphas
+
+def create_model(model_name):
     data_format='channels_last'
 
     if data_format == 'channels_first':
@@ -320,9 +326,11 @@ def create_model(model_name, num_classes):
         'channel_axis': channel_axis,
         'spatial_dims': spatial_dims,
         'model_name': model_name,
+        'obj_score_threshold': 0.3,
     }
 
     params = GlobalParams(**params)
 
-    model = EfnYolo(params, num_classes)
+    model = EfnYolo(params)
     return model
+

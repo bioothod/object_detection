@@ -79,7 +79,7 @@ def create_xy_grid(batch_size, output_size, anchors_per_scale):
     pred_wh = (tf.exp(conv_raw_dwdh) * anchors) * stride
     pred_xywh = tf.concat([pred_xy, pred_wh], axis=-1)
 
-def generate_true_values_for_anchors(orig_bboxes, anchors_all, output_xy_grids, output_ratios, image_size, num_classes):
+def generate_true_values_for_anchors(orig_bboxes, orig_texts, anchors_all, output_xy_grids, output_ratios, image_size):
     orig_bboxes = tf.convert_to_tensor(orig_bboxes, dtype=tf.float32)
 
     #num_examples = 9
@@ -98,8 +98,8 @@ def generate_true_values_for_anchors(orig_bboxes, anchors_all, output_xy_grids, 
     #tf.print('best_anchors_index:', best_anchors_index)
     num_anchors = anchors_all.shape[0]
 
-    true_values_for_loss = tf.zeros([num_anchors, 4 + 1 + num_classes])
-    true_values_abs = tf.zeros([num_anchors, 4 + 1 + num_classes])
+    true_values_for_loss = tf.zeros([num_anchors, 4 + 1 + 1])
+    true_values_abs = tf.zeros([num_anchors, 4 + 1 + 1])
 
     best_anchors = tf.gather(anchors_all, best_anchors_index) # [N, 4]
     best_xy_grids = tf.gather(output_xy_grids, best_anchors_index) # [N, 2]
@@ -128,7 +128,8 @@ def generate_true_values_for_anchors(orig_bboxes, anchors_all, output_xy_grids, 
 
     bboxes_for_loss = tf.concat([x_for_loss, y_for_loss, w_for_loss, h_for_loss], axis=1)
     objs_for_loss = tf.ones_like(x_for_loss)
-    values_for_loss = tf.concat([bboxes_for_loss, objs_for_loss], axis=1)
+    has_text_for_loss = tf.where(tf.not_equal(orig_texts, '<SKIP>'), 1, 0)
+    values_for_loss = tf.concat([bboxes_for_loss, objs_for_loss, has_text_for_loss], axis=1)
 
     update_idx = tf.expand_dims(best_anchors_index, 1)
 
@@ -136,4 +137,13 @@ def generate_true_values_for_anchors(orig_bboxes, anchors_all, output_xy_grids, 
         bboxes_for_loss.shape, objs_for_loss.shape, values_for_loss.shape, update_idx.shape))
     output = tf.tensor_scatter_nd_update(true_values_for_loss, update_idx, values_for_loss)
 
-    return output
+    true_texts = tf.constant('<SKIP>')
+    true_texts = tf.expand_dims(true_texts, 0)
+    true_texts = tf.tile(true_texts, [num_anchors])
+    true_texts = tf.expand_dims(true_texts, 1)
+
+    update_labels = tf.expand_dims(orig_texts, 1)
+    true_texts = tf.tensor_scatter_nd_update(true_texts, update_idx, update_labels)
+    true_texts = tf.squeeze(true_texts, 1)
+
+    return output, true_texts

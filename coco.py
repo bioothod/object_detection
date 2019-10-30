@@ -94,6 +94,7 @@ def get_text_train_augmentation(image_size):
     bbox_params = get_text_bbox_params()
 
     train_transform = [
+        A.HorizontalFlip(p=0.5),
         A.RandomRotate90(p=0.3),
         A.ShiftScaleRotate(rotate_limit=5, p=0.8),
 

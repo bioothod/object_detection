@@ -53,7 +53,6 @@ class YOLOLoss:
                  grid_xy,
                  ratios,
                  image_size,
-                 num_classes,
                  obj_scale=1.,
                  noobj_scale=1.,
                  dist_scale=1.,
@@ -62,7 +61,6 @@ class YOLOLoss:
         #super(YOLOLoss, self).__init__(**kwargs)
 
         self.image_size = image_size
-        self.num_classes = num_classes
 
         self.obj_scale = obj_scale
         self.noobj_scale = noobj_scale
@@ -134,10 +132,6 @@ class YOLOLoss:
         # confidence/objectiveness
         pred_box_conf = tf.expand_dims(y_pred[..., 4], -1)
         pred_box_conf_prob = tf.sigmoid(pred_box_conf)
-
-        true_classes = y_true[..., 5:]
-        pred_classes = y_pred[..., 5:]
-
 
         true_xy = (y_true[..., 0:2] + self.grid_xy) * self.ratios
         true_wh = tf.math.exp(y_true[..., 2:4]) * self.anchors_wh
