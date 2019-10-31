@@ -1,5 +1,6 @@
 import argparse
 import cv2
+import json
 import logging
 import os
 import sys
@@ -45,6 +46,7 @@ parser.add_argument('--do_not_step_labels', action='store_true', help='Whether t
 parser.add_argument('--skip_checkpoint_assertion', action='store_true', help='Skip checkpoint assertion, needed for older models on objdet3/4')
 parser.add_argument('--no_channel_swap', action='store_true', help='When set, do not perform rgb-bgr conversion, needed, when using files as input')
 parser.add_argument('--freeze', action='store_true', help='Save frozen protobuf near checkpoint')
+parser.add_argument('--do_not_save_images', action='store_true', help='Do not save images with bounding boxes')
 parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
 parser.add_argument('--dataset_type', type=str, choices=['files', 'tfrecords'], default='files', help='Dataset type')
 parser.add_argument('filenames', type=str, nargs='*', help='Numeric label : file path')
@@ -360,6 +362,7 @@ def eval_step_logits(model, images, image_size, num_classes, all_anchors, all_gr
 
 def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_anchors, all_grid_xy, all_ratios, cat_names):
     num_files = 0
+    dump_js = []
     for filenames, images in dataset:
         start_time = time.time()
         coords_batch, scores_batch, objs_batch, cat_ids_batch = eval_step_logits(model, images, image_size, num_classes, all_anchors, all_grid_xy, all_ratios)
@@ -372,38 +375,65 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_a
             filename = str(filename.numpy(), 'utf8')
 
             good_scores = np.count_nonzero((scores.numpy() > 0))
-            logger.info('{}: scores: {}, time_per_image: {:.1f} ms'.format(filename, good_scores, time_per_image_ms))
+            #logger.info('{}: scores: {}, time_per_image: {:.1f} ms'.format(filename, good_scores, time_per_image_ms))
 
             anns = []
+
+            js = {
+                'filename': filename,
+            }
+            js_anns = []
 
             for coord, score, objs, cat_id in zip(coords, scores, objectness, cat_ids):
                 if score.numpy() == 0:
                     break
 
-                bb = coord.numpy()
+                bb = coord.numpy().astype(float)
                 ymin, xmin, ymax, xmax = bb
                 bb = [xmin, ymin, xmax, ymax]
 
                 cat_id = cat_id.numpy()
 
-                logger.info('{}: bbox: {}, obj: {:.3f}, score: {:.3f}, cat_id: {}'.format(filename, bb, objs, score, cat_id))
+                ann_js = {
+                    'bbox': bb,
+                    'objectness': float(objs),
+                    'class_score': float(score),
+                    'category_id': int(cat_id),
+                }
 
+                js_anns.append(ann_js)
                 anns.append((bb, None, cat_id))
 
-            image = preprocess_ssd.denormalize_image(image)
-            image = image.numpy()
-            image = image.astype(np.uint8)
+            js['annotations'] = js_anns
+            dump_js.append(js)
 
-            if not FLAGS.no_channel_swap:
-                image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            if not FLAGS.do_not_save_images:
+                logger.info('{}: bbox: {}, obj: {:.3f}, score: {:.3f}, cat_id: {}'.format(filename, bb, objs, score, cat_id))
 
-            dst_filename = os.path.basename(filename)
-            dst_filename = os.path.join(FLAGS.output_dir, dst_filename)
-            image_draw.draw_im(image, anns, dst_filename, cat_names)
+                image = preprocess_ssd.denormalize_image(image)
+                image = image.numpy()
+                image = image.astype(np.uint8)
 
-        #return
+                if not FLAGS.no_channel_swap:
+                    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
+                dst_filename = os.path.basename(filename)
+                dst_filename = os.path.join(FLAGS.output_dir, dst_filename)
+                image_draw.draw_im(image, anns, dst_filename, cat_names)
+
+    json_fn = os.path.join(FLAGS.output_dir, 'results.json')
+    logger.info('Saving {} objects into {}'.format(len(dump_js), json_fn))
+
+    with open(json_fn, 'w') as fout:
+        json.dump(dump_js, fout)
+
 
 def run_inference():
+    os.makedirs(FLAGS.output_dir, exist_ok=True)
+    handler = logging.FileHandler(os.path.join(FLAGS.output_dir, 'infdet.log'), 'a')
+    handler.setFormatter(__fmt)
+    logger.addHandler(handler)
+
     num_classes = FLAGS.num_classes
     num_images = len(FLAGS.filenames)
 
@@ -494,8 +524,6 @@ def run_inference():
     ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
 
     logger.info('Dataset has been created: num_images: {}, num_classes: {}, model_name: {}'.format(num_images, num_classes, FLAGS.model_name))
-
-    os.makedirs(FLAGS.output_dir, exist_ok=True)
 
     run_eval(model, ds, num_images, image_size, FLAGS.num_classes, FLAGS.output_dir, all_anchors, all_grid_xy, all_ratios, cat_names)
 
