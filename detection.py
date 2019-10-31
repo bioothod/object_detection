@@ -350,7 +350,8 @@ def train():
 
             object_mask = tf.expand_dims(y_true[..., 4], -1)
             object_mask_bool = tf.cast(object_mask[..., 0], 'bool')
-            num_positive_labels_metric.update_state(tf.math.count_nonzero(object_mask))
+            num_objects = tf.cast(tf.math.count_nonzero(object_mask), tf.int32)
+            num_positive_labels_metric.update_state(num_objects)
 
             #sigmoid(t_xy) + c_xy
             pred_box_xy = ylo.grid_xy + tf.sigmoid(y_pred[..., :2])
@@ -376,29 +377,40 @@ def train():
 
             def get_best_ious(input_tuple, object_mask, true_bboxes):
                 idx, pred_boxes_for_single_image = input_tuple
+
                 valid_true_boxes = tf.boolean_mask(true_bboxes[idx, ..., 0:4], tf.cast(object_mask[idx, ..., 0], 'bool'))
-                # shape: [N, 4] & [V, 4] ==> [N, V]
-                ious = loss.box_iou(pred_boxes_for_single_image, valid_true_boxes)
-                # shape: [N, V] -> [V]
-                best_ious = tf.reduce_max(ious, axis=[0])
-                best_ious_padded = tf.pad(best_ious,
-                        [[0, tf.cast(tf.math.count_nonzero(object_mask), tf.int32) - tf.shape(valid_true_boxes)[0]]],
-                        constant_values=-1.)
+                num_valid_true_boxes = tf.shape(valid_true_boxes)[0]
+
+                if num_valid_true_boxes > 0:
+                    # shape: [N, 4] & [V, 4] ==> [N, V]
+                    ious = loss.box_iou(pred_boxes_for_single_image, valid_true_boxes)
+                    # shape: [N, V] -> [V]
+                    best_ious = tf.reduce_max(ious, axis=0)
+                    pad_size = num_objects - num_valid_true_boxes
+                    best_ious_padded = tf.pad(best_ious,
+                            [[0, pad_size]],
+                            constant_values=-1.)
+                else:
+                    best_ious_padded = tf.constant(-1., shape=[1,])
+                    num_pad = tf.maximum(num_objects, 0)
+                    best_ious_padded = tf.tile(best_ious_padded, [num_pad])
+
                 return best_ious_padded
 
-            best_ious = tf.map_fn(lambda t: get_best_ious(t, object_mask, true_bboxes),
-                                (tf.range(tf.shape(pred_bboxes)[0]), pred_bboxes),
-                                parallel_iterations=32,
-                                back_prop=False,
-                                dtype=(tf.float32))
+            if num_objects > 0:
+                best_ious = tf.map_fn(lambda t: get_best_ious(t, object_mask, true_bboxes),
+                                    (tf.range(tf.shape(pred_bboxes)[0]), pred_bboxes),
+                                    parallel_iterations=32,
+                                    back_prop=False,
+                                    dtype=(tf.float32))
 
-            best_ious = tf.reshape(best_ious, [-1])
-            best_ious_index = tf.where(best_ious >= 0)
-            best_ious = tf.gather_nd(best_ious, best_ious_index)
-            iou_metric.update_state(best_ious)
+                best_ious = tf.reshape(best_ious, [-1])
+                best_ious_index = tf.where(best_ious >= 0)
+                best_ious = tf.gather_nd(best_ious, best_ious_index)
+                iou_metric.update_state(best_ious)
 
-            good_ious = tf.where(best_ious > 0.5)
-            num_good_ious_metric.update_state(tf.shape(good_ious)[0])
+                good_ious = tf.where(best_ious > 0.5)
+                num_good_ious_metric.update_state(tf.shape(good_ious)[0])
 
             return dist_loss, class_loss, conf_loss_pos, conf_loss_neg, total_loss
 
