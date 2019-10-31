@@ -11,7 +11,7 @@ GlobalParams = collections.namedtuple('GlobalParams', [
     'batch_norm_momentum', 'batch_norm_epsilon', 'data_format',
     'relu_fn',
     'l2_reg_weight', 'spatial_dims', 'channel_axis', 'model_name',
-    'obj_score_threshold'
+    'obj_score_threshold', 'lstm_dropout'
 ])
 
 GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
@@ -47,7 +47,7 @@ class EfnBody(tf.keras.layers.Layer):
         return self.endpoints
 
 class DarknetConv(tf.keras.layers.Layer):
-    def __init__(self, params, num_features, kernel_size=(3, 3), strides=(1, 1), padding='SAME', **kwargs):
+    def __init__(self, params, num_features, kernel_size=(3, 3), strides=(1, 1), padding='SAME', want_max_pool=False, **kwargs):
         super(DarknetConv, self).__init__(**kwargs)
         self.num_features = num_features
         self.kernel_size = kernel_size
@@ -70,10 +70,18 @@ class DarknetConv(tf.keras.layers.Layer):
             momentum=params.batch_norm_momentum,
             epsilon=params.batch_norm_epsilon)
 
+        self.max_pool = None
+        if want_max_pool:
+            self.max_pool = tf.keras.layers.MaxPool2D((2, 2), data_format=params.data_format)
+
     def call(self, inputs, training):
         x = self.conv(inputs)
         x = self.bn(x, training)
         x = self.relu_fn(x)
+
+        if self.max_pool is not None:
+            x = self.max_pool(x)
+
         return x
 
 class DarknetConv5(tf.keras.layers.Layer):
@@ -209,17 +217,64 @@ class EfnYolo(tf.keras.layers.Layer):
         outputs = tf.concat(outputs, axis=1)
         return outputs
 
+class LSTMLayer(tf.keras.layers.Layer):
+    def __init__(self, params, num_features, return_sequence=False, **kwargs):
+        super(LSTMLayer, self).__init__(**kwargs)
+
+        self.bn = tf.keras.layers.BatchNormalization(
+            axis=params.channel_axis,
+            momentum=params.batch_norm_momentum,
+            epsilon=params.batch_norm_epsilon)
+
+        self.lstm = tf.keras.layers.LSTM(num_features, dropout=self.params.lstm_dropout, return_sequences=return_sequence)
+        self.bidirectional = tf.keras.layers.Bidirectional(merge_mode='concat')
+
+    def call(self, x, training):
+        x = self.bn(x, training)
+        x = self.lstm(x, training)
+        x = self.bidirectional(x, training)
+
+        return x
+
+default_char_dictionary="!\"#&\'()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+class TextRecognition(tf.keras.layers.Layer):
+    def __init__(self, params, dictionary=default_char_dictionary, **kwargs):
+        super(TextRecognition, self).__init__(**kwargs)
+
+        self.dict = dictionary
+
+        self.c0 = DarknetConv(params, 512, 5, (2, 2), want_max_pool=True)
+        self.c1 = DarknetConv(params, 512, 3, (2, 2), want_max_pool=True)
+        self.c2 = DarknetConv(params, 512, 3, (1, 2), want_max_pool=True)
+        self.c3 = DarknetConv(params, 512, 3, (1, 2), want_max_pool=True)
+        self.c4 = DarknetConv(params, 512, 3, (1, 2), want_max_pool=True)
+
+        self.lstm0 = LSTMLayer(256, return_sequence=True)
+        self.lstm1 = LSTMLayer(256)
+
+    def call(self, x, training):
+        x = self.c0(x, training)
+        x = self.c1(x, training)
+        x = self.c2(x, training)
+        x = self.c3(x, training)
+        x = self.c4(x, training)
+
+        x = self.lstm0(x, training)
+        x = self.lstm1(x, training)
+
+        return x
+
 class EfnText(tf.keras.layers.Layer):
-    def __init__(self, params, model_name, image_size, upscaled_image_size, anchors, grid_xy, ratios, **kwargs):
-        super(Attention, self).__init__(**kwargs)
+    def __init__(self, params, model_name, image_size, anchors, grid_xy, ratios, **kwargs):
+        super(EfnText, self).__init__(**kwargs)
 
         self.params = params
 
         self.object_model = EfnYolo(params)
 
         self.image_size = image_size
-        self.upscaled_image_size = upscaled_image_size
-        self.scale = float(self.upscaled_image_size) / float(self.image_size)
+        self.image_size_float = float(image_size)
 
         self.grid_xy = tf.expand_dims(grid_xy, 0)
         self.ratios = tf.expand_dims(ratios, 0)
@@ -227,14 +282,6 @@ class EfnText(tf.keras.layers.Layer):
         self.anchors_wh = tf.expand_dims(anchors[..., :2], 0)
 
         self.relu_fn = params.relu_fn or local_swish
-
-        self.bn = tf.keras.layers.BatchNormalization(
-            axis=params.channel_axis,
-            momentum=params.batch_norm_momentum,
-            epsilon=params.batch_norm_epsilon)
-
-        self.dense_y = tf.keras.layers.Dense(128, activation=self.relu_fn)
-        self.logits = tf.keras.layers.Dense(128, activation=self.relu_fn)
 
     def gaussian_masks(mu, sigma, dim, dim_tile):
         r = tf.cast(tf.range(dim), tf.float32)
@@ -269,7 +316,7 @@ class EfnText(tf.keras.layers.Layer):
 
         obj_score = object_outputs[..., 4]
 
-        non_background_index = tf.where(obj_score > self.params.obj_score_threshold)
+        non_background_index = tf.where(tf.greater(obj_score, self.params.obj_score_threshold))
         object_outputs = tf.gather_nd(object_outputs, non_background_index)
 
         inputs_xy = object_outputs[..., :2]
@@ -279,34 +326,27 @@ class EfnText(tf.keras.layers.Layer):
         pred_box_xy = pred_box_xy * self.ratios
         pred_box_wh = tf.math.exp(inputs_wh) * self.anchors_wh
 
+        x0 = pred_box_xy[..., 0] - pred_box_wh[..., 0] / 2
+        x1 = pred_box_xy[..., 0] + pred_box_wh[..., 0] / 2
+        y0 = pred_box_xy[..., 1] - pred_box_wh[..., 1] / 2
+        y1 = pred_box_xy[..., 1] + pred_box_wh[..., 1] / 2
 
-        sigma_w = pred_box_wh[..., 0] * self.scale
-        sigma_h = pred_box_wh[..., 1] * self.scale
-        mu_w = pred_box_xy[..., 0] * self.scale
-        mu_h = pred_box_xy[..., 1] * self.scale
+        x0 = tf.maximum(0., x0)
+        x1 = tf.minimum(self.image_size_float, x1)
+        y0 = tf.maximum(0., y0)
+        y1 = tf.minimum(self.image_size_float, y1)
+
+        sigma_x = x1 - x0
+        sigma_y = y1 - y0
+        mu_x = (x1 + x2) / 2.
+        mu_y = (y1 + y2) / 2.
 
         b = tf.shape(inputs)[0]
-        masks = self.generate_masks([b, self.upscaled_image_size, self.upscaled_image_size, 3], mu_h, sigma_h, mu_w, sigma_w)
+        masks = self.generate_masks([b, self.image_size, self.image_size, 3], mu_y, sigma_y, mu_x, sigma_x)
 
-        x = tf.bn(inputs, training)
-        x = tf.relu_fn(x)
+        masked_inputs = inputs * masks
 
-        x = tf.reshape(x, [-1, x.shape[-1]])
-        y = self.dense_y(x)
-
-        logits = tf.layers.dense(y, 1, activation = None)
-
-        logits = tf.reshape(logits, [-1, input_features.shape[1], 1])
-        alphas = tf.nn.softmax(logits, axis = 1)
-
-        if reduce_output:
-            att_seq = tf.reduce_sum(input_features * alphas, axis = 1)
-        else:
-            att_seq = input_features * alphas
-
-
-        logging.info('att: input_features: {}, alphas: {}, output: {}'.format(input_features, alphas, att_seq))
-        return att_seq, alphas
+        return object_outputs
 
 def create_model(model_name):
     data_format='channels_last'
@@ -327,6 +367,7 @@ def create_model(model_name):
         'spatial_dims': spatial_dims,
         'model_name': model_name,
         'obj_score_threshold': 0.3,
+        'lstm_dropout': 0.3,
     }
 
     params = GlobalParams(**params)

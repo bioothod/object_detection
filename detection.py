@@ -314,10 +314,12 @@ def train():
 
         ylo = loss.YOLOLoss(anchors_all, output_xy_grids, output_ratios, image_size, reduction=tf.keras.losses.Reduction.NONE)
 
-        def calculate_metrics(logits, true_values,
+        def calculate_metrics(images, is_training, true_values,
                 loss_metric, accuracy_metric, obj_accuracy_metric,
                 iou_metric, num_good_ious_metric, num_positive_labels_metric):
-            dist_loss, conf_loss_pos, conf_loss_neg = ylo.call(y_true=true_values, y_pred=logits)
+
+            obj_logits = model(images, training=is_training)
+            dist_loss, conf_loss_pos, conf_loss_neg = ylo.call(y_true=true_values, y_pred=obj_logits)
 
             dist_loss = tf.nn.compute_average_loss(dist_loss, global_batch_size=FLAGS.batch_size)
             conf_loss_pos = tf.nn.compute_average_loss(conf_loss_pos, global_batch_size=FLAGS.batch_size)
@@ -327,7 +329,7 @@ def train():
             loss_metric.update_state(total_loss)
 
             y_true = true_values
-            y_pred = logits
+            y_pred = obj_logits
 
             object_mask = tf.expand_dims(y_true[..., 4], -1)
             object_mask_bool = tf.cast(object_mask[..., 0], 'bool')
@@ -366,7 +368,7 @@ def train():
                                 (tf.range(tf.shape(pred_bboxes)[0]), pred_bboxes),
                                 parallel_iterations=32,
                                 back_prop=False,
-                                dtype=(tf.float32, tf.float32))
+                                dtype=(tf.float32))
 
             best_ious = tf.reshape(best_ious, [-1])
             best_ious_index = tf.where(best_ious >= 0)
@@ -381,16 +383,14 @@ def train():
         epoch_var = tf.Variable(0, dtype=tf.float32, name='epoch_number', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
 
         def eval_step(filenames, images, true_values, true_text_labels):
-            logits = model(images, training=False)
-            dist_loss, conf_loss_pos, conf_loss_neg, total_loss = calculate_metrics(logits, true_values,
+            dist_loss, conf_loss_pos, conf_loss_neg, total_loss = calculate_metrics(images, False, true_values,
                     eval_loss_metric, eval_accuracy_metric, eval_obj_accuracy_metric, eval_iou_metric,
                     eval_num_good_ious_metric, eval_num_positive_labels_metric)
             return dist_loss, conf_loss_pos, conf_loss_neg, total_loss
 
         def train_step(filenames, images, true_values, true_text_labels):
             with tf.GradientTape() as tape:
-                logits = model(images, training=True)
-                dist_loss, conf_loss_pos, conf_loss_neg, total_loss = calculate_metrics(logits, true_values,
+                dist_loss, conf_loss_pos, conf_loss_neg, total_loss = calculate_metrics(images, True, true_values,
                         loss_metric, accuracy_metric, obj_accuracy_metric, iou_metric,
                         num_good_ious_metric, num_positive_labels_metric)
 
