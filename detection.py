@@ -91,22 +91,22 @@ def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_rat
     coords_yx = tf.concat([yminf, xminf, ymaxf, xmaxf], axis=1)
 
     if is_training:
-        image, new_labels, new_bboxes = preprocess_ssd.preprocess_for_train(image, orig_labels, coords_yx,
+        image, new_text_labels, new_bboxes = preprocess_ssd.preprocess_for_train(image, true_text_labels, coords_yx,
                 [image_size, image_size], data_format=data_format)
 
         yminf, xminf, ymaxf, xmaxf = tf.split(new_bboxes, num_or_size_splits=4, axis=1)
-        orig_labels = new_labels
     else:
         image = preprocess_ssd.preprocess_for_eval(image, [image_size, image_size], data_format=data_format)
+        new_text_labels = true_text_labels
 
     cx = (xminf + xmaxf) * image_size / 2
     cy = (yminf + ymaxf) * image_size / 2
     h = (ymaxf - yminf) * image_size
     w = (xmaxf - xminf) * image_size
 
-    orig_bboxes = tf.concat([cx, cy, w, h], axis=1)
+    new_bboxes = tf.concat([cx, cy, w, h], axis=1)
 
-    true_values, true_texts = anchors_gen.generate_true_values_for_anchors(orig_bboxes,
+    true_values, true_texts = anchors_gen.generate_true_values_for_anchors(new_bboxes, new_text_labels,
             anchors_all, output_xy_grids, output_ratios,
             image_size)
 
@@ -165,12 +165,13 @@ def draw_bboxes(image_size, train_dataset, all_anchors, all_grid_xy, all_ratios)
         bb = np.stack([x0, y0, x1, y1], axis=1)
         new_anns = []
         for _bb, l in zip(bb, labels):
+            l = str(l, 'utf8')
             new_anns.append((_bb, None, l))
 
         logger.info('{}: true anchors: {}'.format(dst, len(new_anns)))
 
-        image = image.numpy() * 128. + 128
-        image = image.astype(np.uint8)
+        image = preprocess_ssd.denormalize_image(image)
+        image = image.numpy().astype(np.uint8)
         image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
         image_draw.draw_im(image, new_anns, dst, {})
 
@@ -238,7 +239,7 @@ def train():
             eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, image_size, is_training=False)
 
 
-        if True:
+        if False:
             draw_bboxes(image_size, train_dataset, anchors_all, output_xy_grids, output_ratios)
             exit(0)
 
@@ -527,7 +528,7 @@ def train():
 
                 logger.info("epoch: {}, saved checkpoint: {}, eval metric: {:.4f} -> {:.4f}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}, good_ios/positive: {}/{}".format(
                     epoch, best_saved_path, min_metric, metric,
-                    eval_accuracy_metric.result(), eval_obj_accuracy_metric.result(), eval_iou_metric.result()
+                    eval_accuracy_metric.result(), eval_obj_accuracy_metric.result(), eval_iou_metric.result(),
                     int(eval_num_good_ious_metric.result()), int(eval_num_positive_labels_metric.result())))
                 min_metric = metric
                 num_epochs_without_improvement = 0

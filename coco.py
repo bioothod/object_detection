@@ -95,7 +95,7 @@ def get_text_train_augmentation(image_size):
 
     train_transform = [
         A.HorizontalFlip(p=0.5),
-        A.RandomRotate90(p=0.3),
+        #A.RandomRotate90(p=0.3),
         A.ShiftScaleRotate(rotate_limit=5, p=0.8),
 
         A.OneOf([

@@ -128,7 +128,8 @@ def generate_true_values_for_anchors(orig_bboxes, orig_texts, anchors_all, outpu
 
     bboxes_for_loss = tf.concat([x_for_loss, y_for_loss, w_for_loss, h_for_loss], axis=1)
     objs_for_loss = tf.ones_like(x_for_loss)
-    has_text_for_loss = tf.where(tf.not_equal(orig_texts, '<SKIP>'), 1, 0)
+    has_text_for_loss = tf.where(tf.not_equal(orig_texts, '<SKIP>'), 1., 0.)
+    has_text_for_loss = tf.expand_dims(has_text_for_loss, 1)
     values_for_loss = tf.concat([bboxes_for_loss, objs_for_loss, has_text_for_loss], axis=1)
 
     update_idx = tf.expand_dims(best_anchors_index, 1)
