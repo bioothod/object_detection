@@ -508,7 +508,7 @@ def run_inference():
             with open(fn, 'r') as fin:
                 for line in fin:
                     if line[-1] == '\n':
-                        line = [:-1]
+                        line = line[:-1]
                     filenames.append(line)
         ds = tf.data.Dataset.from_tensor_slices((filenames))
         ds = ds.map(lambda fn: tf_read_image(fn, image_size, dtype), num_parallel_calls=FLAGS.num_cpus)
