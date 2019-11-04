@@ -48,7 +48,7 @@ parser.add_argument('--no_channel_swap', action='store_true', help='When set, do
 parser.add_argument('--freeze', action='store_true', help='Save frozen protobuf near checkpoint')
 parser.add_argument('--do_not_save_images', action='store_true', help='Do not save images with bounding boxes')
 parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
-parser.add_argument('--dataset_type', type=str, choices=['files', 'tfrecords'], default='files', help='Dataset type')
+parser.add_argument('--dataset_type', type=str, choices=['files', 'tfrecords', 'filelist'], default='files', help='Dataset type')
 parser.add_argument('filenames', type=str, nargs='*', help='Numeric label : file path')
 FLAGS = parser.parse_args()
 
@@ -501,6 +501,16 @@ def run_inference():
 
     if FLAGS.dataset_type == 'files':
         ds = tf.data.Dataset.from_tensor_slices((FLAGS.filenames))
+        ds = ds.map(lambda fn: tf_read_image(fn, image_size, dtype), num_parallel_calls=FLAGS.num_cpus)
+    elif FLAGS.dataset_type == 'filelist':
+        filenames = []
+        for fn in FLAGS.filenames:
+            with open(fn, 'r') as fin:
+                for line in fin:
+                    if line[-1] == '\n':
+                        line = [:-1]
+                    filenames.append(line)
+        ds = tf.data.Dataset.from_tensor_slices((filenames))
         ds = ds.map(lambda fn: tf_read_image(fn, image_size, dtype), num_parallel_calls=FLAGS.num_cpus)
     elif FLAGS.dataset_type == 'tfrecords':
         from detection import unpack_tfrecord
