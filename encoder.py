@@ -251,7 +251,10 @@ class TextRecognition(tf.keras.layers.Layer):
         self.c4 = DarknetConv(params, 512, 3, (1, 2), want_max_pool=True)
 
         self.lstm0 = LSTMLayer(256, return_sequence=True)
-        self.lstm1 = LSTMLayer(256)
+        self.lstm1 = LSTMLayer(256, return_sequence=True)
+
+        self.dilated_conv = tf.keras.layers.Conv2D(len(self.dict) + 1, kernel_size=3, strides=1, dilation_rate=1, padding='SAME')
+
 
     def call(self, x, training):
         x = self.c0(x, training)
@@ -262,6 +265,8 @@ class TextRecognition(tf.keras.layers.Layer):
 
         x = self.lstm0(x, training)
         x = self.lstm1(x, training)
+
+        x = self.dilated_conv(x)
 
         return x
 
