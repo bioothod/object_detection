@@ -54,7 +54,7 @@ def policy_v0():
       [('Posterize', 0.4, 6), ('AutoContrast', 0.4, 7)],
       [('Solarize', 0.6, 8), ('Color', 0.6, 9)],
       [('Solarize', 0.2, 4), ('Rotate', 0.8, 9)],
-      #[('Rotate', 1.0, 7), ('TranslateY', 0.8, 9)],
+      [('Rotate', 1.0, 7), ('TranslateY', 0.8, 9)],
       [('ShearX', 0.0, 0), ('Solarize', 0.8, 4)],
       [('ShearY', 0.8, 0), ('Color', 0.6, 4)],
       [('Color', 1.0, 0), ('Rotate', 0.6, 2)],
@@ -74,7 +74,7 @@ def policy_vtest():
   # (operation, probability, magnitude). Each element in policy is a
   # sub-policy that will be applied sequentially on the image.
   policy = [
-      #[('TranslateX', 1.0, 4), ('Equalize', 1.0, 10)],
+      [('TranslateX', 1.0, 4), ('Equalize', 1.0, 10)],
   ]
   return policy
 
