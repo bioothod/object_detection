@@ -11,7 +11,7 @@ GlobalParams = collections.namedtuple('GlobalParams', [
     'batch_norm_momentum', 'batch_norm_epsilon', 'data_format',
     'relu_fn',
     'l2_reg_weight', 'spatial_dims', 'channel_axis', 'model_name',
-    'obj_score_threshold', 'lstm_dropout'
+    'obj_score_threshold', 'lstm_dropout', 'spatial_dropout'
 ])
 
 GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
@@ -226,134 +226,88 @@ class LSTMLayer(tf.keras.layers.Layer):
             momentum=params.batch_norm_momentum,
             epsilon=params.batch_norm_epsilon)
 
-        self.lstm = tf.keras.layers.LSTM(num_features, dropout=self.params.lstm_dropout, return_sequences=return_sequence)
-        self.bidirectional = tf.keras.layers.Bidirectional(merge_mode='concat')
+        self.lstm = tf.keras.layers.LSTM(num_features, dropout=params.lstm_dropout, return_sequences=return_sequence)
+        self.bidirectional = tf.keras.layers.Bidirectional(self.lstm, merge_mode='concat')
 
     def call(self, x, training):
         x = self.bn(x, training)
-        x = self.lstm(x, training)
-        x = self.bidirectional(x, training)
+        x = self.bidirectional(x)
 
         return x
 
-default_char_dictionary="!\"#&\'()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-
-class TextRecognition(tf.keras.layers.Layer):
-    def __init__(self, params, dictionary=default_char_dictionary, **kwargs):
-        super(TextRecognition, self).__init__(**kwargs)
-
-        self.dict = dictionary
-
-        self.c0 = DarknetConv(params, 512, 5, (2, 2), want_max_pool=True)
-        self.c1 = DarknetConv(params, 512, 3, (2, 2), want_max_pool=True)
-        self.c2 = DarknetConv(params, 512, 3, (1, 2), want_max_pool=True)
-        self.c3 = DarknetConv(params, 512, 3, (1, 2), want_max_pool=True)
-        self.c4 = DarknetConv(params, 512, 3, (1, 2), want_max_pool=True)
-
-        self.lstm0 = LSTMLayer(256, return_sequence=True)
-        self.lstm1 = LSTMLayer(256, return_sequence=True)
-
-        self.dilated_conv = tf.keras.layers.Conv2D(len(self.dict) + 1, kernel_size=3, strides=1, dilation_rate=1, padding='SAME')
-
-
-    def call(self, x, training):
-        x = self.c0(x, training)
-        x = self.c1(x, training)
-        x = self.c2(x, training)
-        x = self.c3(x, training)
-        x = self.c4(x, training)
-
-        x = self.lstm0(x, training)
-        x = self.lstm1(x, training)
-
-        x = self.dilated_conv(x)
-
-        return x
-
-class EfnText(tf.keras.layers.Layer):
-    def __init__(self, params, model_name, image_size, anchors, grid_xy, ratios, **kwargs):
-        super(EfnText, self).__init__(**kwargs)
-
-        self.params = params
-
-        self.object_model = EfnYolo(params)
-
-        self.image_size = image_size
-        self.image_size_float = float(image_size)
-
-        self.grid_xy = tf.expand_dims(grid_xy, 0)
-        self.ratios = tf.expand_dims(ratios, 0)
-        self.ratios = tf.expand_dims(ratios, -1) # [B, N, 1]
-        self.anchors_wh = tf.expand_dims(anchors[..., :2], 0)
+class TextConv(tf.keras.layers.Layer):
+    def __init__(self, params, num_features, kernel_size=(3, 3), strides=(1, 1), padding='SAME', pool_size=(1, 1), pool_strides=(1, 1), **kwargs):
+        super(TextConv, self).__init__(**kwargs)
+        self.num_features = num_features
+        self.kernel_size = kernel_size
+        self.strides = strides
+        self.padding = padding
 
         self.relu_fn = params.relu_fn or local_swish
 
-    def gaussian_masks(mu, sigma, dim, dim_tile):
-        r = tf.cast(tf.range(dim), tf.float32)
-        r = tf.expand_dims(r, 0)
-        r = tf.tile(r, [tf.shape(mu)[0], 1])
+        self.conv = tf.keras.layers.Conv2D(
+                self.num_features,
+                kernel_size=self.kernel_size,
+                strides=self.strides,
+                data_format=params.data_format,
+                use_bias=False,
+                padding=self.padding,
+                kernel_initializer='glorot_uniform')
 
-        sigma = tf.expand_dims(sigma, -1)
-        mu = tf.expand_dims(mu, -1)
+        self.bn = tf.keras.layers.BatchNormalization(
+            axis=params.channel_axis,
+            momentum=params.batch_norm_momentum,
+            epsilon=params.batch_norm_epsilon)
 
-        centers = r - mu
-        mask = tf.exp(-.5 * tf.square(centers / sigma))
-        mask = tf.expand_dims(mask, -1)
-        mask = tf.tile(mask, [1, 1, dim_tile])
-        return mask
-
-    def generate_masks(params, mu_h, sigma_h, mu_w, sigma_w):
-        b, h, w, c = params
-
-        mask_h = gaussian_masks(mu_h, sigma_h, h, w)
-        mask_w = gaussian_masks(mu_w, sigma_w, w, h)
-
-        mask_w = tf.transpose(mask_w, (0, 2, 1))
-        mask = mask_h * mask_w
-
-        mask = tf.expand_dims(mask, -1)
-        mask = tf.tile(mask, [1, 1, 1, c])
-
-        return mask
+        self.max_pool = tf.keras.layers.MaxPool2D(pool_size=pool_size, strides=pool_strides, data_format=params.data_format, padding='VALID')
 
     def call(self, inputs, training):
-        object_outputs = self.object_model(inputs, training)
+        x = self.conv(inputs)
+        x = self.bn(x, training)
+        x = self.relu_fn(x)
 
-        obj_score = object_outputs[..., 4]
+        x = self.max_pool(x)
 
-        non_background_index = tf.where(tf.greater(obj_score, self.params.obj_score_threshold))
-        object_outputs = tf.gather_nd(object_outputs, non_background_index)
+        return x
 
-        inputs_xy = object_outputs[..., :2]
-        inputs_wh = object_outputs[..., 2:4]
 
-        pred_box_xy = self.grid_xy + tf.sigmoid(inputs_xy)
-        pred_box_xy = pred_box_xy * self.ratios
-        pred_box_wh = tf.math.exp(inputs_wh) * self.anchors_wh
+default_char_dictionary="!\"#&\'()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
-        x0 = pred_box_xy[..., 0] - pred_box_wh[..., 0] / 2
-        x1 = pred_box_xy[..., 0] + pred_box_wh[..., 0] / 2
-        y0 = pred_box_xy[..., 1] - pred_box_wh[..., 1] / 2
-        y1 = pred_box_xy[..., 1] + pred_box_wh[..., 1] / 2
+class TextModel(tf.keras.layers.Layer):
+    def __init__(self, params, dictionary=default_char_dictionary, **kwargs):
+        super(TextModel, self).__init__(**kwargs)
 
-        x0 = tf.maximum(0., x0)
-        x1 = tf.minimum(self.image_size_float, x1)
-        y0 = tf.maximum(0., y0)
-        y1 = tf.minimum(self.image_size_float, y1)
+        efn_param_keys = efn.GlobalParams._fields
+        efn_params = {}
+        for k, v in params._asdict().items():
+            if k in efn_param_keys:
+                efn_params[k] = v
 
-        sigma_x = x1 - x0
-        sigma_y = y1 - y0
-        mu_x = (x1 + x2) / 2.
-        mu_y = (y1 + y2) / 2.
+        self.base_model = efn.build_model(model_name=params.model_name, override_params=efn_params)
 
-        b = tf.shape(inputs)[0]
-        masks = self.generate_masks([b, self.image_size, self.image_size, 3], mu_y, sigma_y, mu_x, sigma_x)
+        self.lstm0 = LSTMLayer(params, 512, return_sequence=True)
 
-        masked_inputs = inputs * masks
+        self.out_conv = tf.keras.layers.Conv2D(len(dictionary) + 1, kernel_size=1, strides=1, padding='SAME')
 
-        return object_outputs
 
-def create_model(model_name):
+    def call(self, inputs, training):
+        outputs = self.base_model(inputs, training=training, features_only=True)
+
+        shape = tf.shape(outputs)
+        x = tf.reshape(outputs, [shape[0], shape[1] * shape[2], shape[3]])
+        logger.info('inputs: {}, outputs: {}, x: {}'.format(inputs.shape, outputs.shape, x.shape))
+
+        x = self.lstm0(x, training)
+        logger.info('lstm: {}'.format(x.shape))
+
+        # BxTx2H -> BxTx1x2H
+        x = tf.expand_dims(x, 2)
+        x = self.out_conv(x)
+        x = tf.squeeze(x, 2)
+
+        return x
+
+def create_params(model_name):
     data_format='channels_last'
 
     if data_format == 'channels_first':
@@ -373,10 +327,20 @@ def create_model(model_name):
         'model_name': model_name,
         'obj_score_threshold': 0.3,
         'lstm_dropout': 0.3,
+        'spatial_dropout': 0.3,
     }
 
     params = GlobalParams(**params)
 
+    return params
+
+
+def create_model(model_name):
+    params = create_params(model_name)
     model = EfnYolo(params)
     return model
 
+def create_text_recognition_model(model_name):
+    params = create_params(model_name)
+    model = TextModel(params)
+    return model
