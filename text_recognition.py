@@ -13,6 +13,7 @@ logger = logging.getLogger('detection')
 
 import autoaugment
 import encoder
+import preprocess
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch.')
@@ -38,23 +39,7 @@ parser.add_argument('--image_shape', type=str, default='32x128', help='Use this 
 dict_split = tf.strings.unicode_split(encoder.default_char_dictionary, 'UTF-8')
 kv_init = tf.lookup.KeyValueTensorInitializer(keys=dict_split, values=tf.range(1, dict_split.shape[0] + 1, 1), key_dtype=tf.string, value_dtype=tf.int32)
 dict_table = tf.lookup.StaticHashTable(kv_init, 0)
-max_text_length = 49
-
-def pad_resize_image(image, dims):
-    image = tf.image.resize(image, [64, 128], preserve_aspect_ratio=True)
-
-    shape = tf.shape(image)
-
-    sxd = dims[1] - shape[1]
-    syd = dims[0] - shape[0]
-
-    sx = tf.cast(sxd / 2, dtype=tf.int32)
-    sy = tf.cast(syd / 2, dtype=tf.int32)
-
-    paddings = tf.convert_to_tensor([[sy, syd - sy], [sx, sxd - sx], [0, 0]])
-    image = tf.pad(image, paddings, mode='CONSTANT', constant_values=128)
-    image = tf.cast(image, dtype=tf.uint8)
-    return image
+max_text_length = 32
 
 def unpack_tfrecord(serialized_example, image_shape, is_training, data_format):
     features = tf.io.parse_single_example(serialized_example,
@@ -72,11 +57,7 @@ def unpack_tfrecord(serialized_example, image_shape, is_training, data_format):
     image_id = features['image_id']
     image = tf.image.decode_jpeg(features['image'], channels=3)
 
-    orig_image_height = tf.cast(tf.shape(image)[0], tf.float32)
-    orig_image_width = tf.cast(tf.shape(image)[1], tf.float32)
-
-    image = pad_resize_image(image, image_shape)
-    #image = tf.image.resize_with_pad(image, image_shape[0], image_shape[1], antialias=True, method=tf.image.ResizeMethod.LANCZOS5)
+    image = preprocess.pad_resize_image(image, image_shape)
     image = tf.cast(image, tf.uint8)
 
     if is_training:
@@ -125,7 +106,7 @@ def train():
         image_shape = [int(d) for d in FLAGS.image_shape.split('x')][:2]
         logger.info('input shape from command line: {}'.format(image_shape))
 
-        model = encoder.create_text_recognition_model(FLAGS.model_name)
+        model = encoder.create_text_recognition_model(FLAGS.model_name, max_text_length)
 
         def create_dataset_from_tfrecord(name, dataset_dir, image_shape, is_training):
             filenames = []

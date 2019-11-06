@@ -274,8 +274,10 @@ class TextConv(tf.keras.layers.Layer):
 default_char_dictionary="!\"#&\'()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 class TextModel(tf.keras.layers.Layer):
-    def __init__(self, params, dictionary=default_char_dictionary, **kwargs):
+    def __init__(self, params, max_sentence_len, dictionary=default_char_dictionary, **kwargs):
         super(TextModel, self).__init__(**kwargs)
+
+        self.max_sentence_len = max_sentence_len
 
         efn_param_keys = efn.GlobalParams._fields
         efn_params = {}
@@ -284,6 +286,7 @@ class TextModel(tf.keras.layers.Layer):
                 efn_params[k] = v
 
         self.base_model = efn.build_model(model_name=params.model_name, override_params=efn_params)
+        self.image_size = efn.efficientnet_params(params.model_name)[2]
 
         self.lstm0 = LSTMLayer(params, 512, return_sequence=True)
 
@@ -302,10 +305,22 @@ class TextModel(tf.keras.layers.Layer):
 
         # BxTx2H -> BxTx1x2H
         x = tf.expand_dims(x, 2)
+
+        # BxTx1x2H -> BxTx1xC
         x = self.out_conv(x)
         x = tf.squeeze(x, 2)
 
         return x
+
+    def decode(self, inputs):
+        logits = self.call(inputs, training=False)
+
+        # BxTxC -> TxBxC
+        logits = tf.transpose(logits, [1, 0, 2])
+
+        #decoded, _ = tf.nn.ctc_beam_search_decoder(inputs=logits, sequence_length=self.max_sentence_len, beam_width=50)
+
+        decoded, _ = tf.nn.ctc_greedy_decoder(inputs=logits, sequence_length=self.max_sentence_len)
 
 def create_params(model_name):
     data_format='channels_last'
@@ -340,7 +355,7 @@ def create_model(model_name):
     model = EfnYolo(params)
     return model
 
-def create_text_recognition_model(model_name):
+def create_text_recognition_model(model_name, max_sentence_len):
     params = create_params(model_name)
-    model = TextModel(params)
+    model = TextModel(params, max_sentence_len)
     return model
