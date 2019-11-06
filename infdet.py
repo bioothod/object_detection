@@ -31,9 +31,7 @@ parser.add_argument('--eval_coco_annotations', type=str, help='Path to MS COCO d
 parser.add_argument('--eval_coco_data_dir', type=str, default='/', help='Path to MS COCO dataset: image directory')
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch')
 parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel preprocessing jobs')
-parser.add_argument('--num_classes', type=int, required=True, help='Number of the output classes in the model')
 parser.add_argument('--max_ret', type=int, default=100, help='Maximum number of returned boxes')
-parser.add_argument('--min_score', type=float, default=0.7, help='Minimal class probability')
 parser.add_argument('--min_obj_score', type=float, default=0.3, help='Minimal class probability')
 parser.add_argument('--min_size', type=float, default=10, help='Minimal size of the bounding box')
 parser.add_argument('--iou_threshold', type=float, default=0.45, help='Minimal IoU threshold for non-maximum suppression')
@@ -42,7 +40,6 @@ parser.add_argument('--checkpoint', type=str, help='Load model weights from this
 parser.add_argument('--checkpoint_dir', type=str, help='Load model weights from the latest checkpoint in this directory')
 parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='Model name')
 parser.add_argument('--data_format', type=str, default='channels_last', choices=['channels_first', 'channels_last'], help='Data format: [channels_first, channels_last]')
-parser.add_argument('--do_not_step_labels', action='store_true', help='Whether to reduce labels by 1, i.e. when 0 is background class')
 parser.add_argument('--skip_checkpoint_assertion', action='store_true', help='Skip checkpoint assertion, needed for older models on objdet3/4')
 parser.add_argument('--no_channel_swap', action='store_true', help='When set, do not perform rgb-bgr conversion, needed, when using files as input')
 parser.add_argument('--freeze', action='store_true', help='Save frozen protobuf near checkpoint')
@@ -69,13 +66,13 @@ def tf_read_image(filename, image_size, dtype):
     mx_int = tf.cast(mx, tf.int32)
     image = tf.image.pad_to_bounding_box(image, tf.cast((mx - orig_image_height) / 2, tf.int32), tf.cast((mx - orig_image_width) / 2, tf.int32), mx_int, mx_int)
 
-    image = tf.image.resize_with_pad(image, image_size, image_size)
+    image = tf.image.resize(image, [image_size, image_size])
 
     image = normalize_image(image, dtype)
 
     return filename, image
 
-def tf_left_needed_dimensions_from_tfrecord(image_size, anchors_all, output_xy_grids, output_ratios, num_classes, filename, image_id, image, true_values):
+def tf_left_needed_dimensions_from_tfrecord(image_size, anchors_all, output_xy_grids, output_ratios, filename, image_id, image, true_values):
     non_background_index = tf.where(tf.not_equal(true_values[..., 4], 0))
 
     sampled_true_values = tf.gather_nd(true_values, non_background_index)
@@ -219,132 +216,80 @@ def non_max_suppression(coords, scores, max_ret, iou_threshold):
     return pick
     #return tf.gather(coords, pick), tf.gather(scores, pick)
 
-def per_image_supression(logits, image_size, num_classes):
-    coords, scores, labels, objectness = logits
+def per_image_supression(logits, image_size):
+    coords, objectness = logits
 
-    non_background_index = tf.where(tf.logical_and(
-                                        tf.greater(objectness, FLAGS.min_obj_score),
-                                        tf.greater(scores, FLAGS.min_score)))
-    #non_background_index = tf.where(tf.greater(scores, FLAGS.min_score))
-    #non_background_index = tf.where(tf.greater(scores * objectness, FLAGS.min_score))
-    #non_background_index = tf.where(tf.greater(scores * objectness, 0.3))
+    non_background_index = tf.where(tf.greater(objectness, FLAGS.min_obj_score))
 
     non_background_index = tf.squeeze(non_background_index, 1)
 
-    sampled_coords = tf.gather(coords, non_background_index)
-    sampled_scores = tf.gather(scores, non_background_index)
-    sampled_labels = tf.gather(labels, non_background_index)
-    sampled_objs = tf.gather(objectness, non_background_index)
+    selected_coords = tf.gather(coords, non_background_index)
+    selected_objs = tf.gather(objectness, non_background_index)
 
-    ret_coords, ret_scores, ret_cat_ids, ret_objs = [], [], [], []
-    for cat_id in range(0, num_classes):
-        class_index = tf.where(tf.equal(sampled_labels, cat_id))
-        #tf.print('class_index:', class_index)
+    ret_coords, ret_cat_ids, ret_objs = [], [], []
 
-        selected_scores = tf.gather_nd(sampled_scores, class_index)
-        #logger.info('class_index: {}, sampled_labels: {}, sampled_scores: {}, selected_scores: {}'.format(class_index.shape, sampled_labels.shape, sampled_scores.shape, selected_scores.shape))
+    cx, cy, w, h = tf.split(selected_coords, num_or_size_splits=4, axis=1)
+    cx = tf.squeeze(cx, 1)
+    cy = tf.squeeze(cy, 1)
+    w = tf.squeeze(w, 1)
+    h = tf.squeeze(h, 1)
 
-        selected_coords = tf.gather_nd(sampled_coords, class_index)
-        selected_objs = tf.gather_nd(sampled_objs, class_index)
+    small_cond = tf.logical_and(h >= FLAGS.min_size, w >= FLAGS.min_size)
+    large_cond = tf.logical_and(h < image_size*2, w < image_size*2)
+    index = tf.where(tf.logical_and(small_cond, large_cond))
+    selected_coords = tf.gather(selected_coords, index)
+    selected_coords = tf.squeeze(selected_coords, 1)
+    selected_objs = tf.gather(selected_objs, index)
+    selected_objs = tf.squeeze(selected_objs, 1)
 
-        #tf.print('selected_scores:', selected_scores, 'selected_coords:', selected_coords)
+    cx, cy, w, h = tf.split(selected_coords, num_or_size_splits=4, axis=1)
+    cx = tf.squeeze(cx, 1)
+    cy = tf.squeeze(cy, 1)
+    w = tf.squeeze(w, 1)
+    h = tf.squeeze(h, 1)
 
-        cx, cy, w, h = tf.split(selected_coords, num_or_size_splits=4, axis=1)
-        cx = tf.squeeze(cx, 1)
-        cy = tf.squeeze(cy, 1)
-        w = tf.squeeze(w, 1)
-        h = tf.squeeze(h, 1)
+    #tf.print('cx:', cx, 'cy:', cy, 'w:', w, 'h:', h)
 
-        small_cond = tf.logical_and(h >= FLAGS.min_size, w >= FLAGS.min_size)
-        large_cond = tf.logical_and(h < image_size*2, w < image_size*2)
-        index = tf.where(tf.logical_and(small_cond, large_cond))
-        selected_scores = tf.gather(selected_scores, index)
-        selected_scores = tf.squeeze(selected_scores, 1)
-        selected_coords = tf.gather(selected_coords, index)
-        selected_coords = tf.squeeze(selected_coords, 1)
-        selected_objs = tf.gather(selected_objs, index)
-        selected_objs = tf.squeeze(selected_objs, 1)
+    xmin = cx - w/2
+    xmax = cx + w/2
+    ymin = cy - h/2
+    ymax = cy + h/2
 
-        cx, cy, w, h = tf.split(selected_coords, num_or_size_splits=4, axis=1)
-        cx = tf.squeeze(cx, 1)
-        cy = tf.squeeze(cy, 1)
-        w = tf.squeeze(w, 1)
-        h = tf.squeeze(h, 1)
+    xmin = tf.maximum(0., xmin)
+    ymin = tf.maximum(0., ymin)
+    xmax = tf.minimum(float(image_size), xmax)
+    ymax = tf.minimum(float(image_size), ymax)
 
-        #tf.print('cx:', cx, 'cy:', cy, 'w:', w, 'h:', h)
+    coords_yx = tf.stack([ymin, xmin, ymax, xmax], axis=1)
 
-        xmin = cx - w/2
-        xmax = cx + w/2
-        ymin = cy - h/2
-        ymax = cy + h/2
+    scores_to_sort = selected_objs
+    if True:
+        selected_indexes = tf.image.non_max_suppression(coords_yx, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
+    else:
+        selected_indexes = non_max_suppression(coords_yx, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
 
-        xmin = tf.maximum(0., xmin)
-        ymin = tf.maximum(0., ymin)
-        xmax = tf.minimum(float(image_size), xmax)
-        ymax = tf.minimum(float(image_size), ymax)
+    selected_coords = tf.gather(coords_yx, selected_indexes)
+    selected_objs = tf.gather(selected_objs, selected_indexes)
 
-        coords_yx = tf.stack([ymin, xmin, ymax, xmax], axis=1)
+    scores_to_sort = selected_objs
+    _, best_index = tf.math.top_k(scores_to_sort, tf.minimum(FLAGS.max_ret, tf.shape(scores_to_sort)[0]), sorted=True)
 
-        #scores_to_sort = selected_scores * selected_objs
-        scores_to_sort = selected_objs
-        if True:
-            selected_indexes = tf.image.non_max_suppression(coords_yx, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
-        else:
-            selected_indexes = non_max_suppression(coords_yx, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
+    best_coords = tf.gather(selected_coords, best_index)
+    best_objs = tf.gather(selected_objs, best_index)
 
-        #logger.info('selected_indexes: {}, selected_coords: {}, selected_scores: {}'.format(selected_indexes, selected_coords, selected_scores))
-        selected_coords = tf.gather(coords_yx, selected_indexes)
-        selected_scores = tf.gather(selected_scores, selected_indexes)
-        selected_objs = tf.gather(selected_objs, selected_indexes)
-
-        ret_coords.append(selected_coords)
-        ret_scores.append(selected_scores)
-        ret_objs.append(selected_objs)
-
-        num = tf.shape(selected_scores)[0]
-        tile = tf.tile([cat_id], [num])
-        ret_cat_ids.append(tile)
-
-    ret_coords = tf.concat(ret_coords, 0)
-    ret_scores = tf.concat(ret_scores, 0)
-    ret_objs = tf.concat(ret_objs, 0)
-    ret_cat_ids = tf.concat(ret_cat_ids, 0)
-
-    #logger.info('ret_coords: {}, ret_scores: {}, ret_cat_ids: {}'.format(ret_coords, ret_scores, ret_cat_ids))
-
-    #scores_to_sort = ret_scores * ret_objs
-    scores_to_sort = ret_objs
-    _, best_index = tf.math.top_k(scores_to_sort, tf.minimum(FLAGS.max_ret, tf.shape(ret_scores)[0]), sorted=True)
-
-    best_scores = tf.gather(ret_scores, best_index)
-    best_coords = tf.gather(ret_coords, best_index)
-    best_objs = tf.gather(ret_objs, best_index)
-    best_cat_ids = tf.gather(ret_cat_ids, best_index)
-
-    #logger.info('best_coords: {}, best_scores: {}, best_cat_ids: {}'.format(best_coords, best_scores, best_cat_ids))
-
-    to_add = tf.maximum(FLAGS.max_ret - tf.shape(best_scores)[0], 0)
+    to_add = tf.maximum(FLAGS.max_ret - tf.shape(best_objs)[0], 0)
     best_coords = tf.pad(best_coords, [[0, to_add], [0, 0]] , 'CONSTANT')
-    best_scores = tf.pad(best_scores, [[0, to_add]], 'CONSTANT')
     best_objs = tf.pad(best_objs, [[0, to_add]], 'CONSTANT')
-    best_cat_ids = tf.pad(best_cat_ids, [[0, to_add]], 'CONSTANT')
 
-
-    #logger.info('ret_coords: {}, ret_scores: {}, ret_cat_ids: {}, best_index: {}, best_scores: {}, best_coords: {}, best_cat_ids: {}'.format(
-    #    ret_coords, ret_scores, ret_cat_ids, best_index, best_scores, best_coords, best_cat_ids))
-
-    return best_coords, best_scores, best_objs, best_cat_ids
+    return best_coords, best_objs
 
 @tf.function
-def eval_step_logits(model, images, image_size, num_classes, all_anchors, all_grid_xy, all_ratios):
+def eval_step_logits(model, images, image_size, all_anchors, all_grid_xy, all_ratios):
     pred_values = model(images, training=False)
 
     pred_objs = tf.math.sigmoid(pred_values[..., 4])
 
     pred_bboxes = pred_values[..., 0:4]
-    pred_scores_all = tf.math.sigmoid(pred_values[..., 5:])
-    pred_scores = tf.reduce_max(pred_scores_all, axis=-1)
-    pred_labels = tf.argmax(pred_scores_all, axis=-1)
 
     all_ratios = tf.expand_dims(all_ratios, -1)
 
@@ -353,29 +298,34 @@ def eval_step_logits(model, images, image_size, num_classes, all_anchors, all_gr
 
     pred_bboxes = tf.concat([pred_xy, pred_wh], axis=-1)
 
-    return tf.map_fn(lambda out: per_image_supression(out, image_size, num_classes),
-                     (pred_bboxes, pred_scores, pred_labels, pred_objs),
+    return tf.map_fn(lambda out: per_image_supression(out, image_size),
+                     (pred_bboxes, pred_objs),
                      parallel_iterations=FLAGS.num_cpus,
                      back_prop=False,
                      infer_shape=False,
-                     dtype=(tf.float32, tf.float32, tf.float32, tf.int32))
+                     dtype=(tf.float32, tf.float32))
 
-def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_anchors, all_grid_xy, all_ratios, cat_names):
+def run_eval(model, dataset, num_images, image_size, dst_dir, all_anchors, all_grid_xy, all_ratios):
     num_files = 0
     dump_js = []
     for filenames, images in dataset:
         start_time = time.time()
-        coords_batch, scores_batch, objs_batch, cat_ids_batch = eval_step_logits(model, images, image_size, num_classes, all_anchors, all_grid_xy, all_ratios)
+        coords_batch, objs_batch = eval_step_logits(model, images, image_size, all_anchors, all_grid_xy, all_ratios)
         num_files += len(filenames)
         time_per_image_ms = (time.time() - start_time) / len(filenames) * 1000
 
         logger.info('batch images: {}, total_processed: {}, time_per_image: {:.1f} ms'.format(len(filenames), num_files, time_per_image_ms))
 
-        for filename, image, coords, scores, objectness, cat_ids in zip(filenames, images, coords_batch, scores_batch, objs_batch, cat_ids_batch):
+        for filename, nn_image, coords, objectness in zip(filenames, images, coords_batch, objs_batch):
             filename = str(filename.numpy(), 'utf8')
+            image = cv2.imread(filename)
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
-            good_scores = np.count_nonzero((scores.numpy() > 0))
-            #logger.info('{}: scores: {}, time_per_image: {:.1f} ms'.format(filename, good_scores, time_per_image_ms))
+            imh, imw = image.shape[:2]
+            max_side = max(imh, imw)
+            pad_y = (max_side - imh) / 2
+            pad_x = (max_side - imw) / 2
+            square_scale = max_side / image_size
 
             anns = []
 
@@ -384,42 +334,45 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_a
             }
             js_anns = []
 
-            for coord, score, objs, cat_id in zip(coords, scores, objectness, cat_ids):
-                if score.numpy() == 0:
+            for coord, objs in zip(coords, objectness):
+                objs = float(objs.numpy())
+                if objs < FLAGS.min_obj_score:
                     break
 
                 bb = coord.numpy().astype(float)
-                ymin, xmin, ymax, xmax = bb
+
+                scaled_bb = bb * square_scale
+
+                ymin, xmin, ymax, xmax = scaled_bb
+                xmin -= pad_x
+                xmax -= pad_x
+                ymin -= pad_y
+                ymax -= pad_y
+
+                #ymin, xmin, ymax, xmax = bb
                 bb = [xmin, ymin, xmax, ymax]
 
-                cat_id = cat_id.numpy()
+
+                logger.info('{}: bbox: {}, obj: {:.3f}'.format(filename, bb, objs))
 
                 ann_js = {
                     'bbox': bb,
-                    'objectness': float(objs),
-                    'class_score': float(score),
-                    'category_id': int(cat_id),
+                    'objectness': objs,
                 }
 
                 js_anns.append(ann_js)
-                anns.append((bb, None, cat_id))
+                anns.append((bb, None, '.'))
 
             js['annotations'] = js_anns
             dump_js.append(js)
 
             if not FLAGS.do_not_save_images:
-                logger.info('{}: bbox: {}, obj: {:.3f}, score: {:.3f}, cat_id: {}'.format(filename, bb, objs, score, cat_id))
-
-                image = preprocess_ssd.denormalize_image(image)
-                image = image.numpy()
-                image = image.astype(np.uint8)
-
-                if not FLAGS.no_channel_swap:
-                    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                #image = preprocess_ssd.denormalize_image(nn_image).numpy().astype(np.uint8)
 
                 dst_filename = os.path.basename(filename)
                 dst_filename = os.path.join(FLAGS.output_dir, dst_filename)
-                image_draw.draw_im(image, anns, dst_filename, cat_names)
+                image_draw.draw_im(image, anns, dst_filename, {})
+
 
     json_fn = os.path.join(FLAGS.output_dir, 'results.json')
     logger.info('Saving {} objects into {}'.format(len(dump_js), json_fn))
@@ -434,11 +387,10 @@ def run_inference():
     handler.setFormatter(__fmt)
     logger.addHandler(handler)
 
-    num_classes = FLAGS.num_classes
     num_images = len(FLAGS.filenames)
 
     dtype = tf.float32
-    model = encoder.create_model(FLAGS.model_name, FLAGS.num_classes)
+    model = encoder.create_model(FLAGS.model_name)
     image_size = model.image_size
     all_anchors, all_grid_xy, all_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
 
@@ -455,18 +407,16 @@ def run_inference():
             images = tf.reshape(images, [-1, image_size, image_size, 3])
             images = normalize_image(images, dtype)
 
-            model = encoder.create_model(FLAGS.model_name, FLAGS.num_classes)
+            model = encoder.create_model(FLAGS.model_name)
             image_size = model.image_size
             all_anchors, all_grid_xy, all_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
 
             checkpoint = tf.train.Checkpoint(model=model)
 
-            coords_batch, scores_batch, objs_batch, cat_ids_batch = eval_step_logits(model, images, image_size, FLAGS.num_classes, all_anchors, all_grid_xy, all_ratios)
+            coords_batch, objs_batch = eval_step_logits(model, images, image_size, all_anchors, all_grid_xy, all_ratios)
 
             coords_batch = tf.identity(coords_batch, name='output/coords')
-            scores_batch = tf.identity(scores_batch, name='output/scores')
             objs_batch = tf.identity(objs_batch, name='output/objectness')
-            cat_ids_batch = tf.identity(cat_ids_batch, name='output/category_ids')
 
             sess.run([tf.compat.v1.global_variables_initializer(), tf.compat.v1.local_variables_initializer()])
 
@@ -474,7 +424,7 @@ def run_inference():
             status.assert_existing_objects_matched().expect_partial()
             logger.info("Restored from external checkpoint {}".format(checkpoint_prefix))
 
-            output_graph_def = tf.compat.v1.graph_util.convert_variables_to_constants(sess, sess.graph.as_graph_def(), ['output/coords', 'output/scores', 'output/objectness', 'output/category_ids'])
+            output_graph_def = tf.compat.v1.graph_util.convert_variables_to_constants(sess, sess.graph.as_graph_def(), ['output/coords', 'output/objectness'])
 
         output = '{}-{}.frozen.pb'.format(checkpoint_prefix, tf.__version__)
         filename = tf.io.write_graph(output_graph_def, os.path.dirname(output), os.path.basename(output), as_text=False)
@@ -490,14 +440,10 @@ def run_inference():
         status.assert_existing_objects_matched().expect_partial()
     logger.info("Restored from external checkpoint {}".format(checkpoint_prefix))
 
-    cat_names = {}
-
     if FLAGS.eval_coco_annotations:
         eval_base = coco.create_coco_iterable(FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, logger)
 
         num_images = len(eval_base)
-        num_classes = eval_base.num_classes()
-        cat_names = eval_base.cat_names()
 
     if FLAGS.dataset_type == 'files':
         ds = tf.data.Dataset.from_tensor_slices((FLAGS.filenames))
@@ -523,19 +469,19 @@ def run_inference():
 
         ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=2)
         ds = ds.map(lambda record: unpack_tfrecord(record, all_anchors, all_grid_xy, all_ratios,
-                    image_size, num_classes, False,
-                    FLAGS.data_format, FLAGS.do_not_step_labels),
+                    image_size, False,
+                    FLAGS.data_format),
             num_parallel_calls=16)
-        ds = ds.map(lambda filename, image_id, image, true_values: tf_left_needed_dimensions_from_tfrecord(image_size, all_anchors, all_grid_xy, all_ratios, num_classes,
+        ds = ds.map(lambda filename, image_id, image, true_values: tf_left_needed_dimensions_from_tfrecord(image_size, all_anchors, all_grid_xy, all_ratios,
                     filename, image_id, image, true_values),
             num_parallel_calls=16)
 
     ds = ds.batch(FLAGS.batch_size)
     ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
 
-    logger.info('Dataset has been created: num_images: {}, num_classes: {}, model_name: {}'.format(num_images, num_classes, FLAGS.model_name))
+    logger.info('Dataset has been created: num_images: {}, model_name: {}'.format(num_images, FLAGS.model_name))
 
-    run_eval(model, ds, num_images, image_size, FLAGS.num_classes, FLAGS.output_dir, all_anchors, all_grid_xy, all_ratios, cat_names)
+    run_eval(model, ds, num_images, image_size, FLAGS.output_dir, all_anchors, all_grid_xy, all_ratios)
 
 if __name__ == '__main__':
     np.set_printoptions(formatter={'float': '{:0.4f}'.format, 'int': '{:4d}'.format}, linewidth=250, suppress=True, threshold=np.inf)
