@@ -58,7 +58,6 @@ def unpack_tfrecord(serialized_example, image_shape, is_training, data_format):
     image = tf.image.decode_jpeg(features['image'], channels=3)
 
     image = preprocess.pad_resize_image(image, image_shape)
-    image = tf.cast(image, tf.uint8)
 
     if is_training:
         image = autoaugment.distort_image_with_autoaugment(image, 'v0')
@@ -172,7 +171,7 @@ def train():
             eval_loss_metric.reset_states()
 
         def calculate_metrics(logits, true_texts, true_lengths, loss_metric):
-            ctc_loss = tf.nn.ctc_loss(labels=true_texts, label_length=true_lengths, logits=logits, logit_length=true_lengths, logits_time_major=False)
+            ctc_loss = tf.nn.ctc_loss(labels=true_texts, label_length=tf.ones_like(true_lengths), logits=logits, logit_length=true_lengths, logits_time_major=False)
             ctc_loss = tf.nn.compute_average_loss(ctc_loss, global_batch_size=FLAGS.batch_size)
 
             total_loss = ctc_loss
@@ -241,8 +240,8 @@ def train():
 
                 total_loss = step_func(args=(filenames, images, true_texts, true_lengths))
                 if (name == 'train' and step % FLAGS.print_per_train_steps == 0) or np.isnan(total_loss.numpy()):
-                    logger.info('{}: {}: step: {}/{}, total_loss: {:.2e}'.format(
-                        name, int(epoch_var.numpy()), step, max_steps * (epoch + 1), total_loss))
+                    logger.info('{}: {}: step: {}/{}, global_step: {}, total_loss: {:.2e}'.format(
+                        name, int(epoch_var.numpy()), step, max_steps, global_step.numpy(), total_loss))
 
                     if np.isnan(total_loss.numpy()):
                         exit(-1)
@@ -254,7 +253,7 @@ def train():
 
             return step
 
-        best_metric = 0
+        best_metric = FLAGS.best_eval_metric
         best_saved_path = None
         num_epochs_without_improvement = 0
         initial_learning_rate_multiplier = 0.2
@@ -274,7 +273,7 @@ def train():
             best_metric = validation_metric()
             logger.info('initial validation metric: {:.3f}'.format(best_metric))
 
-        if best_metric > FLAGS.best_eval_metric:
+        if best_metric >= FLAGS.best_eval_metric:
             logger.info('setting minimal evaluation metric {:.3f} -> {} from command line arguments'.format(best_metric, FLAGS.best_eval_metric))
             best_metric = FLAGS.best_eval_metric
 
