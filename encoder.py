@@ -226,8 +226,8 @@ class LSTMLayer(tf.keras.layers.Layer):
             momentum=params.batch_norm_momentum,
             epsilon=params.batch_norm_epsilon)
 
-        self.lstm = tf.keras.layers.LSTM(num_features, dropout=params.lstm_dropout, return_sequences=return_sequence)
-        self.bidirectional = tf.keras.layers.Bidirectional(self.lstm, merge_mode='concat')
+        self.rnn = tf.keras.layers.LSTM(num_features, return_sequences=return_sequence)
+        self.bidirectional = tf.keras.layers.Bidirectional(self.rnn, merge_mode='concat')
 
     def call(self, x, training):
         x = self.bn(x, training)
@@ -274,39 +274,42 @@ class TextConv(tf.keras.layers.Layer):
 default_char_dictionary="!\"#&\'()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 class TextModel(tf.keras.layers.Layer):
-    def __init__(self, params, max_sentence_len, dictionary=default_char_dictionary, **kwargs):
+    def __init__(self, params, dictionary=default_char_dictionary, **kwargs):
         super(TextModel, self).__init__(**kwargs)
 
-        self.max_sentence_len = max_sentence_len
+        self.c0 = TextConv(params, 64, kernel_size=5, strides=1, pool_size=(2,2), pool_strides=(2, 2))
+        self.c1 = TextConv(params, 128, kernel_size=5, strides=1, pool_size=(2,2), pool_strides=(2, 2))
+        self.c2 = TextConv(params, 256, kernel_size=3, strides=1, pool_size=(1,2), pool_strides=(1, 2))
+        self.c3 = TextConv(params, 512, kernel_size=3, strides=1, pool_size=(1,2), pool_strides=(1, 2))
+        self.c4 = TextConv(params, 1024, kernel_size=3, strides=1, pool_size=(1,2), pool_strides=(1, 2))
 
-        efn_param_keys = efn.GlobalParams._fields
-        efn_params = {}
-        for k, v in params._asdict().items():
-            if k in efn_param_keys:
-                efn_params[k] = v
+        #self.dropout = tf.keras.layers.SpatialDropout2D(params.spatial_dropout)
 
-        self.base_model = efn.build_model(model_name=params.model_name, override_params=efn_params)
-        self.image_size = efn.efficientnet_params(params.model_name)[2]
+        self.lstm0 = LSTMLayer(params, 256, return_sequence=True)
+        self.lstm1 = LSTMLayer(params, 256, return_sequence=True)
 
-        self.lstm0 = LSTMLayer(params, 512, return_sequence=True)
-
-        self.out_conv = tf.keras.layers.Conv2D(len(dictionary) + 1, kernel_size=1, strides=1, padding='SAME')
+        self.out_conv = tf.keras.layers.Conv2D(len(dictionary) + 1, kernel_size=3, strides=1, padding='SAME')
 
 
     def call(self, inputs, training):
-        outputs = self.base_model(inputs, training=training, features_only=True)
+        x = self.c0(inputs, training=training)
+        x = self.c1(x, training=training)
+        x = self.c2(x, training=training)
+        x = self.c3(x, training=training)
+        x = self.c4(x, training=training)
+        #outputs = self.dropout(outputs, training)
 
+        outputs = x
         shape = tf.shape(outputs)
         x = tf.reshape(outputs, [shape[0], shape[1] * shape[2], shape[3]])
         logger.info('inputs: {}, outputs: {}, x: {}'.format(inputs.shape, outputs.shape, x.shape))
 
         x = self.lstm0(x, training)
+        x = self.lstm1(x, training)
         logger.info('lstm: {}'.format(x.shape))
 
         # BxTx2H -> BxTx1x2H
         x = tf.expand_dims(x, 2)
-
-        # BxTx1x2H -> BxTx1xC
         x = self.out_conv(x)
         x = tf.squeeze(x, 2)
 
