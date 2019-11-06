@@ -45,6 +45,7 @@ parser.add_argument('--no_channel_swap', action='store_true', help='When set, do
 parser.add_argument('--freeze', action='store_true', help='Save frozen protobuf near checkpoint')
 parser.add_argument('--do_not_save_images', action='store_true', help='Do not save images with bounding boxes')
 parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
+parser.add_argument('--save_crops_dir', type=str, help='Directory to save slightly upscaled text crops')
 parser.add_argument('--dataset_type', type=str, choices=['files', 'tfrecords', 'filelist'], default='files', help='Dataset type')
 parser.add_argument('filenames', type=str, nargs='*', help='Numeric label : file path')
 FLAGS = parser.parse_args()
@@ -319,7 +320,8 @@ def run_eval(model, dataset, num_images, image_size, dst_dir, all_anchors, all_g
         for filename, nn_image, coords, objectness in zip(filenames, images, coords_batch, objs_batch):
             filename = str(filename.numpy(), 'utf8')
             image = cv2.imread(filename)
-            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
+            base_filename = os.path.basename(filename)
 
             imh, imw = image.shape[:2]
             max_side = max(imh, imw)
@@ -334,7 +336,7 @@ def run_eval(model, dataset, num_images, image_size, dst_dir, all_anchors, all_g
             }
             js_anns = []
 
-            for coord, objs in zip(coords, objectness):
+            for crop_idx, (coord, objs) in enumerate(zip(coords, objectness)):
                 objs = float(objs.numpy())
                 if objs < FLAGS.min_obj_score:
                     break
@@ -363,14 +365,25 @@ def run_eval(model, dataset, num_images, image_size, dst_dir, all_anchors, all_g
                 js_anns.append(ann_js)
                 anns.append((bb, None, '.'))
 
+                if FLAGS.save_crops_dir:
+                    output_filename = '{}.{}.jpg'.format(base_filename, crop_idx)
+                    output_filename = os.path.join(FLAGS.save_crops_dir, output_filename)
+
+                    scaled_crop_bb = [int(d * 1.1) for d in bb]
+                    xmin, ymin, xmax, ymax = scaled_crop_bb
+                    crop = image[ymin:ymax+1, xmin:xmax+1, :]
+
+                    cv2.imwrite(output_filename, crop)
+
+
             js['annotations'] = js_anns
             dump_js.append(js)
 
             if not FLAGS.do_not_save_images:
                 #image = preprocess_ssd.denormalize_image(nn_image).numpy().astype(np.uint8)
 
-                dst_filename = os.path.basename(filename)
-                dst_filename = os.path.join(FLAGS.output_dir, dst_filename)
+                image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR) # only needed for original images
+                dst_filename = os.path.join(FLAGS.output_dir, base_filename)
                 image_draw.draw_im(image, anns, dst_filename, {})
 
 
