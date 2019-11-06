@@ -396,6 +396,8 @@ def run_eval(model, dataset, num_images, image_size, dst_dir, all_anchors, all_g
 
 def run_inference():
     os.makedirs(FLAGS.output_dir, exist_ok=True)
+    if FLAGS.save_crops_dir:
+        os.makedirs(FLAGS.save_crops_dir, exist_ok=True)
     handler = logging.FileHandler(os.path.join(FLAGS.output_dir, 'infdet.log'), 'a')
     handler.setFormatter(__fmt)
     logger.addHandler(handler)
