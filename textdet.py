@@ -22,6 +22,7 @@ logger.addHandler(__handler)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch')
+parser.add_argument('--max_sentence_length', type=int, default=32, help='Maximum sentence lehgth')
 parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel preprocessing jobs')
 parser.add_argument('--min_obj_score', type=float, default=0.3, help='Minimal class probability')
 parser.add_argument('--output_dir', type=str, required=True, help='Path to directory, where images will be stored')
@@ -41,26 +42,30 @@ def tf_read_image(filename, image_shape, dtype):
     image = tf.image.decode_jpeg(image, channels=3)
 
     image = preprocess.pad_resize_image(image, image_shape)
-    image = tf.cast(image, tf.uint8)
-
-    if is_training:
-        image = autoaugment.distort_image_with_autoaugment(image, 'v0')
 
     image = tf.cast(image, tf.float32)
     image -= 128.
     image /= 128.
 
-    image = tf.image.resize(image, [image_size, image_size])
-
-    image = normalize_image(image, dtype)
 
     return filename, image
 
 @tf.function
 def eval_step_logits(model, images):
-    decoded = model.decode(images)
-    logger.info('decoded: {}'.format(decoded))
-    exit(0)
+    logits = model(images, training=False)
+
+    # BxTxC -> TxBxC
+    logits = tf.transpose(logits, [1, 0, 2])
+
+    #decoded, _ = tf.nn.ctc_beam_search_decoder(inputs=logits, sequence_length=self.max_sentence_len, beam_width=50)
+
+    lengths = tf.ones((tf.shape(images)[0]), dtype=tf.int32) * model.max_sentence_len
+    decoded, _ = tf.nn.ctc_greedy_decoder(inputs=logits, sequence_length=lengths)
+    tf.print(decoded)
+    decoded = decoded[0]
+    dense = tf.sparse.to_dense(decoded, default_value=0)
+
+    return dense
 
 def run_eval(model, dataset, image_shape, num_images):
     num_files = 0
@@ -68,6 +73,8 @@ def run_eval(model, dataset, image_shape, num_images):
     for filenames, images in dataset:
         start_time = time.time()
         sentences_batch = eval_step_logits(model, images)
+        logger.info('decoded: {}'.format(sentences_batch.numpy()))
+        exit(0)
         num_files += len(filenames)
         time_per_image_ms = (time.time() - start_time) / len(filenames) * 1000
 
@@ -100,7 +107,6 @@ def run_inference():
     image_shape = [int(d) for d in FLAGS.image_shape.split('x')][:2]
 
     model = encoder.create_text_recognition_model(FLAGS.model_name, FLAGS.max_sentence_length)
-    image_size = model.image_size
 
     checkpoint = tf.train.Checkpoint(model=model)
 
@@ -117,8 +123,6 @@ def run_inference():
             images /= 128
 
             model = encoder.create_model(FLAGS.model_name)
-            image_size = model.image_size
-            all_anchors, all_grid_xy, all_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
 
             checkpoint = tf.train.Checkpoint(model=model)
 
@@ -143,13 +147,11 @@ def run_inference():
 
 
     status = checkpoint.restore(checkpoint_prefix)
-    if FLAGS.skip_checkpoint_assertion:
-        status.expect_partial()
-    else:
-        status.assert_existing_objects_matched().expect_partial()
+    status.assert_existing_objects_matched().expect_partial()
     logger.info("Restored from external checkpoint {}".format(checkpoint_prefix))
 
-    num_images = len(FLAGS.filename)
+    num_images = len(FLAGS.filenames)
+    dtype = tf.float32
 
     if FLAGS.dataset_type == 'files':
         ds = tf.data.Dataset.from_tensor_slices((FLAGS.filenames))
