@@ -335,7 +335,6 @@ def per_image_supression(logits, image_size, num_classes):
 
     return best_coords, best_scores, best_objs, best_cat_ids
 
-@tf.function
 def eval_step_logits(model, images, image_size, num_classes, all_anchors, all_grid_xy, all_ratios):
     pred_values = model(images, training=False)
 
@@ -476,11 +475,11 @@ def run_inference():
 
             output_graph_def = tf.compat.v1.graph_util.convert_variables_to_constants(sess, sess.graph.as_graph_def(), ['output/coords', 'output/scores', 'output/objectness', 'output/category_ids'])
 
-        output = '{}-{}.frozen.pb'.format(checkpoint_prefix, tf.__version__)
-        filename = tf.io.write_graph(output_graph_def, os.path.dirname(output), os.path.basename(output), as_text=False)
+            output = '{}-{}.frozen.pb'.format(checkpoint_prefix, tf.__version__)
+            filename = tf.io.write_graph(output_graph_def, os.path.dirname(output), os.path.basename(output), as_text=False)
 
-        print('Saved graph as {}'.format(os.path.abspath(filename)))
-        return
+            print('Saved graph as {}'.format(os.path.abspath(filename)))
+            return
 
 
     status = checkpoint.restore(checkpoint_prefix)
