@@ -96,7 +96,7 @@ def get_text_train_augmentation(image_size):
     train_transform = [
         #A.HorizontalFlip(p=0.5),
         #A.RandomRotate90(p=0.3),
-        A.ShiftScaleRotate(rotate_limit=5, p=0.8),
+        A.ShiftScaleRotate(rotate_limit=5, p=0.5),
 
         A.OneOf([
                 A.CLAHE(p=1),
@@ -104,7 +104,7 @@ def get_text_train_augmentation(image_size):
                 A.Blur(blur_limit=5, p=1),
                 #A.MedianBlur(blur_limit=5, p=1),
                 A.RandomContrast(limit=0.01, p=1),
-        ], p=0),
+        ], p=0.2),
 
     ]
 
