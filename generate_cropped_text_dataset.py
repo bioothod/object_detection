@@ -76,16 +76,28 @@ def do_work(worker_id, step, num_images, image_size):
         for bb, text in zip(true_bboxes, true_labels):
             if text == '<SKIP>':
                 continue
+            if text == ' ':
+                continue
 
             cx, cy, h, w = bb
-            x0 = int(cx - w/2)
-            x1 = int(cx + w/2)
-            y0 = int(cy - h/2)
-            y1 = int(cy + h/2)
+
+            # drop vertical texts
+            if h > 2*w:
+                continue
+
+            h *= 1.1
+            w *= 1.1
+
+            x0 = max(int(cx - w/2), 0)
+            x1 = min(int(cx + w/2), image.shape[1]-1)
+            y0 = max(int(cy - h/2), 0)
+            y1 = min(int(cy + h/2), image.shape[0]-1)
 
             bb = [x0, y0, x1, y1]
 
             img = image[y0:y1+1, x0:x1+1, :]
+
+            #logger.info('{}: bb: {}, img: {}, text: {}'.format(filename, bb, img.shape, text))
             image_enc = cv2.imencode('.png', img)[1].tostring()
 
             if crops_saved <= 10:
