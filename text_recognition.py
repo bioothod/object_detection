@@ -37,9 +37,9 @@ parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing 
 parser.add_argument('--image_shape', type=str, default='32x128', help='Use this image shape: HxW')
 
 dict_split = tf.strings.unicode_split(encoder.default_char_dictionary, 'UTF-8')
-kv_init = tf.lookup.KeyValueTensorInitializer(keys=dict_split, values=tf.range(1, dict_split.shape[0] + 1, 1), key_dtype=tf.string, value_dtype=tf.int32)
+kv_init = tf.lookup.KeyValueTensorInitializer(keys=dict_split, values=tf.range(1, dict_split.shape[0]+1, 1), key_dtype=tf.string, value_dtype=tf.int32)
 dict_table = tf.lookup.StaticHashTable(kv_init, 0)
-max_text_length = 32
+max_text_length = 128
 
 def unpack_tfrecord(serialized_example, image_shape, is_training, data_format):
     features = tf.io.parse_single_example(serialized_example,
@@ -119,8 +119,11 @@ def train():
                             image_shape, is_training,
                             FLAGS.data_format),
                     num_parallel_calls=FLAGS.num_cpus)
-            if is_training:
-                ds = ds.shuffle(200)
+
+            def filter_fn(filename, image_id, image, text_tensor, text_length):
+                return tf.math.not_equal(text_tensor[0], 0)
+
+            ds = ds.filter(filter_fn)
 
             ds = ds.batch(FLAGS.batch_size)
             ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
@@ -171,7 +174,10 @@ def train():
             eval_loss_metric.reset_states()
 
         def calculate_metrics(logits, true_texts, true_lengths, loss_metric):
-            ctc_loss = tf.nn.ctc_loss(labels=true_texts, label_length=tf.ones_like(true_lengths), logits=logits, logit_length=true_lengths, logits_time_major=False)
+            sparse = tf.sparse.from_dense(true_texts)
+
+            logit_length = tf.ones_like(true_lengths) * max_text_length
+            ctc_loss = tf.nn.ctc_loss(labels=sparse, label_length=None, blank_index=0, logits=logits, logit_length=logit_length, logits_time_major=False)
             ctc_loss = tf.nn.compute_average_loss(ctc_loss, global_batch_size=FLAGS.batch_size)
 
             total_loss = ctc_loss
@@ -215,13 +221,13 @@ def train():
         @tf.function
         def distributed_train_step(args):
             total_loss = dstrategy.experimental_run_v2(train_step, args=args)
-            total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, total_loss, axis=None)
+            total_loss = dstrategy.reduce(tf.distribute.ReduceOp.MEAN, total_loss, axis=None)
             return total_loss
 
         @tf.function
         def distributed_eval_step(args):
             total_loss = dstrategy.experimental_run_v2(eval_step, args=args)
-            total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, total_loss, axis=None)
+            total_loss = dstrategy.reduce(tf.distribute.ReduceOp.MEAN, total_loss, axis=None)
             return total_loss
 
         def run_epoch(name, dataset, step_func, max_steps):
