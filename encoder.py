@@ -226,7 +226,7 @@ class LSTMLayer(tf.keras.layers.Layer):
             momentum=params.batch_norm_momentum,
             epsilon=params.batch_norm_epsilon)
 
-        self.rnn = tf.keras.layers.LSTM(num_features, return_sequences=return_sequence)
+        self.rnn = tf.keras.layers.LSTM(num_features, return_sequences=return_sequence, dropout=params.lstm_dropout)
         self.bidirectional = tf.keras.layers.Bidirectional(self.rnn, merge_mode='concat')
 
     def call(self, x, training):
@@ -274,14 +274,19 @@ class TextConv(tf.keras.layers.Layer):
 default_char_dictionary="!\"#&\'()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 class TextModel(tf.keras.layers.Layer):
-    def __init__(self, params, dictionary=default_char_dictionary, **kwargs):
+    def __init__(self, params, max_sentence_len, dictionary=default_char_dictionary, **kwargs):
         super(TextModel, self).__init__(**kwargs)
 
-        self.c0 = TextConv(params, 64, kernel_size=5, strides=1, pool_size=(2,2), pool_strides=(2, 2))
+        self.max_sentence_len = max_sentence_len
+
+        self.c0 = TextConv(params, 64, kernel_size=5, strides=1, pool_size=(1,1), pool_strides=(1, 1))
         self.c1 = TextConv(params, 128, kernel_size=5, strides=1, pool_size=(2,2), pool_strides=(2, 2))
-        self.c2 = TextConv(params, 256, kernel_size=3, strides=1, pool_size=(1,2), pool_strides=(1, 2))
-        self.c3 = TextConv(params, 512, kernel_size=3, strides=1, pool_size=(1,2), pool_strides=(1, 2))
-        self.c4 = TextConv(params, 1024, kernel_size=3, strides=1, pool_size=(1,2), pool_strides=(1, 2))
+        self.dropout1 = tf.keras.layers.Dropout(0.2)
+        self.c2 = TextConv(params, 128, kernel_size=3, strides=1, pool_size=(1,2), pool_strides=(1, 2))
+        self.dropout2 = tf.keras.layers.Dropout(0.2)
+        self.c3 = TextConv(params, 256, kernel_size=3, strides=1, pool_size=(1,2), pool_strides=(1, 2))
+        self.dropout3 = tf.keras.layers.Dropout(0.2)
+        self.c4 = TextConv(params, 256, kernel_size=3, strides=1, pool_size=(1,2), pool_strides=(1, 2))
 
         #self.dropout = tf.keras.layers.SpatialDropout2D(params.spatial_dropout)
 
@@ -294,8 +299,11 @@ class TextModel(tf.keras.layers.Layer):
     def call(self, inputs, training):
         x = self.c0(inputs, training=training)
         x = self.c1(x, training=training)
+        x = self.dropout1(x, training=training)
         x = self.c2(x, training=training)
+        x = self.dropout2(x, training=training)
         x = self.c3(x, training=training)
+        x = self.dropout3(x, training=training)
         x = self.c4(x, training=training)
         #outputs = self.dropout(outputs, training)
 
@@ -312,6 +320,8 @@ class TextModel(tf.keras.layers.Layer):
         x = tf.expand_dims(x, 2)
         x = self.out_conv(x)
         x = tf.squeeze(x, 2)
+
+        #x = tf.keras.activations.softmax(x, -1)
 
         return x
 
