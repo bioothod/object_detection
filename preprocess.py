@@ -1,7 +1,7 @@
 import tensorflow as tf
 
 def pad_resize_image(image, dims):
-    image = tf.image.resize(image, [64, 128], preserve_aspect_ratio=True)
+    image = tf.image.resize(image, [32, 128], preserve_aspect_ratio=True)
 
     shape = tf.shape(image)
 
