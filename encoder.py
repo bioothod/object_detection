@@ -281,14 +281,11 @@ class TextModel(tf.keras.layers.Layer):
 
         self.c0 = TextConv(params, 64, kernel_size=5, strides=1, pool_size=(1,1), pool_strides=(1, 1))
         self.c1 = TextConv(params, 128, kernel_size=5, strides=1, pool_size=(2,2), pool_strides=(2, 2))
-        self.dropout1 = tf.keras.layers.Dropout(0.2)
-        self.c2 = TextConv(params, 128, kernel_size=3, strides=1, pool_size=(1,2), pool_strides=(1, 2))
-        self.dropout2 = tf.keras.layers.Dropout(0.2)
+        self.c2 = TextConv(params, 256, kernel_size=3, strides=1, pool_size=(1,2), pool_strides=(1, 2))
         self.c3 = TextConv(params, 256, kernel_size=3, strides=1, pool_size=(1,2), pool_strides=(1, 2))
-        self.dropout3 = tf.keras.layers.Dropout(0.2)
-        self.c4 = TextConv(params, 256, kernel_size=3, strides=1, pool_size=(1,2), pool_strides=(1, 2))
+        self.c4 = TextConv(params, 512, kernel_size=3, strides=1, pool_size=(1,2), pool_strides=(1, 2))
 
-        #self.dropout = tf.keras.layers.SpatialDropout2D(params.spatial_dropout)
+        self.dropout = tf.keras.layers.SpatialDropout2D(params.spatial_dropout)
 
         self.lstm0 = LSTMLayer(params, 256, return_sequence=True)
         self.lstm1 = LSTMLayer(params, 256, return_sequence=True)
@@ -299,15 +296,13 @@ class TextModel(tf.keras.layers.Layer):
     def call(self, inputs, training):
         x = self.c0(inputs, training=training)
         x = self.c1(x, training=training)
-        x = self.dropout1(x, training=training)
         x = self.c2(x, training=training)
-        x = self.dropout2(x, training=training)
         x = self.c3(x, training=training)
-        x = self.dropout3(x, training=training)
         x = self.c4(x, training=training)
-        #outputs = self.dropout(outputs, training)
 
-        outputs = x
+        outputs = self.dropout(x, training)
+        #outputs = x
+
         shape = tf.shape(outputs)
         x = tf.reshape(outputs, [shape[0], shape[1] * shape[2], shape[3]])
         logger.info('inputs: {}, outputs: {}, x: {}'.format(inputs.shape, outputs.shape, x.shape))
@@ -349,7 +344,7 @@ def create_params(model_name):
         'data_format': data_format,
         'relu_fn': local_swish,
         'batch_norm_momentum': 0.99,
-        'batch_norm_epsilon': 1e-8,
+        'batch_norm_epsilon': 1e-3,
         'channel_axis': channel_axis,
         'spatial_dims': spatial_dims,
         'model_name': model_name,
