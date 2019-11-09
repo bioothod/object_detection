@@ -147,6 +147,23 @@ def train():
                 return tf.math.not_equal(text_tensor[0], 0)
 
             ds = ds.filter(filter_fn)
+            if False and name == 'eval':
+                output_dir = os.path.join(FLAGS.train_dir, 'train_examples')
+                os.makedirs(output_dir, exist_ok=True)
+                for filename, image_id, image, text_tensor, text_length in ds.take(50):
+                    filename = filename.numpy()
+                    filename = str(filename, 'utf8')
+                    base_filename = os.path.basename(filename)
+                    dst_filename = os.path.join(output_dir, base_filename)
+
+                    image = image.numpy()
+                    image = image * 128 + 128
+                    image = image.astype(np.uint8)
+                    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                    cv2.imwrite(dst_filename, image)
+
+                exit(0)
+
 
             ds = ds.batch(FLAGS.batch_size)
             ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
