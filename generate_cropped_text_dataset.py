@@ -82,11 +82,8 @@ def do_work(worker_id, step, num_images, image_size):
             cx, cy, h, w = bb
 
             # drop vertical texts
-            if h > 2*w:
+            if h > w/2:
                 continue
-
-            h *= 1.1
-            w *= 1.1
 
             x0 = max(int(cx - w/2), 0)
             x1 = min(int(cx + w/2), image.shape[1]-1)
@@ -121,7 +118,7 @@ def do_work(worker_id, step, num_images, image_size):
             writer.write(data)
             crops_saved += 1
 
-        if idx % 1000 == 0:
+        if processed % 1000 == 0:
             dur = time.time() - start_time
             mean_time = dur / processed
             logger.info('{}: {}: images: {}: saved crops: {}, mean time: {:.1f} ms'.format(
