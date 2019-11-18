@@ -366,7 +366,7 @@ def run_eval(model, dataset, num_images, image_size, dst_dir, all_anchors, all_g
                 anns.append((bb, None, '.'))
 
                 if FLAGS.save_crops_dir:
-                    output_filename = '{}.{}.jpg'.format(base_filename, crop_idx)
+                    output_filename = '{}_{}_{:.3f}.jpg'.format(base_filename, crop_idx, objs)
                     output_filename = os.path.join(FLAGS.save_crops_dir, output_filename)
 
                     scaled_crop_bb = [int(d * 1.1) for d in bb]
@@ -487,7 +487,7 @@ def run_inference():
                     image_size, False,
                     FLAGS.data_format),
             num_parallel_calls=16)
-        ds = ds.map(lambda filename, image_id, image, true_values: tf_left_needed_dimensions_from_tfrecord(image_size, all_anchors, all_grid_xy, all_ratios,
+        ds = ds.map(lambda filename, image_id, image, true_values, true_texts: tf_left_needed_dimensions_from_tfrecord(image_size, all_anchors, all_grid_xy, all_ratios,
                     filename, image_id, image, true_values),
             num_parallel_calls=16)
 
