@@ -58,37 +58,7 @@ def unpack_tfrecord(serialized_example, image_shape, is_training, data_format):
     image_id = features['image_id']
     image = tf.image.decode_jpeg(features['image'], channels=3)
 
-    imgh = tf.cast(tf.shape(image)[0], tf.float32)
-    imgw = tf.cast(tf.shape(image)[1], tf.float32)
-
-    scale = tf.random.uniform([], minval=1, maxval=3)
-
-    image = tf.image.resize(image, [int(imgh*scale), int(imgw*scale)], preserve_aspect_ratio=False)
-    imgh = tf.shape(image)[0]
-    imgw = tf.shape(image)[1]
-
-    target_height, target_width = image_shape
-
-    hpad = target_height - imgh
-    hpad = tf.maximum(hpad, 0)
-    offset_height = tf.cast(hpad / 2, tf.int32)
-    target_height = tf.maximum(target_height, imgh)
-
-    wpad = target_width - imgw
-    wpad = tf.maximum(wpad, 0)
-    offset_width = tf.cast(wpad / 2, tf.int32)
-    target_width = tf.maximum(target_width, imgw)
-
-    image = tf.image.pad_to_bounding_box(image, offset_height, offset_width, target_height, target_width)
-    image = tf.image.resize(image, image_shape, preserve_aspect_ratio=False)
-
-    if is_training:
-        image = tf.cast(image, tf.uint8)
-        image = autoaugment.distort_image_with_autoaugment(image, 'v0')
-
-    image = tf.cast(image, tf.float32)
-    image -= 128.
-    image /= 128.
+    image = preprocess.preprocess_image(image, image_shape, is_training)
 
     text_tensor = dict_table.lookup(text_split)
     

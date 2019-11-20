@@ -41,16 +41,11 @@ def tf_read_image(filename, image_shape, dtype):
     image = tf.io.read_file(filename)
     image = tf.image.decode_jpeg(image, channels=3)
 
-    image = preprocess.pad_resize_image(image, image_shape)
-
-    image = tf.cast(image, tf.float32)
-    image -= 128.
-    image /= 128.
-
+    image = preprocess.preprocess_image(image, image_shape, False)
+    image = tf.cast(image, dtype)
 
     return filename, image
 
-@tf.function
 def eval_step_logits(model, images):
     logits = model(images, training=False)
 
@@ -61,11 +56,9 @@ def eval_step_logits(model, images):
 
     lengths = tf.ones((tf.shape(images)[0]), dtype=tf.int32) * model.max_sentence_len
     decoded, _ = tf.nn.ctc_greedy_decoder(inputs=logits, sequence_length=lengths)
-    tf.print(decoded)
     decoded = decoded[0]
-    dense = tf.sparse.to_dense(decoded, default_value=0)
 
-    return dense
+    return decoded
 
 def run_eval(model, dataset, image_shape, num_images):
     num_files = 0
@@ -74,7 +67,6 @@ def run_eval(model, dataset, image_shape, num_images):
         start_time = time.time()
         sentences_batch = eval_step_logits(model, images)
         logger.info('decoded: {}'.format(sentences_batch.numpy()))
-        exit(0)
         num_files += len(filenames)
         time_per_image_ms = (time.time() - start_time) / len(filenames) * 1000
 
