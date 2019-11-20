@@ -3,6 +3,7 @@ import cv2
 import logging
 import os
 import sys
+import random
 
 import numpy as np
 import tensorflow as tf
@@ -12,7 +13,7 @@ logger = logging.getLogger('detection')
 
 
 import autoaugment
-import encoder
+import encoder_gated_conv as encoder
 import preprocess
 
 parser = argparse.ArgumentParser()
@@ -136,6 +137,8 @@ def train():
                 fn = os.path.join(dataset_dir, fn)
                 if os.path.isfile(fn):
                     filenames.append(fn)
+
+            random.shuffle(filenames)
 
             ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
             ds = ds.map(lambda record: unpack_tfrecord(record,
@@ -288,6 +291,8 @@ def train():
         initial_learning_rate_multiplier = 0.2
         learning_rate_multiplier = initial_learning_rate_multiplier
         epoch = global_step.numpy() / steps_per_train_epoch
+
+        learning_rate.assign(FLAGS.initial_learning_rate)
 
         def validation_metric():
             eval_loss = eval_loss_metric.result()
