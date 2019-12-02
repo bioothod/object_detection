@@ -217,124 +217,6 @@ class EfnYolo(tf.keras.layers.Layer):
         outputs = tf.concat(outputs, axis=1)
         return outputs
 
-class LSTMLayer(tf.keras.layers.Layer):
-    def __init__(self, params, num_features, return_sequence=False, **kwargs):
-        super(LSTMLayer, self).__init__(**kwargs)
-
-        self.bn = tf.keras.layers.BatchNormalization(
-            axis=params.channel_axis,
-            momentum=params.batch_norm_momentum,
-            epsilon=params.batch_norm_epsilon)
-
-        self.rnn = tf.keras.layers.LSTM(num_features, return_sequences=return_sequence, dropout=params.lstm_dropout)
-        self.bidirectional = tf.keras.layers.Bidirectional(self.rnn, merge_mode='concat')
-
-    def call(self, x, training):
-        x = self.bn(x, training)
-        x = self.bidirectional(x)
-
-        return x
-
-class TextConv(tf.keras.layers.Layer):
-    def __init__(self, params, num_features, kernel_size=(3, 3), strides=(1, 1), padding='SAME', pool_size=(1, 1), pool_strides=(1, 1), **kwargs):
-        super(TextConv, self).__init__(**kwargs)
-        self.num_features = num_features
-        self.kernel_size = kernel_size
-        self.strides = strides
-        self.padding = padding
-
-        self.relu_fn = params.relu_fn or local_swish
-
-        self.conv = tf.keras.layers.Conv2D(
-                self.num_features,
-                kernel_size=self.kernel_size,
-                strides=self.strides,
-                data_format=params.data_format,
-                use_bias=False,
-                padding=self.padding,
-                kernel_initializer='glorot_uniform')
-
-        self.bn = tf.keras.layers.BatchNormalization(
-            axis=params.channel_axis,
-            momentum=params.batch_norm_momentum,
-            epsilon=params.batch_norm_epsilon)
-
-        self.max_pool = tf.keras.layers.MaxPool2D(pool_size=pool_size, strides=pool_strides, data_format=params.data_format, padding='VALID')
-
-    def call(self, inputs, training):
-        x = self.conv(inputs)
-        x = self.bn(x, training)
-        x = self.relu_fn(x)
-
-        x = self.max_pool(x)
-
-        return x
-
-
-default_char_dictionary="!\"#&\'()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-
-class TextModel(tf.keras.layers.Layer):
-    def __init__(self, params, max_sentence_len, dictionary=default_char_dictionary, **kwargs):
-        super(TextModel, self).__init__(**kwargs)
-
-        self.max_sentence_len = max_sentence_len
-
-        self.c0 = TextConv(params, 64, kernel_size=5, strides=1, pool_size=(1,1), pool_strides=(1, 1))
-        self.c1 = TextConv(params, 128, kernel_size=5, strides=1, pool_size=(2,2), pool_strides=(2, 2))
-        self.dropout1 = tf.keras.layers.Dropout(0.2)
-        self.c2 = TextConv(params, 128, kernel_size=3, strides=1, pool_size=(1,2), pool_strides=(1, 2))
-        self.dropout2 = tf.keras.layers.Dropout(0.2)
-        self.c3 = TextConv(params, 256, kernel_size=3, strides=1, pool_size=(1,2), pool_strides=(1, 2))
-        self.dropout3 = tf.keras.layers.Dropout(0.2)
-        self.c4 = TextConv(params, 256, kernel_size=3, strides=1, pool_size=(1,2), pool_strides=(1, 2))
-
-        #self.dropout = tf.keras.layers.SpatialDropout2D(params.spatial_dropout)
-
-        self.lstm0 = LSTMLayer(params, 256, return_sequence=True)
-        self.lstm1 = LSTMLayer(params, 256, return_sequence=True)
-
-        self.out_conv = tf.keras.layers.Conv2D(len(dictionary) + 1, kernel_size=3, strides=1, padding='SAME')
-
-
-    def call(self, inputs, training):
-        x = self.c0(inputs, training=training)
-        x = self.c1(x, training=training)
-        x = self.dropout1(x, training=training)
-        x = self.c2(x, training=training)
-        x = self.dropout2(x, training=training)
-        x = self.c3(x, training=training)
-        x = self.dropout3(x, training=training)
-        x = self.c4(x, training=training)
-        #outputs = self.dropout(outputs, training)
-
-        outputs = x
-        shape = tf.shape(outputs)
-        x = tf.reshape(outputs, [shape[0], shape[1] * shape[2], shape[3]])
-        logger.info('inputs: {}, outputs: {}, x: {}'.format(inputs.shape, outputs.shape, x.shape))
-
-        x = self.lstm0(x, training)
-        x = self.lstm1(x, training)
-        logger.info('lstm: {}'.format(x.shape))
-
-        # BxTx2H -> BxTx1x2H
-        x = tf.expand_dims(x, 2)
-        x = self.out_conv(x)
-        x = tf.squeeze(x, 2)
-
-        #x = tf.keras.activations.softmax(x, -1)
-
-        return x
-
-    def decode(self, inputs):
-        logits = self.call(inputs, training=False)
-
-        # BxTxC -> TxBxC
-        logits = tf.transpose(logits, [1, 0, 2])
-
-        #decoded, _ = tf.nn.ctc_beam_search_decoder(inputs=logits, sequence_length=self.max_sentence_len, beam_width=50)
-
-        decoded, _ = tf.nn.ctc_greedy_decoder(inputs=logits, sequence_length=self.max_sentence_len)
-
 def create_params(model_name):
     data_format='channels_last'
 
@@ -349,7 +231,7 @@ def create_params(model_name):
         'data_format': data_format,
         'relu_fn': local_swish,
         'batch_norm_momentum': 0.99,
-        'batch_norm_epsilon': 1e-8,
+        'batch_norm_epsilon': 1e-3,
         'channel_axis': channel_axis,
         'spatial_dims': spatial_dims,
         'model_name': model_name,
@@ -366,9 +248,4 @@ def create_params(model_name):
 def create_model(model_name):
     params = create_params(model_name)
     model = EfnYolo(params)
-    return model
-
-def create_text_recognition_model(model_name, max_sentence_len):
-    params = create_params(model_name)
-    model = TextModel(params, max_sentence_len)
     return model
