@@ -466,6 +466,7 @@ def run_inference():
             scores_batch = tf.identity(scores_batch, name='output/scores')
             objs_batch = tf.identity(objs_batch, name='output/objectness')
             cat_ids_batch = tf.identity(cat_ids_batch, name='output/category_ids')
+            output_names = ['output/coords', 'output/scores', 'output/objectness', 'output/category_ids']
 
             sess.run([tf.compat.v1.global_variables_initializer(), tf.compat.v1.local_variables_initializer()])
 
@@ -473,7 +474,7 @@ def run_inference():
             status.assert_existing_objects_matched().expect_partial()
             logger.info("Restored from external checkpoint {}".format(checkpoint_prefix))
 
-            output_graph_def = tf.compat.v1.graph_util.convert_variables_to_constants(sess, sess.graph.as_graph_def(), ['output/coords', 'output/scores', 'output/objectness', 'output/category_ids'])
+            output_graph_def = tf.compat.v1.graph_util.convert_variables_to_constants(sess, sess.graph.as_graph_def(), output_names)
 
             output = '{}-{}.frozen.pb'.format(checkpoint_prefix, tf.__version__)
             filename = tf.io.write_graph(output_graph_def, os.path.dirname(output), os.path.basename(output), as_text=False)
