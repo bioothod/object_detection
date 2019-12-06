@@ -668,8 +668,10 @@ def distort_image_with_randaugment(image, num_layers, magnitude):
     """
     replace_value = [128] * 3
     logger.info('Using RandAug.')
-    augmentation_hparams = tf.contrib.training.HParams(
-        cutout_const=40, translate_const=100)
+    augmentation_hparams = {
+            'cutout_const': 40,
+            'translate_const': 100
+    }
     available_ops = [
         'AutoContrast', 'Equalize', 'Invert', 'Rotate', 'Posterize',
         'Solarize', 'Color', 'Contrast', 'Brightness', 'Sharpness',
