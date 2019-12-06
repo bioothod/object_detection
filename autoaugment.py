@@ -491,6 +491,10 @@ def _translate_level_to_arg(level, translate_const):
     level = _randomly_negate_tensor(level)
     return (level,)
 
+def level_none(level):
+    return ()
+def level_div_mult(level, m):
+    return (int((level/_MAX_LEVEL) * m),)
 
 def level_div_4(level):
     return level_div_mult(level, 4)
