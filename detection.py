@@ -511,7 +511,7 @@ def train():
 
             return step
 
-        min_metric = 0
+        best_metric = 0
         best_saved_path = None
         num_epochs_without_improvement = 0
         initial_learning_rate_multiplier = 0.2
@@ -530,12 +530,12 @@ def train():
             logger.info('there is a checkpoint {}, running initial validation'.format(manager.latest_checkpoint))
 
             eval_steps = run_epoch('eval', eval_dataset, distributed_eval_step, steps_per_eval)
-            min_metric = validation_metric()
-            logger.info('initial validation metric: {:.3f}'.format(min_metric))
+            best_metric = validation_metric()
+            logger.info('initial validation metric: {:.3f}'.format(best_metric))
 
-        if min_metric < FLAGS.min_eval_metric:
-            logger.info('setting minimal evaluation metric {:.3f} -> {} from command line arguments'.format(min_metric, FLAGS.min_eval_metric))
-            min_metric = FLAGS.min_eval_metric
+        if best_metric < FLAGS.min_eval_metric:
+            logger.info('setting minimal evaluation metric {:.3f} -> {} from command line arguments'.format(best_metric, FLAGS.min_eval_metric))
+            best_metric = FLAGS.min_eval_metric
 
         num_vars = len(model.trainable_variables)
         num_params = np.sum([np.prod(v.shape) for v in model.trainable_variables])
@@ -554,7 +554,7 @@ def train():
 
             metric = validation_metric()
 
-            logger.info('epoch: {}, train: steps: {}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}, good_ios/pos: {}/{}, loss: {:.2e}, eval: accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}, good_ios/pos: {}/{}, loss: {:.2e}, lr: {:.2e}, val_metric: {:.3f}'.format(
+            logger.info('epoch: {}, train: steps: {}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}, good_ios/pos: {}/{}, loss: {:.2e}, eval: accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}, good_ios/pos: {}/{}, loss: {:.2e}, lr: {:.2e}, val_metric: {:.3f}/{:.3f}'.format(
                 epoch, global_step.numpy(),
                 accuracy_metric.result(), obj_accuracy_metric.result(), iou_metric.result(),
                 int(num_good_ious_metric.result()), int(num_positive_labels_metric.result()),
@@ -563,18 +563,18 @@ def train():
                 int(eval_num_good_ious_metric.result()), int(eval_num_positive_labels_metric.result()),
                 eval_loss_metric.result(),
                 learning_rate.numpy(),
-                metric))
+                metric, best_metric))
 
             saved_path = manager.save()
 
-            if metric > min_metric:
+            if metric > best_metric:
                 best_saved_path = checkpoint.save(file_prefix='{}/ckpt-{:.4f}'.format(good_checkpoint_dir, metric))
 
                 logger.info("epoch: {}, saved checkpoint: {}, eval metric: {:.4f} -> {:.4f}, accuracy: {:.3f}, obj_acc: {:.3f}, iou: {:.3f}, good_ios/positive: {}/{}".format(
-                    epoch, best_saved_path, min_metric, metric,
+                    epoch, best_saved_path, best_metric, metric,
                     eval_accuracy_metric.result(), eval_obj_accuracy_metric.result(), eval_iou_metric.result(),
                     int(eval_num_good_ious_metric.result()), int(eval_num_positive_labels_metric.result())))
-                min_metric = metric
+                best_metric = metric
                 num_epochs_without_improvement = 0
                 learning_rate_multiplier = initial_learning_rate_multiplier
             else:
@@ -587,7 +587,7 @@ def train():
                 if learning_rate > FLAGS.min_learning_rate:
                     new_lr = learning_rate.numpy() * learning_rate_multiplier
                     logger.info('epoch: {}, epochs without metric improvement: {}, best metric: {:.5f}, updating learning rate: {:.2e} -> {:.2e}'.format(
-                        epoch, num_epochs_without_improvement, min_metric, learning_rate.numpy(), new_lr))
+                        epoch, num_epochs_without_improvement, best_metric, learning_rate.numpy(), new_lr))
                     num_epochs_without_improvement = 0
                     if learning_rate_multiplier > 0.1:
                         learning_rate_multiplier /= 2
@@ -596,14 +596,14 @@ def train():
                 elif num_epochs_without_improvement >= FLAGS.epochs_lr_update:
                     new_lr = FLAGS.initial_learning_rate
                     logger.info('epoch: {}, epochs without metric improvement: {}, best metric: {:.5f}, resetting learning rate: {:.2e} -> {:.2e}'.format(
-                        epoch, num_epochs_without_improvement, min_metric, learning_rate.numpy(), new_lr))
+                        epoch, num_epochs_without_improvement, best_metric, learning_rate.numpy(), new_lr))
                     num_epochs_without_improvement = 0
                     want_reset = True
                     learning_rate_multiplier = initial_learning_rate_multiplier
 
                 if want_reset and best_saved_path is not None:
                     logger.info('epoch: {}, best metric: {:.5f}, learning rate: {:.2e}, restoring best checkpoint: {}'.format(
-                        epoch, min_metric, learning_rate.numpy(), best_saved_path))
+                        epoch, best_metric, learning_rate.numpy(), best_saved_path))
 
                     checkpoint.restore(best_saved_path)
 
