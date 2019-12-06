@@ -6,12 +6,11 @@ import sys
 
 import numpy as np
 import tensorflow as tf
-from tensorflow.python.client import device_lib
 
 logger = logging.getLogger('detection')
 
-
 import anchors_gen
+import autoaugment
 import encoder
 import image as image_draw
 import loss
@@ -48,6 +47,7 @@ parser.add_argument('--image_size', type=int, default=0, help='Use this image si
 parser.add_argument('--do_not_step_labels', action='store_true', help='Whether to reduce labels by 1, i.e. when 0 is background class')
 parser.add_argument('--train_num_images', type=int, help='Number of images in train epoch')
 parser.add_argument('--eval_num_images', type=int, help='Number of images in eval epoch')
+parser.add_argument('--use_random_augmentation', action='store_true', help='Use efficientnet random augmentation')
 
 def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_ratios, image_size, num_classes, is_training, data_format, do_not_step_labels):
     features = tf.io.parse_single_example(serialized_example,
@@ -104,6 +104,12 @@ def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_rat
     coords_yx = tf.concat([yminf, xminf, ymaxf, xmaxf], axis=1)
 
     if is_training:
+        if FLAGS.use_random_augmentation:
+            randaug_num_layers = 2
+            randaug_magnitude = 28
+
+            image = autoaugment.distort_image_with_randaugment(image, randaug_num_layers, randaug_magnitude)
+
         image, new_labels, new_bboxes = preprocess_ssd.preprocess_for_train(image, orig_labels, coords_yx,
                 [image_size, image_size], data_format=data_format)
 
@@ -576,12 +582,12 @@ def train():
 
             if num_epochs_without_improvement >= FLAGS.epochs_lr_update:
                 want_reset = False
+                new_lr = learning_rate.numpy()
 
                 if learning_rate > FLAGS.min_learning_rate:
                     new_lr = learning_rate.numpy() * learning_rate_multiplier
                     logger.info('epoch: {}, epochs without metric improvement: {}, best metric: {:.5f}, updating learning rate: {:.2e} -> {:.2e}'.format(
                         epoch, num_epochs_without_improvement, min_metric, learning_rate.numpy(), new_lr))
-                    learning_rate.assign(new_lr)
                     num_epochs_without_improvement = 0
                     if learning_rate_multiplier > 0.1:
                         learning_rate_multiplier /= 2
@@ -591,7 +597,6 @@ def train():
                     new_lr = FLAGS.initial_learning_rate
                     logger.info('epoch: {}, epochs without metric improvement: {}, best metric: {:.5f}, resetting learning rate: {:.2e} -> {:.2e}'.format(
                         epoch, num_epochs_without_improvement, min_metric, learning_rate.numpy(), new_lr))
-                    learning_rate.assign(new_lr)
                     num_epochs_without_improvement = 0
                     want_reset = True
                     learning_rate_multiplier = initial_learning_rate_multiplier
@@ -602,6 +607,8 @@ def train():
 
                     checkpoint.restore(best_saved_path)
 
+                # assign potentially new learning rate, since it could have been restored from older checkpoint or just updated
+                learning_rate.assign(new_lr)
 
 if __name__ == '__main__':
     np.set_printoptions(formatter={'float': '{:0.4f}'.format, 'int': '{:4d}'.format}, linewidth=250, suppress=True, threshold=np.inf)
