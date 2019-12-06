@@ -669,8 +669,8 @@ def distort_image_with_randaugment(image, num_layers, magnitude):
     replace_value = [128] * 3
     logger.info('Using RandAug.')
     augmentation_hparams = {
-            'cutout_const': 40,
-            'translate_const': 100
+        'cutout_const': 40,
+        'translate_const': 100
     }
     available_ops = [
         'AutoContrast', 'Equalize', 'Invert', 'Rotate', 'Posterize',
@@ -678,14 +678,12 @@ def distort_image_with_randaugment(image, num_layers, magnitude):
         'ShearX', 'ShearY', 'TranslateX', 'TranslateY', 'Cutout', 'SolarizeAdd']
 
     for layer_num in range(num_layers):
-        op_to_select = tf.random_uniform(
-            [], maxval=len(available_ops), dtype=tf.int32)
+        op_to_select = tf.random.uniform([], maxval=len(available_ops), dtype=tf.int32)
         random_magnitude = float(magnitude)
         with tf.name_scope('randaug_layer_{}'.format(layer_num)):
             for (i, op_name) in enumerate(available_ops):
-                prob = tf.random_uniform([], minval=0.2, maxval=0.8, dtype=tf.float32)
-                func, _, args = _parse_policy_info(op_name, prob, random_magnitude,
-                                                   replace_value, augmentation_hparams)
+                prob = tf.random.uniform([], minval=0.2, maxval=0.8, dtype=tf.float32)
+                func, _, args = _parse_policy_info(op_name, prob, random_magnitude, replace_value, augmentation_hparams)
                 image = tf.cond(
                     tf.equal(i, op_to_select),
                     # pylint:disable=g-long-lambda
