@@ -12,6 +12,7 @@ logger = logging.getLogger('detection')
 
 
 import anchors_gen
+import autoaugment
 import encoder
 import image as image_draw
 import loss
@@ -42,6 +43,7 @@ parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing 
 parser.add_argument('--image_size', type=int, default=0, help='Use this image size, if 0 - use default')
 parser.add_argument('--train_num_images', type=int, help='Number of images in train epoch')
 parser.add_argument('--eval_num_images', type=int, help='Number of images in eval epoch')
+parser.add_argument('--use_random_augmentation', action='store_true', help='Use efficientnet random augmentation')
 
 def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_ratios, image_size, is_training, data_format):
     features = tf.io.parse_single_example(serialized_example,
@@ -91,6 +93,12 @@ def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_rat
     coords_yx = tf.concat([yminf, xminf, ymaxf, xmaxf], axis=1)
 
     if is_training:
+        if FLAGS.use_random_augmentation:
+            randaug_num_layers = 2
+            randaug_magnitude = 28
+
+            image = autoaugment.distort_image_with_randaugment(image, randaug_num_layers, randaug_magnitude)
+
         image, new_text_labels, new_bboxes = preprocess_ssd.preprocess_for_train(image, true_text_labels, coords_yx,
                 [image_size, image_size], data_format=data_format)
 
