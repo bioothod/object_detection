@@ -25,7 +25,7 @@ import math
 import tensorflow as tf
 import tensorflow_addons as tfa
 
-logger = logging.getLogger('vggface_emotions')
+logger = logging.getLogger('detection')
 
 
 # This signifies the max integer that the controller RNN could predict for the
@@ -54,7 +54,7 @@ def policy_v0():
         [('Posterize', 0.4, 6), ('AutoContrast', 0.4, 7)],
         [('Solarize', 0.6, 8), ('Color', 0.6, 9)],
         [('Solarize', 0.2, 4), ('Rotate', 0.8, 9)],
-        #[('Rotate', 1.0, 7), ('TranslateY', 0.8, 9)],
+        [('Rotate', 1.0, 7), ('TranslateY', 0.8, 9)],
         [('ShearX', 0.0, 0), ('Solarize', 0.8, 4)],
         [('ShearY', 0.8, 0), ('Color', 0.6, 4)],
         [('Color', 1.0, 0), ('Rotate', 0.6, 2)],
@@ -458,8 +458,8 @@ def _randomly_negate_tensor(tensor):
     return final_tensor
 
 
-def _rotate_level_to_arg(level):
-    level = (level/_MAX_LEVEL) * 30.
+def _rotate_level_to_arg(level, max_angle):
+    level = (level/_MAX_LEVEL) * float(max_angle)
     level = _randomly_negate_tensor(level)
     return (level,)
 
@@ -505,6 +505,7 @@ def level_div_110(level):
 def level_to_arg(hparams):
     cutout_f = lambda level: level_div_mult(level, hparams['cutout_const'])
     translate_f = lambda level: _translate_level_to_arg(level, hparams['translate_const'])
+    rotate_f = lambda level: _translate_level_to_arg(level, hparams['rotate_max_angle'])
     return {
         'AutoContrast': level_none,
         'Equalize': level_none,
@@ -648,6 +649,7 @@ def distort_image_with_autoaugment(image, augmentation_name):
         'cutout_max_pad_fraction': 0.75,
         'cutout_const': 100,
         'translate_const': 250,
+        'rotate_max_angle': 5,
     }
 
     return build_and_apply_nas_policy(policy, image, augmentation_hparams)
@@ -673,12 +675,17 @@ def distort_image_with_randaugment(image, num_layers, magnitude):
     logger.info('Using RandAug.')
     augmentation_hparams = {
         'cutout_const': 40,
-        'translate_const': 100
+        'translate_const': 100,
+        'rotate_max_angle': 5,
     }
-    available_ops = [
+    available_ops_orig = [
         'AutoContrast', 'Equalize', 'Invert', 'Rotate', 'Posterize',
         'Solarize', 'Color', 'Contrast', 'Brightness', 'Sharpness',
         'ShearX', 'ShearY', 'TranslateX', 'TranslateY', 'Cutout', 'SolarizeAdd']
+    available_ops = [
+        'AutoContrast', 'Equalize', 'Invert', 'Posterize',
+        'Solarize', 'Color', 'Contrast', 'Brightness', 'Sharpness',
+        'Cutout', 'SolarizeAdd']
 
     for layer_num in range(num_layers):
         op_to_select = tf.random.uniform([], maxval=len(available_ops), dtype=tf.int32)
