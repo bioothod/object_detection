@@ -118,37 +118,6 @@ def tf_left_needed_dimensions_from_tfrecord(image_size, anchors_all, output_xy_g
     image = tf.squeeze(image, 0)
     return filename, image
 
-def tf_left_needed_dimensions(image_size, filename, image_id, image, true_bboxes, true_labels):
-    pos_indexes = tf.where(true_labels > 0)
-    pos_bboxes = tf.gather_nd(true_bboxes, pos_indexes)
-
-    cx = pos_bboxes[:, 0]
-    cy = pos_bboxes[:, 1]
-    h = pos_bboxes[:, 2]
-    w = pos_bboxes[:, 3]
-
-    x0 = cx - w/2
-    x1 = cx + w/2
-    y0 = cy - h/2
-    y1 = cy + h/2
-
-    x0 /= image_size
-    y0 /= image_size
-    x1 /= image_size
-    y1 /= image_size
-
-    boxes = tf.stack([y0, x0, y1, x1], axis=1)
-    boxes = tf.expand_dims(boxes, 0)
-
-    image = tf.expand_dims(image, 0)
-
-    colors = tf.random.uniform([tf.shape(pos_bboxes)[0], 4], minval=0, maxval=1, dtype=tf.dtypes.float32)
-
-    image = tf.image.draw_bounding_boxes(image,  boxes, colors)
-    image = tf.squeeze(image, 0)
-
-    return filename, image
-
 def non_max_suppression(coords, scores, max_ret, iou_threshold):
     ymin, xmin, ymax, xmax = tf.split(coords, num_or_size_splits=4, axis=1)
     ymax = tf.squeeze(ymax, 1)
@@ -521,7 +490,7 @@ def run_inference():
             if os.path.isfile(fn):
                 filenames.append(fn)
 
-        ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=2)
+        ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=8)
         ds = ds.map(lambda record: unpack_tfrecord(record, all_anchors, all_grid_xy, all_ratios,
                     image_size, num_classes, False,
                     FLAGS.data_format, FLAGS.do_not_step_labels),
