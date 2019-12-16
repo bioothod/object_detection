@@ -341,9 +341,20 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_a
 
         for filename, image, coords, scores, objectness, cat_ids in zip(filenames, images, coords_batch, scores_batch, objs_batch, cat_ids_batch):
             filename = str(filename.numpy(), 'utf8')
+            image = cv2.imread(filename)
 
-            good_scores = np.count_nonzero((scores.numpy() > 0))
-            #logger.info('{}: scores: {}, time_per_image: {:.1f} ms'.format(filename, good_scores, time_per_image_ms))
+            base_filename = os.path.basename(filename)
+
+            imh, imw = image.shape[:2]
+            max_side = max(imh, imw)
+            pad_y = (max_side - imh) / 2
+            pad_x = (max_side - imw) / 2
+            square_scale = max_side / image_size
+
+            scores = scores.numpy()
+            objectness = objectness.numpy()
+            cat_ids = cat_ids.numpy()
+
 
             anns = []
 
@@ -353,35 +364,41 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_a
             js_anns = []
 
             for coord, score, objs, cat_id in zip(coords, scores, objectness, cat_ids):
-                if score.numpy() == 0:
+                objs = float(objs)
+                score = float(score)
+                cat_id = int(cat_id)
+
+                if score == 0:
                     break
 
                 bb = coord.numpy().astype(float)
-                ymin, xmin, ymax, xmax = bb
-                bb = [xmin, ymin, xmax, ymax]
+                scaled_bb = bb * square_scale
 
-                cat_id = cat_id.numpy()
+                ymin, xmin, ymax, xmax = scaled_bb
+                xmin -= pad_x
+                xmax -= pad_x
+                ymin -= pad_y
+                ymax -= pad_y
+
+                #ymin, xmin, ymax, xmax = bb
+                bb = [xmin, ymin, xmax, ymax]
 
                 ann_js = {
                     'bbox': bb,
-                    'objectness': float(objs),
-                    'class_score': float(score),
-                    'category_id': int(cat_id),
+                    'objectness': objs,
+                    'class_score': score,
+                    'category_id': cat_id,
                 }
 
                 js_anns.append(ann_js)
                 anns.append((bb, None, cat_id))
 
+                #logger.info('{}: bbox: {}, obj: {:.3f}, score: {:.3f}, cat_id: {}'.format(filename, bb, objs, score, cat_id))
+
             js['annotations'] = js_anns
             dump_js.append(js)
 
             if not FLAGS.do_not_save_images:
-                logger.info('{}: bbox: {}, obj: {:.3f}, score: {:.3f}, cat_id: {}'.format(filename, bb, objs, score, cat_id))
-
-                image = preprocess_ssd.denormalize_image(image)
-                image = image.numpy()
-                image = image.astype(np.uint8)
-
                 if not FLAGS.no_channel_swap:
                     image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
