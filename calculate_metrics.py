@@ -231,7 +231,7 @@ class Metric:
             undetected = orig_cm[cid][self.none_id] / (np.sum(orig_cm[cid, :]) + 1e-10) * 100
             unlabeled = orig_cm[self.none_id][cid] / (np.sum(orig_cm[:, cid]) + 1e-10) * 100
 
-            print('{: >20s}/{:2d}: f1: {:.1f}, precision: {:.1f}, recall: {:.1f}, tp: {:4d}, fp: {:4d}, fn: {:4d}, undetected: {:.1f}, unlabeled: {:.1f}'.format(
+            print('{: >20s}/{:2d}: f1: {:.1f}, precision: {:.1f}, recall: {:.1f}, tp: {:4d}, fp: {:4d}, fn: {:4d}, undetected: {:.1f}, unlabelled: {:.1f}'.format(
                 cname, cid, f1, pr, rc, tp, fp, fn,
                 undetected, unlabeled))
 
