@@ -17,6 +17,7 @@ import encoder
 import image as image_draw
 import loss
 import preprocess_ssd
+import preprocess
 
 logger = logging.getLogger('detection')
 logger.propagate = False
@@ -60,15 +61,7 @@ def tf_read_image(filename, image_size, dtype):
     image = tf.io.read_file(filename)
     image = tf.image.decode_jpeg(image, channels=3)
 
-    orig_image_height = tf.cast(tf.shape(image)[0], dtype)
-    orig_image_width = tf.cast(tf.shape(image)[1], dtype)
-
-    mx = tf.maximum(orig_image_height, orig_image_width)
-    mx_int = tf.cast(mx, tf.int32)
-    image = tf.image.pad_to_bounding_box(image, tf.cast((mx - orig_image_height) / 2, tf.int32), tf.cast((mx - orig_image_width) / 2, tf.int32), mx_int, mx_int)
-
-    image = tf.image.resize(image, [image_size, image_size])
-
+    image = preprocess.pad_resize_image(image, [image_size, image_size])
     image = normalize_image(image, dtype)
 
     return filename, image
@@ -208,6 +201,7 @@ def non_max_suppression(coords, scores, max_ret, iou_threshold):
         area_idx = tf.gather(area, idxs)
         union = area_i + area_idx - intersection
         iou = intersection/union
+
         nonoverlap_index = tf.where(iou <= iou_threshold)
         nonoverlap_index = tf.squeeze(nonoverlap_index, 1)
 
@@ -284,7 +278,6 @@ def per_image_supression(logits, image_size):
 
     return best_coords, best_objs
 
-@tf.function
 def eval_step_logits(model, images, image_size, all_anchors, all_grid_xy, all_ratios):
     pred_values = model(images, training=False)
 

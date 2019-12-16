@@ -138,7 +138,8 @@ class EfnHead(tf.keras.layers.Layer):
     def __init__(self, params, **kwargs):
         super(EfnHead, self).__init__(**kwargs)
 
-        num_features = 3 * (1 + 4)
+        num_classes = 0
+        num_features = 3 * (1 + 4 + num_classes)
 
         self.stage2_conv5 = DarknetConv5(params, [512, 1024, 512, 1024, 512])
         self.stage2_conv2 = DarknetConv2(params, [1024, num_features], name="detection_layer_1")
