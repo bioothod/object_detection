@@ -301,12 +301,13 @@ class COCO_Iterable:
         orig_keypoints = []
         for ann in anns:
             bb = ann['bbox']
-            kp = ann['keypoints']
+            kp = ann.get('keypoints')
             cat_id = ann['category_id']
 
             orig_bboxes.append(bb)
             orig_cat_ids.append(cat_id)
-            orig_keypoints += kp
+            if kp:
+                orig_keypoints += kp
 
             if bb[2] > orig_image.shape[1] or bb[3] > orig_image.shape[0]:
                 self.logger.error('{}: incorrect annotation: image_shape: {}, bb: {}'.format(filename, orig_image.shape, bb))
@@ -331,9 +332,9 @@ class COCO_Iterable:
         keypoints = annotations['keypoints']
 
         if return_orig_format:
-            true_keypoints = np.array([keypoints], dtype=np.float32)
+            if len(keypoints) == 0:
+                true_keypoints = None
 
-            if False:
                 if len(bboxes) == 0:
                     raise ProcessingError('{}: there are no bboxes after augmentation'.format(filename))
 
@@ -347,6 +348,8 @@ class COCO_Iterable:
                 cy = y0 + h/2
                 true_bboxes = np.stack([cx, cy, h, w], axis=1)
             else:
+                true_keypoints = np.array([keypoints], dtype=np.float32)
+
                 xmin = true_keypoints[..., 0].min()
                 xmax = true_keypoints[..., 0].max()
                 ymin = true_keypoints[..., 1].min()
