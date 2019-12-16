@@ -81,7 +81,7 @@ def do_work(worker_id, step, num_images, image_size):
 
         if processed <= 10:
             new_anns = []
-            for bb, kp, cat_id in zip(true_bboxes, true_keypoints, true_labels):
+            for bb, cat_id in zip(true_bboxes, true_labels):
                 cx, cy, h, w = bb
                 x0 = cx - w/2
                 x1 = cx + w/2
@@ -89,7 +89,7 @@ def do_work(worker_id, step, num_images, image_size):
                 y1 = cy + h/2
 
                 bb = [x0, y0, x1, y1]
-                new_anns.append((bb, kp, cat_id))
+                new_anns.append((bb, None, cat_id))
 
             dst = '{}/{:02d}_{}_{}.png'.format(images_dir, worker_id, image_id, processed)
             logger.info('{}: true anchors: {}'.format(dst, new_anns))
@@ -103,7 +103,6 @@ def do_work(worker_id, step, num_images, image_size):
             'filename': _bytes_feature(bytes(filename, 'utf8')),
             'true_bboxes': _bytes_feature(true_bboxes.tobytes()),
             'true_labels': _bytes_feature(true_labels.tobytes()),
-            'true_keypoints': _bytes_feature(true_keypoints.tobytes()),
             }))
 
         data = bytes(example.SerializeToString())

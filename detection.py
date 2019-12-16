@@ -56,13 +56,9 @@ def unpack_tfrecord(serialized_example, anchors_all, output_xy_grids, output_rat
                 'filename': tf.io.FixedLenFeature([], tf.string),
                 'true_labels': tf.io.FixedLenFeature([], tf.string),
                 'true_bboxes': tf.io.FixedLenFeature([], tf.string),
-                #'true_keypoints': tf.io.FixedLenFeature([], tf.string),
                 'image': tf.io.FixedLenFeature([], tf.string),
             })
     filename = features['filename']
-
-    #orig_keypoints = tf.io.decode_raw(features['true_keypoints'], tf.float32)
-    #orig_keypoints = tf.reshape(orig_keypoints, [-1, 2])
 
     orig_bboxes = tf.io.decode_raw(features['true_bboxes'], tf.float32)
     orig_bboxes = tf.reshape(orig_bboxes, [-1, 4])
