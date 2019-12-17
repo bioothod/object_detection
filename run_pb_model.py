@@ -5,7 +5,6 @@ import tensorflow as tf
 from tensorflow.core.framework import graph_pb2
 
 import efficientnet as efn
-import preprocess
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--input_pb', required=True, type=str, help='Input protobuf file')
@@ -14,12 +13,21 @@ parser.add_argument('filenames', nargs='+', type=str, help='Input files')
 FLAGS = parser.parse_args()
 
 def tf_read_image(filename, image_size):
+    dtype = tf.float32
+
     image = tf.io.read_file(filename)
     image = tf.image.decode_jpeg(image, channels=3)
 
-    image = preprocess.pad_resize_image(image, [image_size, image_size])
-    image = tf.reshape(image, [-1])
+    orig_image_height = tf.cast(tf.shape(image)[0], dtype)
+    orig_image_width = tf.cast(tf.shape(image)[1], dtype)
+
+    mx = tf.maximum(orig_image_height, orig_image_width)
+    mx_int = tf.cast(mx, tf.int32)
+    image = tf.image.pad_to_bounding_box(image, tf.cast((mx - orig_image_height) / 2, tf.int32), tf.cast((mx - orig_image_width) / 2, tf.int32), mx_int, mx_int)
+
+    image = tf.image.resize_with_pad(image, image_size, image_size)
     image = tf.cast(image, tf.uint8)
+    image = tf.reshape(image, [-1])
 
     return filename, image
 

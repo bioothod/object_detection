@@ -181,8 +181,8 @@ class EfnYolo(tf.keras.layers.Layer):
 
         self.num_classes = num_classes
 
-        self.body = EfnBody(params)
-        self.head = EfnHead(params, num_classes)
+        self.body = EfnBody(params, name='body')
+        self.head = EfnHead(params, num_classes, name='head')
 
         self.image_size = self.body.image_size
         os = {
@@ -209,7 +209,7 @@ class EfnYolo(tf.keras.layers.Layer):
         outputs = tf.concat(outputs, axis=1)
         return outputs
 
-def create_model(model_name, num_classes):
+def create_model(model_name, num_classes, name='efn_yolo'):
     data_format='channels_last'
 
     if data_format == 'channels_first':
@@ -231,5 +231,5 @@ def create_model(model_name, num_classes):
 
     params = GlobalParams(**params)
 
-    model = EfnYolo(params, num_classes)
+    model = EfnYolo(params, num_classes, name=name)
     return model

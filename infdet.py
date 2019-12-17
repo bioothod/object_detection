@@ -118,6 +118,7 @@ def tf_left_needed_dimensions_from_tfrecord(image_size, anchors_all, output_xy_g
     image = tf.squeeze(image, 0)
     return filename, image
 
+@tf.function
 def non_max_suppression(coords, scores, max_ret, iou_threshold):
     ymin, xmin, ymax, xmax = tf.split(coords, num_or_size_splits=4, axis=1)
     ymax = tf.squeeze(ymax, 1)
@@ -134,7 +135,7 @@ def non_max_suppression(coords, scores, max_ret, iou_threshold):
     pick = tf.TensorArray(tf.int32, size=max_idx)
     written = 0
 
-    for idx in range(max_idx):
+    for idx in tf.range(max_idx):
         last_idx = tf.shape(idxs)[0] - 1
         if idx >= last_idx:
             break
@@ -293,10 +294,10 @@ def per_image_supression(logits, image_size, num_classes):
     #logger.info('best_coords: {}, best_scores: {}, best_cat_ids: {}'.format(best_coords, best_scores, best_cat_ids))
 
     to_add = tf.maximum(FLAGS.max_ret - tf.shape(best_scores)[0], 0)
-    best_coords = tf.pad(best_coords, [[0, to_add], [0, 0]] , 'CONSTANT')
-    best_scores = tf.pad(best_scores, [[0, to_add]], 'CONSTANT')
-    best_objs = tf.pad(best_objs, [[0, to_add]], 'CONSTANT')
-    best_cat_ids = tf.pad(best_cat_ids, [[0, to_add]], 'CONSTANT')
+    best_coords = tf.pad(best_coords, [[0, to_add], [0, 0]] , 'CONSTANT', constant_values=0)
+    best_scores = tf.pad(best_scores, [[0, to_add]], 'CONSTANT', constant_values=0)
+    best_objs = tf.pad(best_objs, [[0, to_add]], 'CONSTANT', constant_values=0)
+    best_cat_ids = tf.pad(best_cat_ids, [[0, to_add]], 'CONSTANT', constant_values=0)
 
 
     #logger.info('ret_coords: {}, ret_scores: {}, ret_cat_ids: {}, best_index: {}, best_scores: {}, best_coords: {}, best_cat_ids: {}'.format(
@@ -325,7 +326,6 @@ def eval_step_logits(model, images, image_size, num_classes, all_anchors, all_gr
                      (pred_bboxes, pred_scores, pred_labels, pred_objs),
                      parallel_iterations=FLAGS.num_cpus,
                      back_prop=False,
-                     infer_shape=False,
                      dtype=(tf.float32, tf.float32, tf.float32, tf.int32))
 
 def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_anchors, all_grid_xy, all_ratios, cat_names):
@@ -368,7 +368,7 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_a
                 score = float(score)
                 cat_id = int(cat_id)
 
-                if score == 0:
+                if score <= 0:
                     break
 
                 bb = coord.numpy().astype(float)
@@ -427,26 +427,44 @@ def run_inference():
     image_size = model.image_size
     all_anchors, all_grid_xy, all_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
 
-    checkpoint = tf.train.Checkpoint(model=model)
+    all_anchors_graph = all_anchors.numpy()
+    all_grid_xy_graph = all_grid_xy.numpy()
+    all_ratios_graph = all_ratios.numpy()
+    output_sizes = model.output_sizes
 
     if FLAGS.checkpoint:
         checkpoint_prefix = FLAGS.checkpoint
     elif FLAGS.checkpoint_dir:
         checkpoint_prefix = tf.train.latest_checkpoint(FLAGS.checkpoint_dir)
 
+    checkpoint = tf.train.Checkpoint(model=model)
+
+    status = checkpoint.restore(checkpoint_prefix)
+    if FLAGS.skip_checkpoint_assertion:
+        status.expect_partial()
+    else:
+        status.assert_existing_objects_matched().expect_partial()
+    logger.info("Restored from external checkpoint {}".format(checkpoint_prefix))
+
     if FLAGS.freeze:
+        dummy_image = tf.zeros((1, image_size, image_size, 3))
+        _ = model(dummy_image, training=False)
+
+        weights = []
+        for v in model.variables:
+            #logger.info(v.name)
+            weights.append(v.numpy())
+
         with tf.compat.v1.Session() as sess:
+            model = encoder.create_model(FLAGS.model_name, FLAGS.num_classes)
+
+            dtype = tf.float32
+
             images = tf.keras.layers.Input(shape=(image_size * image_size * 3), name='input/images_rgb', dtype=tf.uint8)
             images = tf.reshape(images, [-1, image_size, image_size, 3])
             images = normalize_image(images, dtype)
 
-            model = encoder.create_model(FLAGS.model_name, FLAGS.num_classes)
-            image_size = model.image_size
-            all_anchors, all_grid_xy, all_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
-
-            checkpoint = tf.train.Checkpoint(model=model)
-
-            coords_batch, scores_batch, objs_batch, cat_ids_batch = eval_step_logits(model, images, image_size, FLAGS.num_classes, all_anchors, all_grid_xy, all_ratios)
+            coords_batch, scores_batch, objs_batch, cat_ids_batch = eval_step_logits(model, images, image_size, num_classes, all_anchors_graph, all_grid_xy_graph, all_ratios_graph)
 
             coords_batch = tf.identity(coords_batch, name='output/coords')
             scores_batch = tf.identity(scores_batch, name='output/scores')
@@ -456,9 +474,14 @@ def run_inference():
 
             sess.run([tf.compat.v1.global_variables_initializer(), tf.compat.v1.local_variables_initializer()])
 
-            status = checkpoint.restore(checkpoint_prefix)
-            status.assert_existing_objects_matched().expect_partial()
-            logger.info("Restored from external checkpoint {}".format(checkpoint_prefix))
+            recover_ops = []
+            for v, weight in zip(model.variables, weights):
+                op = tf.compat.v1.assign(v, weight)
+                recover_ops.append(op)
+
+            sess.run(recover_ops)
+
+            logger.info("Restored from external checkpoint {} {} variables".format(checkpoint_prefix, len(recover_ops)))
 
             output_graph_def = tf.compat.v1.graph_util.convert_variables_to_constants(sess, sess.graph.as_graph_def(), output_names)
 
@@ -469,12 +492,7 @@ def run_inference():
             return
 
 
-    status = checkpoint.restore(checkpoint_prefix)
-    if FLAGS.skip_checkpoint_assertion:
-        status.expect_partial()
-    else:
-        status.assert_existing_objects_matched().expect_partial()
-    logger.info("Restored from external checkpoint {}".format(checkpoint_prefix))
+
 
     cat_names = {}
 
