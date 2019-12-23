@@ -3,7 +3,7 @@ import logging
 
 import tensorflow as tf
 
-import efficientnet as efn
+import feature_gated_conv as features
 
 logger = logging.getLogger('detection')
 
@@ -18,37 +18,9 @@ GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
 def local_swish(x):
     return x * tf.nn.sigmoid(x)
 
-class EfnBody(tf.keras.layers.Layer):
-    def __init__(self, params, **kwargs):
-        super(EfnBody, self).__init__(**kwargs)
-
-        self.image_size = efn.efficientnet_params(params.model_name)[2]
-
-        efn_param_keys = efn.GlobalParams._fields
-        efn_params = {}
-        for k, v in params._asdict().items():
-            if k in efn_param_keys:
-                efn_params[k] = v
-
-        self.base_model = efn.build_model(model_name=params.model_name, override_params=efn_params)
-
-        self.reduction_indexes = [3, 4, 5]
-
-    def call(self, inputs, training=True):
-        self.endpoints = []
-
-        outputs = self.base_model(inputs, training=training, features_only=True)
-
-
-        for reduction_idx in self.reduction_indexes:
-            endpoint = self.base_model.endpoints['reduction_{}'.format(reduction_idx)]
-            self.endpoints.append(endpoint)
-
-        return self.endpoints
-
-class DarknetConv(tf.keras.layers.Layer):
+class EncoderConv(tf.keras.layers.Layer):
     def __init__(self, params, num_features, kernel_size=(3, 3), strides=(1, 1), padding='SAME', want_max_pool=False, **kwargs):
-        super(DarknetConv, self).__init__(**kwargs)
+        super().__init__(**kwargs)
         self.num_features = num_features
         self.kernel_size = kernel_size
         self.strides = strides
@@ -84,29 +56,11 @@ class DarknetConv(tf.keras.layers.Layer):
 
         return x
 
-class DarknetConv5(tf.keras.layers.Layer):
+class OutputConv2(tf.keras.layers.Layer):
     def __init__(self, params, filters, **kwargs):
-        super(DarknetConv5, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
-        self.conv0 = DarknetConv(params, filters[0], kernel_size=(1, 1), strides=(1, 1), padding='SAME')
-        self.conv1 = DarknetConv(params, filters[1], kernel_size=(3, 3), strides=(1, 1), padding='SAME')
-        self.conv2 = DarknetConv(params, filters[2], kernel_size=(1, 1), strides=(1, 1), padding='SAME')
-        self.conv3 = DarknetConv(params, filters[3], kernel_size=(3, 3), strides=(1, 1), padding='SAME')
-        self.conv4 = DarknetConv(params, filters[4], kernel_size=(1, 1), strides=(1, 1), padding='SAME')
-
-    def call(self, input_tensor, training):
-        x = self.conv0(input_tensor, training)
-        x = self.conv1(x, training)
-        x = self.conv2(x, training)
-        x = self.conv3(x, training)
-        x = self.conv4(x, training)
-        return x
-
-class DarknetConv2(tf.keras.layers.Layer):
-    def __init__(self, params, filters, **kwargs):
-        super(DarknetConv2, self).__init__(**kwargs)
-
-        self.conv0 = DarknetConv(params, filters[0], kernel_size=(3, 3), strides=(1, 1), padding='SAME')
+        self.conv0 = EncoderConv(params, filters[0], kernel_size=(3, 3), strides=(1, 1), padding='SAME')
         self.conv1 = tf.keras.layers.Conv2D(
                 filters[1],
                 kernel_size=(1, 1),
@@ -123,10 +77,10 @@ class DarknetConv2(tf.keras.layers.Layer):
 
 class DarknetUpsampling(tf.keras.layers.Layer):
     def __init__(self, params, num_features, **kwargs):
-        super(DarknetUpsampling, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
         self.num_features = num_features
-        self.conv = DarknetConv(params, num_features, kernel_size=(1, 1), strides=(1, 1), padding='SAME')
+        self.conv = EncoderConv(params, num_features, kernel_size=(1, 1), strides=(1, 1), padding='SAME')
         self.upsampling = tf.keras.layers.UpSampling2D(2)
 
     def call(self, inputs, training):
@@ -134,74 +88,59 @@ class DarknetUpsampling(tf.keras.layers.Layer):
         x = self.upsampling(x)
         return x
 
-class EfnHead(tf.keras.layers.Layer):
-    def __init__(self, params, **kwargs):
-        super(EfnHead, self).__init__(**kwargs)
+class Head(tf.keras.layers.Layer):
+    def __init__(self, params, num_classes, **kwargs):
+        super().__init__(**kwargs)
 
-        num_classes = 0
-        num_features = 3 * (1 + 4 + num_classes)
+        num_features = 3 * num_classes
 
-        self.stage2_conv5 = DarknetConv5(params, [512, 1024, 512, 1024, 512])
-        self.stage2_conv2 = DarknetConv2(params, [1024, num_features], name="detection_layer_1")
-        self.stage2_upsampling = DarknetUpsampling(params, 256)
+        self.s2_output = OutputConv2(params, [128, num_features], name="detection_layer_2")
+        self.up2 = DarknetUpsampling(params, 128)
 
-        self.stage1_conv5 = DarknetConv5(params, [256, 512, 256, 512, 256])
-        self.stage1_conv2 = DarknetConv2(params, [512, num_features], name="detection_layer_2")
-        self.stage1_upsampling = DarknetUpsampling(params, 128)
+        self.s1_output = OutputConv2(params, [64, num_features], name="detection_layer_1")
+        self.up1 = DarknetUpsampling(params, 64)
 
-        self.stage0_conv5 = DarknetConv5(params, [128, 256, 128, 256, 128])
-        self.stage0_conv2 = DarknetConv2(params, [256, num_features], name="detection_layer_3")
+        self.s0_output = OutputConv2(params, [32, num_features], name="detection_layer_0")
 
         self.pads = [None]
         for pad in [1, 2, 3, 4, 5, 6]:
             self.pads.append(tf.keras.layers.ZeroPadding2D(((0, pad), (0, pad))))
 
-    def call(self, stage0_in, stage1_in, stage2_in, training=True):
-        x = self.stage2_conv5(stage2_in, training)
-        stage2_output = self.stage2_conv2(x, training)
+    def call(self, in0, in1, in2, training=True):
+        up2 = self.up2(in2)
+        out2 = self.s2_output(in2, training=training)
 
-        x = self.stage2_upsampling(x, training)
-
-        diff = x.shape[1] - stage1_in.shape[1]
+        diff = up2.shape[1] - in1.shape[1]
         if diff > 0:
-            stage1_in = self.pads[diff](stage1_in)
+            in1 = self.pads[diff](in1)
         if diff < 0:
-            x = self.pads[-diff](x)
+            up2 = self.pads[-diff](up2)
 
-        x = tf.keras.layers.concatenate([x, stage1_in])
-        x = self.stage1_conv5(x, training)
-        stage1_output = self.stage1_conv2(x, training)
+        x1 = tf.keras.layers.concatenate([up2, in1])
+        up1 = self.up1(x1)
+        out1 = self.s1_output(x1, training=training)
 
-        x = self.stage1_upsampling(x, training)
-
-        diff = x.shape[1] - stage0_in.shape[1]
+        diff = up1.shape[1] - in0.shape[1]
         if diff > 0:
-            stage0_in = self.pads[diff](stage0_in)
+            in0 = self.pads[diff](in0)
         if diff < 0:
-            x = self.pads[-diff](x)
+            up1 = self.pads[-diff](up1)
 
-        x = tf.keras.layers.concatenate([x, stage0_in])
-        x = self.stage0_conv5(x, training)
-        stage0_output = self.stage0_conv2(x, training)
+        x0 = tf.keras.layers.concatenate([up1, in0])
+        out0 = self.s0_output(x0, training=training)
 
-        return stage2_output, stage1_output, stage0_output
+        return out2, out1, out0
 
-class EfnYolo(tf.keras.layers.Layer):
-    def __init__(self, params, **kwargs):
-        super(EfnYolo, self).__init__(**kwargs)
+class Encoder(tf.keras.layers.Layer):
+    def __init__(self, params, num_classes, **kwargs):
+        super().__init__(**kwargs)
 
-        self.body = EfnBody(params)
-        self.head = EfnHead(params)
+        self.num_classes = num_classes
 
-        self.image_size = self.body.image_size
-        os = {
-                'efficientnet-b0': [7, 14, 28],
-                'efficientnet-b1': [8, 16, 32],
-                'efficientnet-b2': [9, 18, 36],
-                'efficientnet-b4': [12, 24, 48],
-                'efficientnet-b6': [17, 34, 68],
-        }
-        self.output_sizes = os.get(params.model_name, None)
+        self.body = features.FeatureExtractor(params)
+        self.head = Head(params, num_classes)
+
+        self.output_sizes = None
 
     def call(self, inputs, training):
         l = self.body(inputs, training)
@@ -212,7 +151,7 @@ class EfnYolo(tf.keras.layers.Layer):
         batch_size = tf.shape(inputs)[0]
         outputs = []
         for output in [f2, f1, f0]:
-            flat = tf.reshape(output, [batch_size, -1, 4+1])
+            flat = tf.reshape(output, [batch_size, -1, self.num_classes])
             outputs.append(flat)
 
         outputs = tf.concat(outputs, axis=1)
@@ -246,7 +185,7 @@ def create_params(model_name):
     return params
 
 
-def create_model(model_name):
+def create_model(model_name, num_classes):
     params = create_params(model_name)
-    model = EfnYolo(params)
+    model = Encoder(params, num_classes)
     return model

@@ -36,7 +36,7 @@ def draw_kp(ax, kp):
     kp = kp.reshape([-1, 2])
 
     for xy in kp:
-        cr = patches.Circle(xy, 10, color='r')
+        cr = patches.Circle(xy, 2, color='r')
         ax.add_artist(cr)
 
     poly = patches.Polygon(kp, fill=False)
@@ -57,25 +57,26 @@ def draw_im(im, ann, dst, cat_names):
 
     color_map = {}
     for bb, kp, c in ann:
-        bb = bb_hw(bb)
-
         color = color_map.get(c)
         if color is None:
             color = np.random.rand(3,)
             color_map[c] = color
 
-        draw_rect(ax, bb, color)
+        if bb:
+            bb = bb_hw(bb)
+            draw_rect(ax, bb, color)
 
         if kp is not None:
             draw_kp(ax, kp)
 
-        if type(c) == str:
-            draw_text(ax, bb[:2], c, sz=8)
-        else:
-            if c in cat_names:
-                draw_text(ax, bb[:2], cat_names[c], sz=16)
+        if c:
+            if type(c) == str:
+                draw_text(ax, bb[:2], c, sz=8)
             else:
-                draw_text(ax, bb[:2], str(c), sz=16)
+                if c in cat_names:
+                    draw_text(ax, bb[:2], cat_names[c], sz=16)
+                else:
+                    draw_text(ax, bb[:2], str(c), sz=16)
 
     plt.savefig(dst)
     plt.close(fig)

@@ -2,75 +2,88 @@ import logging
 
 import tensorflow as tf
 
-import yolo
-
 logger = logging.getLogger('detection')
 
-def box_iou(pred_boxes, valid_true_boxes):
-    '''
-    param:
-        pred_boxes: [13, 13, 3, 4], (center_x, center_y, w, h)
-        valid_true: [V, 4]
-    '''
+class Metric:
+    def __init__(self, **kwargs):
+        self.total_loss = tf.keras.metrics.Mean()
 
-    # [13, 13, 3, 2]
-    pred_box_xy = pred_boxes[..., 0:2]
-    pred_box_wh = pred_boxes[..., 2:4]
+        self.char_dist_loss = tf.keras.metrics.Mean()
+        self.word_dist_loss = tf.keras.metrics.Mean()
 
-    # shape: [13, 13, 3, 1, 2]
-    pred_box_xy = tf.expand_dims(pred_box_xy, -2)
-    pred_box_wh = tf.expand_dims(pred_box_wh, -2)
+        self.letters_accuracy = tf.keras.metrics.BinaryAccuracy()
 
-    # [V, 2]
-    true_box_xy = valid_true_boxes[..., 0:2]
-    true_box_wh = valid_true_boxes[..., 2:4]
+        self.char_obj_accuracy = tf.keras.metrics.BinaryAccuracy()
+        self.word_obj_accuracy = tf.keras.metrics.BinaryAccuracy()
 
-    # [13, 13, 3, 1, 2] & [V, 2] ==> [13, 13, 3, V, 2]
-    intersect_mins = tf.maximum(pred_box_xy - pred_box_wh / 2.,
-                                true_box_xy - true_box_wh / 2.)
-    intersect_maxs = tf.minimum(pred_box_xy + pred_box_wh / 2.,
-                                true_box_xy + true_box_wh / 2.)
-    intersect_wh = tf.maximum(intersect_maxs - intersect_mins, 0.)
+    def reset_states(self):
+        self.total_loss.reset_states()
 
-    # shape: [13, 13, 3, V]
-    intersect_area = intersect_wh[..., 0] * intersect_wh[..., 1]
-    # shape: [13, 13, 3, 1]
-    pred_box_area = pred_box_wh[..., 0] * pred_box_wh[..., 1]
-    # shape: [V]
-    true_box_area = true_box_wh[..., 0] * true_box_wh[..., 1]
-    # shape: [1, V]
-    true_box_area = tf.expand_dims(true_box_area, axis=0)
+        self.char_dist_loss.reset_states()
+        self.word_dist_loss.reset_states()
 
-    # [13, 13, 3, V]
-    iou = intersect_area / (pred_box_area + true_box_area - intersect_area + 1e-10)
+        self.letters_accuracy.reset_states()
 
-    return iou
+        self.char_obj_accuracy.reset_states()
+        self.word_obj_accuracy.reset_states()
 
+    def str_result(self):
+        return 'total_loss: {:.3e}, dist_loss: char: {:.3e}, word: {:.3e}, letters_accuracy: {:.4f}, obj_accuracy: char: {:.4f}, word: {:.4f}'.format(
+                self.total_loss.result(),
+                self.char_dist_loss.result(),
+                self.word_dist_loss.result(),
 
-class YOLOLoss:
+                self.letters_accuracy.result(),
+
+                self.char_obj_accuracy.result(),
+                self.word_obj_accuracy.result(),
+                )
+
+class LossMetricAggregator:
     def __init__(self,
-                 anchors,
+                 dictionary_size,
                  grid_xy,
-                 ratios,
-                 image_size,
-                 obj_scale=1.,
-                 noobj_scale=1.,
-                 dist_scale=1.,
+                 global_batch_size,
                  **kwargs):
 
         #super(YOLOLoss, self).__init__(**kwargs)
 
-        self.image_size = image_size
+        self.dictionary_size = dictionary_size
 
-        self.obj_scale = obj_scale
-        self.noobj_scale = noobj_scale
-        self.dist_scale = dist_scale
+        self.global_batch_size = global_batch_size
+
+        self.grid_xy = grid_xy
+
+        # [N, 2] -> [N, 1, 2]
+        self.grid_xy = tf.expand_dims(self.grid_xy, 1)
+        # [N, 1, 2] -> [N, 4, 2]
+        self.grid_xy = tf.tile(self.grid_xy, [1, 4, 1])
 
         # added batch dimension
-        self.grid_xy = tf.expand_dims(grid_xy, 0)
-        self.ratios = tf.expand_dims(ratios, 0)
-        self.ratios = tf.expand_dims(ratios, -1) # [B, N, 1]
-        self.anchors_wh = tf.expand_dims(anchors[..., :2], 0)
+        self.grid_xy = tf.expand_dims(self.grid_xy, 0)
+
+        self.mae = tf.keras.losses.MeanAbsoluteError(reduction=tf.keras.losses.Reduction.NONE)
+
+        self.train_metric = Metric(name='train_metric')
+        self.eval_metric = Metric(name='eval_metric')
+
+    def str_result(self, training):
+        m = self.train_metric
+        if not training:
+            m = self.eval_metric
+
+        return m.str_result()
+
+    def evaluation_result(self):
+        m = self.eval_metric
+        obj_acc = m.char_obj_accuracy.result() + m.word_obj_accuracy.result()
+        dist = tf.math.exp(-m.char_dist_loss.result()) + tf.math.exp(-m.word_dist_loss.result())
+
+        return obj_acc + dist
+
+    def reset_states(self):
+        self.train_metric.reset_states()
+        self.eval_metric.reset_states()
 
     def gen_ignore_mask(self, input_tuple, object_mask, true_bboxes):
         idx, pred_boxes_for_single_image = input_tuple
@@ -86,98 +99,96 @@ class YOLOLoss:
         focal_loss = alpha * tf.pow(tf.abs(y_true - y_pred), gamma)
         return focal_loss
 
-    def bbox_giou(self, boxes1, boxes2):
+    def loss(self, y_true, y_pred, training):
+        char_boundary_start = 0
+        word_boundary_start = self.dictionary_size + 1 + 4 * 2
 
-        boxes1 = tf.concat([boxes1[..., :2] - boxes1[..., 2:] * 0.5,
-                            boxes1[..., :2] + boxes1[..., 2:] * 0.5], axis=-1)
-        boxes2 = tf.concat([boxes2[..., :2] - boxes2[..., 2:] * 0.5,
-                            boxes2[..., :2] + boxes2[..., 2:] * 0.5], axis=-1)
+        # predicted tensors
+        pred_char = y_pred[..., char_boundary_start : char_boundary_start + word_boundary_start]
+        pred_word = y_pred[..., word_boundary_start : ]
 
-        boxes1 = tf.concat([tf.minimum(boxes1[..., :2], boxes1[..., 2:]),
-                            tf.maximum(boxes1[..., :2], boxes1[..., 2:])], axis=-1)
-        boxes2 = tf.concat([tf.minimum(boxes2[..., :2], boxes2[..., 2:]),
-                            tf.maximum(boxes2[..., :2], boxes2[..., 2:])], axis=-1)
+        pred_char_obj = pred_char[..., 0]
+        pred_char_poly = pred_char[..., 1 : 9]
+        pred_char_letters = pred_char[..., 10 :]
 
-        boxes1_area = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
-        boxes2_area = (boxes2[..., 2] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 1])
+        pred_word_obj = pred_word[..., 0]
+        pred_word_poly = pred_word[..., 1 : 9]
 
-        left_up = tf.maximum(boxes1[..., :2], boxes2[..., :2])
-        right_down = tf.minimum(boxes1[..., 2:], boxes2[..., 2:])
+        # true tensors
+        true_char = y_true[..., char_boundary_start : char_boundary_start + word_boundary_start]
+        true_word = y_true[..., word_boundary_start : ]
 
-        inter_section = tf.maximum(right_down - left_up, 0.0)
-        inter_area = inter_section[..., 0] * inter_section[..., 1]
-        union_area = boxes1_area + boxes2_area - inter_area
-        iou = inter_area / union_area
+        true_char_obj = true_char[..., 0]
+        true_char_poly = true_char[..., 1 : 9]
+        true_char_letters = true_char[..., 10 :]
 
-        enclose_left_up = tf.minimum(boxes1[..., :2], boxes2[..., :2])
-        enclose_right_down = tf.maximum(boxes1[..., 2:], boxes2[..., 2:])
-        enclose = tf.maximum(enclose_right_down - enclose_left_up, 0.0)
-        enclose_area = enclose[..., 0] * enclose[..., 1]
-        giou = iou - 1.0 * (enclose_area - union_area) / enclose_area
+        true_word_obj = true_word[..., 0]
+        true_word_poly = true_word[..., 1 : 9]
 
-        return giou
+        char_object_mask = tf.cast(true_char_obj, 'bool')
+        word_object_mask = tf.cast(true_word_obj, 'bool')
 
 
-    def call(self, y_true, y_pred):
-        object_mask = tf.expand_dims(y_true[..., 4], -1)
-        true_conf = object_mask
+        pred_char_obj = tf.boolean_mask(pred_char_obj, char_object_mask)
+        pred_char_poly = tf.boolean_mask(pred_char_poly, char_object_mask)
+        pred_char_letters = tf.boolean_mask(pred_char_letters, char_object_mask)
 
-        #sigmoid(t_xy) + c_xy
-        pred_box_xy = self.grid_xy + tf.sigmoid(y_pred[..., :2])
-        pred_box_xy = pred_box_xy * self.ratios
-
-        pred_wh = tf.clip_by_value(y_pred[..., 2:4], -7, 7)
-        pred_box_wh = tf.math.exp(pred_wh) * self.anchors_wh
-
-        # confidence/objectiveness
-        pred_box_conf = tf.expand_dims(y_pred[..., 4], -1)
-        pred_box_conf_prob = tf.sigmoid(pred_box_conf)
-
-        true_xy = (y_true[..., 0:2] + self.grid_xy) * self.ratios
-        true_wh = tf.math.exp(y_true[..., 2:4]) * self.anchors_wh
-
-        pred_bboxes = tf.concat([pred_box_xy, pred_box_wh], axis=-1)
-        true_bboxes = tf.concat([true_xy, true_wh], axis=-1)
+        pred_word_obj = tf.boolean_mask(pred_word_obj, word_object_mask)
+        pred_word_poly = tf.boolean_mask(pred_word_poly, word_object_mask)
 
 
+        true_char_obj = tf.boolean_mask(true_char_obj, char_object_mask)
+        true_char_poly = tf.boolean_mask(true_char_poly, char_object_mask)
+        true_char_letters = tf.boolean_mask(true_char_letters, char_object_mask)
 
-        wh_scale = true_wh / self.image_size
-        # the smaller the box, the bigger the scale
-        wh_scale = tf.expand_dims(2 - wh_scale[..., 0] * wh_scale[..., 1], axis=-1)
+        true_word_obj = tf.boolean_mask(true_word_obj, word_object_mask)
+        true_word_poly = tf.boolean_mask(true_word_poly, word_object_mask)
 
-        giou = tf.expand_dims(self.bbox_giou(pred_bboxes, true_bboxes), axis=-1)
-        dist_loss = 1 - giou
-        dist_loss = dist_loss * wh_scale * object_mask
-        dist_loss = tf.reduce_sum(dist_loss, [1, 2])
-
-
-        smooth_true_conf = true_conf
-        if True:
-            delta = 0.04
-            smooth_true_conf = (1 - delta) * true_conf + delta / 2 # 2 - is number of classes for objectness
+        m = self.train_metric
+        if not training:
+            m = self.eval_metric
 
 
+        # losses
 
-        ignore_mask = tf.map_fn(lambda t: self.gen_ignore_mask(t, object_mask, true_bboxes),
-                            (tf.range(tf.shape(pred_bboxes)[0]), pred_bboxes),
-                            parallel_iterations=32,
-                            back_prop=True,
-                            dtype=(tf.float32))
-        # shape: [B, N, 1]
-        ignore_mask = tf.expand_dims(ignore_mask, -1)
+        # distance loss
+        char_dist_loss = self.mae(true_char_poly, pred_char_poly)
+        word_dist_loss = self.mae(true_word_poly, pred_word_poly)
 
+        m.char_dist_loss.update_state(char_dist_loss)
+        m.word_dist_loss.update_state(word_dist_loss)
 
-        conf_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_conf, logits=pred_box_conf)
-
-        focal_conf_loss = self.focal_loss(y_true=true_conf, y_pred=pred_box_conf_prob)
-        conf_loss *= focal_conf_loss
-
-        conf_loss_pos = object_mask * conf_loss
-        conf_loss_pos = tf.reduce_sum(conf_loss_pos, [1, 2])
-
-        conf_loss_neg = (1 - object_mask) * conf_loss * ignore_mask
-        conf_loss_neg = tf.reduce_sum(conf_loss_neg, [1, 2])
+        char_dist_loss = tf.reduce_mean(char_dist_loss)
+        word_dist_loss = tf.reduce_mean(word_dist_loss)
+        dist_loss = char_dist_loss + word_dist_loss
 
 
-        total_loss = dist_loss * self.dist_scale, conf_loss_pos * self.obj_scale, conf_loss_neg * self.noobj_scale
+        # obj CE loss
+        delta = 0.05
+        n = 2 # 2 - is number of classes for objectness
+        smooth_true_char_obj = (1 - delta) * true_char_obj + delta / n
+        smooth_true_word_obj = (1 - delta) * true_word_obj + delta / n
+
+        char_obj_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_char_obj, logits=pred_char_obj)
+        word_obj_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_word_obj, logits=pred_word_obj)
+        m.char_obj_accuracy.update_state(true_char_obj, pred_char_obj)
+        m.word_obj_accuracy.update_state(true_word_obj, pred_word_obj)
+
+        char_obj_loss = tf.reduce_mean(char_obj_loss)
+        word_obj_loss = tf.reduce_mean(word_obj_loss)
+        obj_loss = char_obj_loss + word_obj_loss
+
+        # char CE loss
+        delta = 0.05
+        smooth_true_char_letters = (1 - delta) * true_char_letters + delta / self.dictionary_size
+
+        letters_ce_loss_per_class = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_char_letters, logits=pred_char_letters)
+        letters_ce_loss = tf.reduce_sum(letters_ce_loss_per_class, -1)
+        letters_ce_loss = tf.expand_dims(letters_ce_loss, -1)
+        m.letters_accuracy.update_state(true_char_letters, pred_char_letters)
+
+        letters_ce_loss = tf.reduce_mean(letters_ce_loss_per_class)
+        total_loss = dist_loss + obj_loss + letters_ce_loss
+        m.total_loss.update_state(total_loss)
+
         return total_loss

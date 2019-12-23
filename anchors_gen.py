@@ -3,8 +3,6 @@ import logging
 import numpy as np
 import tensorflow as tf
 
-import loss
-
 logger = logging.getLogger('detection')
 
 
@@ -20,6 +18,16 @@ def create_anchors():
     areas = anchors[:, 0] * anchors[:, 1]
 
     return anchors, areas
+
+def create_xy_grid(batch_size, output_size, anchors_per_scale):
+    y = tf.tile(tf.range(output_size, dtype=tf.int32)[:, tf.newaxis], [1, output_size])
+    x = tf.tile(tf.range(output_size, dtype=tf.int32)[tf.newaxis, :], [output_size, 1])
+
+    xy_grid = tf.concat([x[:, :, tf.newaxis], y[:, :, tf.newaxis]], axis=-1)
+    xy_grid = tf.tile(xy_grid[tf.newaxis, :, :, tf.newaxis, :], [batch_size, 1, 1, anchors_per_scale, 1])
+    xy_grid = tf.cast(xy_grid, tf.float32)
+
+    return xy_grid
 
 def generate_anchors(image_size, output_sizes):
         num_scales = 3
@@ -48,11 +56,13 @@ def generate_anchors(image_size, output_sizes):
             output_xy_grids.append(anchors_xy_flat)
 
             anchors_xy_centers = anchors_xy + 0.5 # centers
-            anchors_xy_centers *= ratio
+            #anchors_xy_centers *= ratio
+            anchors_xy *= ratio
             ratios = tf.tile([ratio], [tf.shape(anchors_xy_flat)[0]])
             output_ratios.append(ratios)
 
-            anchors_for_layer = tf.concat([anchors_xy_centers, anchors_wh], axis=-1)
+            #anchors_for_layer = tf.concat([anchors_xy_centers, anchors_wh], axis=-1)
+            anchors_for_layer = tf.concat([anchors_xy, anchors_wh], axis=-1)
 
             anchors_flat = tf.reshape(anchors_for_layer, [-1, 4])
 
@@ -65,86 +75,117 @@ def generate_anchors(image_size, output_sizes):
 
         return anchors_all, output_xy_grids, output_ratios
 
-def create_xy_grid(batch_size, output_size, anchors_per_scale):
-    y = tf.tile(tf.range(output_size, dtype=tf.int32)[:, tf.newaxis], [1, output_size])
-    x = tf.tile(tf.range(output_size, dtype=tf.int32)[tf.newaxis, :], [output_size, 1])
+def box_iou(pred_boxes, valid_true_boxes):
+    '''
+    param:
+        pred_boxes: [N, 4], (xmin, ymin, xmax, ymax)
+        valid_true_boxes: [V, 4], (xmin, ymin, w, h)
+    '''
 
-    xy_grid = tf.concat([x[:, :, tf.newaxis], y[:, :, tf.newaxis]], axis=-1)
-    xy_grid = tf.tile(xy_grid[tf.newaxis, :, :, tf.newaxis, :], [batch_size, 1, 1, anchors_per_scale, 1])
-    xy_grid = tf.cast(xy_grid, tf.float32)
+    # [N, 2]
+    pred_box_min = pred_boxes[..., 0:2]
+    pred_box_max = pred_boxes[..., 2:4]
 
-    return xy_grid
+    # [N, 1, 2]
+    pred_box_min = tf.expand_dims(pred_box_min, -2)
+    pred_box_max = tf.expand_dims(pred_box_max, -2)
 
-    pred_xy = (tf.sigmoid(conv_raw_dxdy) + xy_grid) * stride
-    pred_wh = (tf.exp(conv_raw_dwdh) * anchors) * stride
-    pred_xywh = tf.concat([pred_xy, pred_wh], axis=-1)
+    # [V, 2]
+    true_box_xy = valid_true_boxes[..., 0:2]
+    true_box_wh = valid_true_boxes[..., 2:4]
 
-def generate_true_values_for_anchors(orig_bboxes, orig_texts, anchors_all, output_xy_grids, output_ratios, image_size):
-    orig_bboxes = tf.convert_to_tensor(orig_bboxes, dtype=tf.float32)
+    # [N, 1, 2] & [V, 2] -> [N, V, 2]
+    intersect_mins = tf.maximum(pred_box_min, true_box_xy)
+    intersect_maxs = tf.minimum(pred_box_max, true_box_xy + true_box_wh)
+    intersect_wh = tf.maximum(intersect_maxs - intersect_mins, 0)
 
-    #num_examples = 9
-    #orig_bboxes = tf.zeros([num_examples, 4], dtype=tf.float32)
+    # [N, V]
+    intersect_area = intersect_wh[..., 0] * intersect_wh[..., 1]
 
-    num_scales = 3
-    num_boxes = 3
+    # [N, 2]
+    pred_box_diff = pred_box_max - pred_box_min
 
-    ious = loss.box_iou(orig_bboxes, anchors_all)
-    #logger.info('ious: {}, orig_bboxes: {}, anchors_all: {}, output_xy_grids: {}, output_ratios: {}'.format(
-    #    ious.shape, orig_bboxes.shape, anchors_all.shape, output_xy_grids.shape, output_ratios.shape))
+    # [N]
+    pred_box_area = pred_box_diff[..., 0] * pred_box_diff[..., 1]
 
-    #tf.print('bboxes:', orig_bboxes)
+    # [V]
+    true_box_area = true_box_wh[..., 0] * true_box_wh[..., 1]
+    # [1, V]
+    true_box_area = tf.expand_dims(true_box_area, axis=0)
+
+    # [N, V]
+    iou = intersect_area / (pred_box_area + true_box_area - intersect_area + 1e-10)
+
+    return iou
+
+def polygon2bbox(poly):
+    # polygon shape [N, 4, 2]
+
+    x = poly[..., 0]
+    y = poly[..., 1]
+
+    xmin = tf.math.reduce_min(x, axis=1)
+    ymin = tf.math.reduce_min(y, axis=1)
+    xmax = tf.math.reduce_max(x, axis=1)
+    ymax = tf.math.reduce_max(y, axis=1)
+
+    bbox = tf.stack([xmin, ymin, xmax, ymax], 1)
+    return bbox
+
+def find_bbox_anchor_for_poly(poly, anchors_all):
+    # [N, 4, 2]
+    bboxes = polygon2bbox(poly)
+
+    ious = box_iou(bboxes, anchors_all)
+    logger.info('ious: {}, bboxes: {}, anchors_all: {}'.format(
+        ious.shape, bboxes.shape, anchors_all.shape))
 
     best_anchors_index = tf.argmax(ious, 1)
-    #tf.print('best_anchors_index:', best_anchors_index)
+
+    # grid's shape [N, 2]
+    best_anchors = tf.gather(anchors_all[..., :2], best_anchors_index)
+
+    # [N, 2] -> [N, 1, 2]
+    best_anchors = tf.expand_dims(best_anchors, 1)
+
+    # [N, 1, 2] -> [N, 4, 2]
+    best_anchors = tf.tile(best_anchors, [1, 4, 1])
+
+    # [N, 4, 2] - [N, 4, 2]
+    poly_for_loss = poly - best_anchors
+
+    # [N, 4, 2] -> [N, 8]
+    poly_for_loss = tf.reshape(poly_for_loss, [-1, 8])
+    return poly_for_loss, best_anchors_index
+
+def generate_true_values_for_anchors(char_poly, word_poly, encoded_chars, anchors_all, dictionary_size):
+    # input polygon shape [N, 4, 2]
+    # output polygon shape [N, 4, 2]
+    char_poly_for_loss, char_index = find_bbox_anchor_for_poly(char_poly, anchors_all)
+    word_poly_for_loss, word_index = find_bbox_anchor_for_poly(word_poly, anchors_all)
+
+    encoded_chars_for_loss = tf.one_hot(encoded_chars, dictionary_size)
+
+    char_objs = tf.ones((tf.shape(char_poly_for_loss)[0], 1))
+    word_objs = tf.ones((tf.shape(word_poly_for_loss)[0], 1))
+
+    char_idx = tf.expand_dims(char_index, 1)
+    word_idx = tf.expand_dims(word_index, 1)
+
+    char_dims = dictionary_size + 2*4 + 1
+    word_dims = 2*4 + 1
+    output_dims = char_dims + word_dims
+
     num_anchors = anchors_all.shape[0]
+    output = tf.zeros((num_anchors, output_dims))
 
-    true_values_for_loss = tf.zeros([num_anchors, 4 + 1 + 1])
-    true_values_abs = tf.zeros([num_anchors, 4 + 1 + 1])
+    char_values_for_loss = tf.concat([char_objs, char_poly_for_loss, encoded_chars_for_loss], axis=1)
+    char_values_for_loss = tf.pad(char_values_for_loss, [[0, 0], [0, output_dims - tf.shape(char_values_for_loss)[1]]])
 
-    best_anchors = tf.gather(anchors_all, best_anchors_index) # [N, 4]
-    best_xy_grids = tf.gather(output_xy_grids, best_anchors_index) # [N, 2]
-    best_ratios = tf.gather(output_ratios, best_anchors_index)
-    best_ratios = tf.expand_dims(best_ratios, 1) # [N, 1]
+    word_values_for_loss = tf.concat([word_objs, word_poly_for_loss], axis=1)
+    word_values_for_loss = tf.pad(word_values_for_loss, [[0, 0], [output_dims - tf.shape(word_values_for_loss)[1], 0]])
 
-    #logger.info('best_anchors_index: {}, best_anchors: {}, best_xy_grids: {}, best_ratios: {}'.format(best_anchors_index.shape, best_anchors.shape, best_xy_grids.shape, best_ratios.shape))
+    output = tf.tensor_scatter_nd_update(output, char_idx, char_values_for_loss)
+    output = tf.tensor_scatter_nd_update(output, word_idx, word_values_for_loss)
 
-    cx, cy, w, h = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
-
-    _, _, aw, ah = tf.split(best_anchors, num_or_size_splits=4, axis=1)
-    w_for_loss = tf.math.log(tf.maximum(w, 1) / aw)
-    h_for_loss = tf.math.log(tf.maximum(h, 1) / ah)
-
-    #tf.print('bboxes:', orig_bboxes, 'grid:', best_xy_grids, 'ratio:', best_ratios, 'best_anchors:', best_anchors)
-
-    grid_x, grid_y = tf.split(best_xy_grids, num_or_size_splits=2, axis=1)
-    # this is offset within a cell on the particular scale measured in relative to this scale units
-    # this is what sigmoid(pred_xy) should be equal to
-    # loss will use tf.nn.sigmoid_cross_entropy_with_logits() to match logits (Tx, Ty) to these true values, otherwise true value should've been logit() (aka reverse sigmoid)
-    x_for_loss = cx / best_ratios - grid_x
-    y_for_loss = cy / best_ratios - grid_y
-
-    #tf.print('x_for_loss:', x_for_loss)
-    #logger.info('cx: {}, grid_x: {}, x_for_loss: {}, aw: {}, w: {}, w_for_loss: {}'.format(cx.shape, grid_x.shape, x_for_loss.shape, aw.shape, w.shape, w_for_loss.shape))
-
-    bboxes_for_loss = tf.concat([x_for_loss, y_for_loss, w_for_loss, h_for_loss], axis=1)
-    objs_for_loss = tf.ones_like(x_for_loss)
-    has_text_for_loss = tf.where(tf.not_equal(orig_texts, '<SKIP>'), 1., 0.)
-    has_text_for_loss = tf.expand_dims(has_text_for_loss, 1)
-    values_for_loss = tf.concat([bboxes_for_loss, objs_for_loss, has_text_for_loss], axis=1)
-
-    update_idx = tf.expand_dims(best_anchors_index, 1)
-
-    logger.info('update true_values: bboxes: {}, objs: {}, values: {}, update_idx: {}'.format(
-        bboxes_for_loss.shape, objs_for_loss.shape, values_for_loss.shape, update_idx.shape))
-    output = tf.tensor_scatter_nd_update(true_values_for_loss, update_idx, values_for_loss)
-
-    true_texts = tf.constant('<SKIP>')
-    true_texts = tf.expand_dims(true_texts, 0)
-    true_texts = tf.tile(true_texts, [num_anchors])
-    true_texts = tf.expand_dims(true_texts, 1)
-
-    update_labels = tf.expand_dims(orig_texts, 1)
-    true_texts = tf.tensor_scatter_nd_update(true_texts, update_idx, update_labels)
-    true_texts = tf.squeeze(true_texts, 1)
-
-    return output, true_texts
+    return output
