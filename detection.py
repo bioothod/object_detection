@@ -6,7 +6,6 @@ import sys
 
 import numpy as np
 import tensorflow as tf
-from tensorflow.python.client import device_lib
 
 logger = logging.getLogger('detection')
 
@@ -139,8 +138,6 @@ def draw_bboxes(image_size, train_dataset, num_examples, all_anchors, dictionary
     data_dir = os.path.join(FLAGS.train_dir, 'tmp')
     os.makedirs(data_dir, exist_ok=True)
 
-    all_anchors = all_anchors.numpy()
-
     for filename, image, true_values in train_dataset.unbatch().take(num_examples):
         filename = str(filename.numpy(), 'utf8')
         filename_base = os.path.basename(filename)
@@ -171,9 +168,6 @@ def draw_bboxes(image_size, train_dataset, num_examples, all_anchors, dictionary
         char_poly = tf.reshape(char_poly, [-1, 4, 2])
         word_poly = tf.gather(true_word_poly, word_index).numpy()
         word_poly = tf.reshape(word_poly, [-1, 4, 2])
-
-        char_poly = char_poly.numpy()
-        word_poly = word_poly.numpy()
 
         best_anchors = tf.gather(all_anchors[..., :2], char_index)
         best_anchors = tf.expand_dims(best_anchors, 1)
