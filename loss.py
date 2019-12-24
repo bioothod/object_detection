@@ -125,6 +125,11 @@ class LossMetricAggregator:
         true_word_obj = true_word[..., 0]
         true_word_poly = true_word[..., 1 : 9]
 
+        true_char_obj_whole = true_char_obj
+        pred_char_obj_whole = pred_char_obj
+        true_word_obj_whole = true_word_obj
+        pred_word_obj_whole = pred_word_obj
+
         char_object_mask = tf.cast(true_char_obj, 'bool')
         word_object_mask = tf.cast(true_word_obj, 'bool')
 
@@ -166,11 +171,11 @@ class LossMetricAggregator:
         # obj CE loss
         delta = 0.05
         n = 2 # 2 - is number of classes for objectness
-        smooth_true_char_obj = (1 - delta) * true_char_obj + delta / n
-        smooth_true_word_obj = (1 - delta) * true_word_obj + delta / n
+        smooth_true_char_obj = (1 - delta) * true_char_obj_whole + delta / n
+        smooth_true_word_obj = (1 - delta) * true_word_obj_whole + delta / n
 
-        char_obj_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_char_obj, logits=pred_char_obj)
-        word_obj_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_word_obj, logits=pred_word_obj)
+        char_obj_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_char_obj, logits=pred_char_obj_whole)
+        word_obj_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_word_obj, logits=pred_word_obj_whole)
         m.char_obj_accuracy.update_state(true_char_obj, pred_char_obj)
         m.word_obj_accuracy.update_state(true_word_obj, pred_word_obj)
 
