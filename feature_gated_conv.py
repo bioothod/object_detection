@@ -85,10 +85,13 @@ class FeatureExtractor(tf.keras.layers.Layer):
         self.c4 = TextConv(params, 64, kernel_size=(2, 4), strides=(2, 2))
         self.g4 = GatedTextConv(params, 64, kernel_size=3, strides=1)
 
-        self.c5 = TextConv(params, 72, kernel_size=(3, 3), strides=(2, 2))
+        self.c5 = TextConv(params, 72, kernel_size=(3, 3), strides=(1, 1))
         self.g5 = GatedTextConv(params, 72, kernel_size=3, strides=1)
 
-        self.c6 = TextConv(params, 88, kernel_size=(3, 3), strides=(1, 1))
+        self.c6 = TextConv(params, 80, kernel_size=(3, 3), strides=(2, 2))
+        self.g6 = GatedTextConv(params, 80, kernel_size=3, strides=1)
+
+        self.c7 = TextConv(params, 88, kernel_size=(3, 3), strides=(1, 1))
 
         self.max_pooling = tf.keras.layers.MaxPooling2D((2, 2))
 
@@ -107,13 +110,16 @@ class FeatureExtractor(tf.keras.layers.Layer):
 
         x = self.c4(x, training=training)
         x = self.g4(x, training=training)
-        out0 = x
 
         x = self.c5(x, training=training)
         x = self.g5(x, training=training)
-        out1 = x
+        out0 = x
 
         x = self.c6(x, training=training)
+        x = self.g6(x, training=training)
+        out1 = x
+
+        x = self.c7(x, training=training)
         x = self.max_pooling(x, training=training)
         out2 = x
 
