@@ -406,10 +406,11 @@ def train():
 
             step = 0
             def log_progress():
-                logger.info('{}: {}: step: {}/{}, {}'.format(
-                    name, int(epoch_var.numpy()), step, max_steps,
-                    metric.str_result(True),
-                    ))
+                if name == 'train':
+                    logger.info('{}: {}: step: {}/{}, {}'.format(
+                        name, int(epoch_var.numpy()), step, max_steps,
+                        metric.str_result(True),
+                        ))
 
             for filenames, images, true_values in dataset:
                 # In most cases, the default data format NCHW instead of NHWC should be
@@ -433,6 +434,7 @@ def train():
                     break
 
             log_progress()
+
             return step
 
         best_metric = 0
@@ -463,6 +465,7 @@ def train():
             num_replicas, checkpoint_dir, FLAGS.model_name, image_size,
             num_vars, int(num_params)))
 
+        learning_rate.assign(FLAGS.initial_learning_rate)
         for epoch in range(FLAGS.epoch, FLAGS.num_epochs):
             epoch_var.assign(epoch)
 

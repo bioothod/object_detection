@@ -28,7 +28,7 @@ class Metric:
         self.word_obj_accuracy.reset_states()
 
     def str_result(self):
-        return 'total_loss: {:.3e}, dist_loss: char: {:.3e}, word: {:.3e}, letters_accuracy: {:.4f}, obj_accuracy: char: {:.4f}, word: {:.4f}'.format(
+        return 'total_loss: {:.3e}, dist_loss: {:.3e}/{:.3e}, letters_accuracy: {:.4f}, obj_accuracy: {:.4f}/{:.4f}'.format(
                 self.total_loss.result(),
                 self.char_dist_loss.result(),
                 self.word_dist_loss.result(),
