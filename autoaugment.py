@@ -685,7 +685,7 @@ def distort_image_with_randaugment(image, num_layers, magnitude):
     available_ops = [
         'AutoContrast', 'Equalize', 'Invert', 'Posterize',
         'Solarize', 'Color', 'Contrast', 'Brightness', 'Sharpness',
-        'Cutout', 'SolarizeAdd']
+        'SolarizeAdd']
 
     for layer_num in range(num_layers):
         op_to_select = tf.random.uniform([], maxval=len(available_ops), dtype=tf.int32)
