@@ -68,6 +68,9 @@ def tf_read_image(filename, image_size, dtype):
     image = tf.image.resize(image, [image_size, image_size])
     image = tf.cast(image, dtype)
 
+    image -= 128
+    image /= 128
+
     return filename, image
 
 def tf_left_needed_dimensions_from_tfrecord(image_size, anchors_all, filename, image, true_values, dictionary_size):
@@ -267,7 +270,8 @@ def per_image_supression(pred_values, image_size, dictionary_size, all_anchors):
     char_letters = tf.gather(char_letters, selected_indexes)
     char_letters_prob = tf.gather(char_letters_prob, selected_indexes)
 
-    scores_to_sort = char_obj * char_letters_prob
+    #scores_to_sort = char_obj * char_letters_prob
+    scores_to_sort = char_obj
     scores_to_sort = tf.squeeze(scores_to_sort, 1)
     _, best_index = tf.math.top_k(scores_to_sort, tf.minimum(FLAGS.max_ret, tf.shape(scores_to_sort)[0]), sorted=True)
 
@@ -353,7 +357,7 @@ def run_eval(model, dataset, image_size, dst_dir, all_anchors, dictionary_size, 
                 ann_js = {
                     'poly': poly.tolist(),
                     'letter': letter,
-                    'objectness': obj,
+                    'objectness': float(obj),
                 }
 
                 anns.append((None, poly, None))
@@ -388,8 +392,7 @@ def run_inference():
     dtype = tf.float32
     image_size = FLAGS.image_size
     dictionary_size = len(FLAGS.dictionary) + 1
-    num_classes = 1 + 2*4 + dictionary_size + 1 + 2*4
-    model = encoder.create_model(FLAGS.model_name, num_classes)
+    model = encoder.create_model(FLAGS.model_name, dictionary_size)
     if model.output_sizes is None:
         dummy_input = tf.ones((int(FLAGS.batch_size), image_size, image_size, 3), dtype=dtype)
         model(dummy_input, training=False)
