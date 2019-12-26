@@ -3,6 +3,8 @@ import logging
 
 import tensorflow as tf
 
+import darknet
+import encoder_efficientnet as efn_encoder
 import feature_gated_conv as features
 
 logger = logging.getLogger('detection')
@@ -11,7 +13,8 @@ GlobalParams = collections.namedtuple('GlobalParams', [
     'batch_norm_momentum', 'batch_norm_epsilon', 'data_format',
     'relu_fn',
     'l2_reg_weight', 'spatial_dims', 'channel_axis', 'model_name',
-    'obj_score_threshold', 'lstm_dropout', 'spatial_dropout'
+    'obj_score_threshold', 'lstm_dropout', 'spatial_dropout',
+    'dictionary_size'
 ])
 
 GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
@@ -56,13 +59,37 @@ class EncoderConv(tf.keras.layers.Layer):
 
         return x
 
-class OutputConv2(tf.keras.layers.Layer):
+class EncoderConv5(tf.keras.layers.Layer):
     def __init__(self, params, filters, **kwargs):
         super().__init__(**kwargs)
 
-        self.conv0 = EncoderConv(params, filters[0], kernel_size=(3, 3), strides=(1, 1), padding='SAME')
-        self.conv1 = tf.keras.layers.Conv2D(
-                filters[1],
+        self.conv0 = EncoderConv(params, filters[0], kernel_size=(1, 1), strides=(1, 1), padding='SAME')
+        self.conv1 = EncoderConv(params, filters[1], kernel_size=(3, 3), strides=(1, 1), padding='SAME')
+        self.conv2 = EncoderConv(params, filters[2], kernel_size=(1, 1), strides=(1, 1), padding='SAME')
+        self.conv3 = EncoderConv(params, filters[3], kernel_size=(3, 3), strides=(1, 1), padding='SAME')
+        self.conv4 = EncoderConv(params, filters[4], kernel_size=(1, 1), strides=(1, 1), padding='SAME')
+
+    def call(self, input_tensor, training):
+        x = self.conv0(input_tensor, training)
+        x = self.conv1(x, training)
+        x = self.conv2(x, training)
+        x = self.conv3(x, training)
+        x = self.conv4(x, training)
+        return x
+
+class HeadLayer(tf.keras.layers.Layer):
+    def __init__(self, params, num_features, num_outputs, **kwargs):
+        super().__init__(**kwargs)
+        self.relu_fn = params.relu_fn or local_swish
+
+        self.conv0 = EncoderConv(params, num_features, kernel_size=(3, 3), strides=(1, 1), padding='SAME')
+
+        self.outputs = []
+        for n in num_outputs:
+            n *= 3
+
+            out = tf.keras.layers.Conv2D(
+                n,
                 kernel_size=(1, 1),
                 strides=(1, 1),
                 data_format=params.data_format,
@@ -70,10 +97,38 @@ class OutputConv2(tf.keras.layers.Layer):
                 padding='SAME',
                 kernel_initializer='glorot_uniform')
 
+            self.outputs.append(out)
+
+    def call(self, input_tensor, training):
+        x = self.conv0(input_tensor, training=training)
+
+        outputs = []
+        for f in self.outputs:
+            out = f(x)
+            outputs.append(out)
+
+        return outputs
+
+class OutputLayer(tf.keras.layers.Layer):
+    def __init__(self, params, input_filters, **kwargs):
+        super().__init__(**kwargs)
+
+        char_features = [1, 2*4, params.dictionary_size]
+        word_features = [1, 2*4]
+
+        self.conv0 = EncoderConv(params, input_filters, kernel_size=(3, 3), strides=(1, 1), padding='SAME')
+
+        self.char_output = HeadLayer(params, input_filters, char_features)
+        self.word_output = HeadLayer(params, input_filters, word_features)
+
     def call(self, input_tensor, training):
         x = self.conv0(input_tensor, training)
-        x = self.conv1(x)
-        return x
+
+        char_out = self.char_output(x, training=training)
+        word_out = self.word_output(x, training=training)
+
+        outputs = tf.concat(char_out + word_out, -1)
+        return outputs
 
 class DarknetUpsampling(tf.keras.layers.Layer):
     def __init__(self, params, num_features, **kwargs):
@@ -89,26 +144,29 @@ class DarknetUpsampling(tf.keras.layers.Layer):
         return x
 
 class Head(tf.keras.layers.Layer):
-    def __init__(self, params, num_classes, **kwargs):
+    def __init__(self, params, **kwargs):
         super().__init__(**kwargs)
 
-        num_features = 3 * num_classes
+        self.s2_input = EncoderConv5(params, [512, 1024, 512, 1024, 512])
+        self.s2_output = OutputLayer(params, 512, name="detection_layer_2")
+        self.up2 = DarknetUpsampling(params, 512)
 
-        self.s2_output = OutputConv2(params, [128, num_features], name="detection_layer_2")
-        self.up2 = DarknetUpsampling(params, 128)
+        self.s1_input = EncoderConv5(params, [256, 512, 256, 512, 256])
+        self.s1_output = OutputLayer(params, 256, name="detection_layer_1")
+        self.up1 = DarknetUpsampling(params, 256)
 
-        self.s1_output = OutputConv2(params, [64, num_features], name="detection_layer_1")
-        self.up1 = DarknetUpsampling(params, 64)
-
-        self.s0_output = OutputConv2(params, [32, num_features], name="detection_layer_0")
+        self.s0_input = EncoderConv5(params, [128, 256, 128, 256, 128])
+        self.s0_output = OutputLayer(params, 128, name="detection_layer_0")
 
         self.pads = [None]
         for pad in [1, 2, 3, 4, 5, 6]:
             self.pads.append(tf.keras.layers.ZeroPadding2D(((0, pad), (0, pad))))
 
     def call(self, in0, in1, in2, training=True):
-        up2 = self.up2(in2)
-        out2 = self.s2_output(in2, training=training)
+        x2 = in2
+        x2 = self.s2_input(x2)
+        up2 = self.up2(x2)
+        out2 = self.s2_output(x2, training=training)
 
         diff = up2.shape[1] - in1.shape[1]
         if diff > 0:
@@ -117,6 +175,7 @@ class Head(tf.keras.layers.Layer):
             up2 = self.pads[-diff](up2)
 
         x1 = tf.keras.layers.concatenate([up2, in1])
+        x1 = self.s1_input(x1)
         up1 = self.up1(x1)
         out1 = self.s1_output(x1, training=training)
 
@@ -127,18 +186,27 @@ class Head(tf.keras.layers.Layer):
             up1 = self.pads[-diff](up1)
 
         x0 = tf.keras.layers.concatenate([up1, in0])
+        x0 = self.s0_input(x0)
         out0 = self.s0_output(x0, training=training)
 
         return out2, out1, out0
 
 class Encoder(tf.keras.layers.Layer):
-    def __init__(self, params, num_classes, **kwargs):
+    def __init__(self, params, **kwargs):
         super().__init__(**kwargs)
 
-        self.num_classes = num_classes
+        self.num_classes = 1 + 2*4 + params.dictionary_size + 1 + 2*4
 
-        self.body = features.FeatureExtractor(params)
-        self.head = Head(params, num_classes)
+        if params.model_name.startswith('darknet'):
+            self.body = darknet.DarknetBody(params)
+        elif params.model_name.startswith('gated_conv'):
+            self.body = features.FeatureExtractor(params)
+        elif params.model_name.startswith('efficientnet-'):
+            self.body = efn_encoder.EfnBody(params)
+        else:
+            raise NameError('unsupported model name {}'.format(params.model_name))
+
+        self.head = Head(params)
 
         self.output_sizes = None
 
@@ -157,7 +225,7 @@ class Encoder(tf.keras.layers.Layer):
         outputs = tf.concat(outputs, axis=1)
         return outputs
 
-def create_params(model_name):
+def create_params(model_name, dictionary_size):
     data_format='channels_last'
 
     if data_format == 'channels_first':
@@ -178,6 +246,7 @@ def create_params(model_name):
         'obj_score_threshold': 0.3,
         'lstm_dropout': 0.3,
         'spatial_dropout': 0.3,
+        'dictionary_size': dictionary_size,
     }
 
     params = GlobalParams(**params)
@@ -185,7 +254,7 @@ def create_params(model_name):
     return params
 
 
-def create_model(model_name, num_classes):
-    params = create_params(model_name)
-    model = Encoder(params, num_classes)
+def create_model(model_name, dictionary_size):
+    params = create_params(model_name, dictionary_size)
+    model = Encoder(params)
     return model
