@@ -16,7 +16,6 @@ import encoder
 import image as image_draw
 import loss
 import preprocess_ssd
-import yolo
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch.')
@@ -112,13 +111,60 @@ def unpack_tfrecord(record, anchors_all, image_size, dictionary_size, dict_table
     if is_training:
         if FLAGS.use_random_augmentation:
             randaug_num_layers = 2
-            randaug_magnitude = 28
+            randaug_magnitude = 2
 
+            image = tf.cast(image, tf.uint8)
             image = autoaugment.distort_image_with_randaugment(image, randaug_num_layers, randaug_magnitude)
+
+        if tf.random.uniform([]) >= 0.5:
+            cx = char_poly[..., 0]
+            cy = char_poly[..., 1]
+            wx = word_poly[..., 0]
+            wy = word_poly[..., 1]
+
+            if tf.random.uniform([]) >= 0.5:
+                image = tf.image.flip_left_right(image)
+                cx = image_size - cx
+                wx = image_size - wx
+
+            if tf.random.uniform([]) >= 0.5:
+                image = tf.image.flip_up_down(image)
+                diff = tf.stack([0., image_size])
+                cy = image_size - cy
+                wy = image_size - wy
+
+            if tf.random.uniform([]) >= 0.5:
+                k = tf.random.uniform([], minval=0, maxval=4, dtype=tf.int32)
+                angle = k * 90
+
+                def rot90(x, y):
+                    return -y + image_size, x
+                def rot180(x, y):
+                    return -x + image_size, -y + image_size
+                def rot270(x, y):
+                    return y, -x + image_size
+
+                if k == 3:
+                    cx, cy = rot90(cx, cy)
+                    wx, wy = rot90(wx, wy)
+                if k == 2:
+                    cx, cy = rot180(cx, cy)
+                    wx, wy = rot180(wx, wy)
+                if k == 1:
+                    cx, cy = rot270(cx, cy)
+                    wx, wy = rot270(wx, wy)
+
+                image = tf.image.rot90(image, k)
+
+            char_poly = tf.stack([cx, cy], -1)
+            word_poly = tf.stack([wx, wy], -1)
+
+
 
     image = tf.cast(image, tf.float32)
     image -= 128
     image /= 128
+
 
     #tf.print(filename, '1 word_poly', tf.shape(word_poly), 'char_poly', tf.shape(char_poly), 'text', text)
 
@@ -180,8 +226,13 @@ def draw_bboxes(image_size, train_dataset, num_examples, all_anchors, dictionary
         word_poly = word_poly + best_anchors
 
         image_filename = '/shared2/object_detection/datasets/text/synth_text/SynthText/{}'.format(filename)
-        image = cv2.imread(image_filename)
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        if False:
+            image = cv2.imread(image_filename)
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        else:
+            image = image.numpy()
+            image = image * 128 + 128
+            image = image.astype(np.uint8)
 
         imh, imw = image.shape[:2]
         max_side = max(imh, imw)
@@ -233,8 +284,8 @@ def train():
         dictionary_size, dict_table = create_lookup_table(FLAGS.dictionary)
 
         image_size = FLAGS.image_size
-        num_classes = 1 + 2*4 + dictionary_size + 1 + 2*4
-        model = encoder.create_model(FLAGS.model_name, num_classes)
+        #num_classes = 1 + 4*2 + dictionary_size + 1 + 4*2
+        model = encoder.create_model(FLAGS.model_name, dictionary_size)
         if model.output_sizes is None:
             dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
             dstrategy.experimental_run_v2(lambda m, inp: m(inp, True), args=(model, dummy_input))
@@ -275,8 +326,8 @@ def train():
         steps_per_train_epoch = FLAGS.steps_per_train_epoch
         steps_per_eval_epoch = FLAGS.steps_per_eval_epoch
 
-        logger.info('steps_per_train_epoch: {}, steps_per_eval_epoch: {}, num_classes: {}, dictionary_size: {}'.format(
-            steps_per_train_epoch, steps_per_eval_epoch, num_classes, dictionary_size))
+        logger.info('steps_per_train_epoch: {}, steps_per_eval_epoch: {}, dictionary_size: {}'.format(
+            steps_per_train_epoch, steps_per_eval_epoch, dictionary_size))
 
         opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
@@ -354,6 +405,12 @@ def train():
             accs = []
 
             step = 0
+            def log_progress():
+                logger.info('{}: {}: step: {}/{}, {}'.format(
+                    name, int(epoch_var.numpy()), step, max_steps,
+                    metric.str_result(True),
+                    ))
+
             for filenames, images, true_values in dataset:
                 # In most cases, the default data format NCHW instead of NHWC should be
                 # used for a significant performance boost on GPU/TPU. NHWC should be used
@@ -365,10 +422,7 @@ def train():
 
                 total_loss = step_func(args=(filenames, images, true_values))
                 if (name == 'train' and step % FLAGS.print_per_train_steps == 0) or np.isnan(total_loss.numpy()):
-                    logger.info('{}: {}: step: {}/{}, {}'.format(
-                        name, int(epoch_var.numpy()), step, max_steps,
-                        metric.str_result(True),
-                        ))
+                    log_progress()
 
                     if np.isnan(total_loss.numpy()):
                         exit(-1)
@@ -378,6 +432,7 @@ def train():
                 if step >= max_steps:
                     break
 
+            log_progress()
             return step
 
         best_metric = 0
