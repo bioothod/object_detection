@@ -11,7 +11,10 @@ class Metric:
         self.char_dist_loss = tf.keras.metrics.Mean()
         self.word_dist_loss = tf.keras.metrics.Mean()
 
-        self.letters_accuracy = tf.keras.metrics.BinaryAccuracy()
+        self.char_obj_loss = tf.keras.metrics.Mean()
+        self.word_obj_loss = tf.keras.metrics.Mean()
+
+        self.letters_accuracy = tf.keras.metrics.CategoricalAccuracy()
 
         self.char_obj_accuracy = tf.keras.metrics.BinaryAccuracy()
         self.word_obj_accuracy = tf.keras.metrics.BinaryAccuracy()
@@ -22,16 +25,22 @@ class Metric:
         self.char_dist_loss.reset_states()
         self.word_dist_loss.reset_states()
 
+        self.char_obj_loss.reset_states()
+        self.word_obj_loss.reset_states()
+
         self.letters_accuracy.reset_states()
 
         self.char_obj_accuracy.reset_states()
         self.word_obj_accuracy.reset_states()
 
     def str_result(self):
-        return 'total_loss: {:.3e}, dist_loss: {:.3e}/{:.3e}, letters_accuracy: {:.4f}, obj_accuracy: {:.4f}/{:.4f}'.format(
+        return 'total_loss: {:.3e}, dist_loss: {:.3e}/{:.3e}, obj_loss: {:.3e}/{:.3e}, letters_accuracy: {:.4f}, obj_accuracy: {:.4f}/{:.4f}'.format(
                 self.total_loss.result(),
                 self.char_dist_loss.result(),
                 self.word_dist_loss.result(),
+
+                self.char_obj_loss.result(),
+                self.word_obj_loss.result(),
 
                 self.letters_accuracy.result(),
 
@@ -63,6 +72,8 @@ class LossMetricAggregator:
         self.grid_xy = tf.expand_dims(self.grid_xy, 0)
 
         self.mae = tf.keras.losses.MeanAbsoluteError(reduction=tf.keras.losses.Reduction.NONE)
+        self.letters_loss = tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.05, from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
+        self.obj_loss = tf.keras.losses.BinaryCrossentropy(label_smoothing=0.05, from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
 
         self.train_metric = Metric(name='train_metric')
         self.eval_metric = Metric(name='eval_metric')
@@ -79,7 +90,7 @@ class LossMetricAggregator:
         obj_acc = m.char_obj_accuracy.result() + m.word_obj_accuracy.result()
         dist = tf.math.exp(-m.char_dist_loss.result()) + tf.math.exp(-m.word_dist_loss.result())
 
-        return obj_acc + dist
+        return obj_acc * 2 + dist
 
     def reset_states(self):
         self.train_metric.reset_states()
@@ -169,13 +180,12 @@ class LossMetricAggregator:
 
 
         # obj CE loss
-        delta = 0.05
-        n = 2 # 2 - is number of classes for objectness
-        smooth_true_char_obj = (1 - delta) * true_char_obj_whole + delta / n
-        smooth_true_word_obj = (1 - delta) * true_word_obj_whole + delta / n
+        char_obj_loss = self.obj_loss(y_true=true_char_obj_whole, y_pred=pred_char_obj_whole)
+        word_obj_loss = self.obj_loss(y_true=true_word_obj_whole, y_pred=pred_word_obj_whole)
+        m.char_obj_loss.update_state(char_obj_loss)
+        m.word_obj_loss.update_state(word_obj_loss)
 
-        char_obj_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_char_obj, logits=pred_char_obj_whole)
-        word_obj_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_word_obj, logits=pred_word_obj_whole)
+        # for metric, only check true object matches
         m.char_obj_accuracy.update_state(true_char_obj, pred_char_obj)
         m.word_obj_accuracy.update_state(true_word_obj, pred_word_obj)
 
@@ -184,16 +194,11 @@ class LossMetricAggregator:
         obj_loss = char_obj_loss + word_obj_loss
 
         # char CE loss
-        delta = 0.05
-        smooth_true_char_letters = (1 - delta) * true_char_letters + delta / self.dictionary_size
-
-        letters_ce_loss_per_class = tf.nn.sigmoid_cross_entropy_with_logits(labels=smooth_true_char_letters, logits=pred_char_letters)
-        letters_ce_loss = tf.reduce_sum(letters_ce_loss_per_class, -1)
-        letters_ce_loss = tf.expand_dims(letters_ce_loss, -1)
+        letters_ce_loss = self.letters_loss(y_true=true_char_letters, y_pred=pred_char_letters)
         m.letters_accuracy.update_state(true_char_letters, pred_char_letters)
 
-        letters_ce_loss = tf.reduce_mean(letters_ce_loss_per_class)
-        total_loss = dist_loss + obj_loss + letters_ce_loss
+        letters_ce_loss = tf.reduce_mean(letters_ce_loss)
+        total_loss = dist_loss + obj_loss * 2 + letters_ce_loss
         m.total_loss.update_state(total_loss)
 
         return total_loss
