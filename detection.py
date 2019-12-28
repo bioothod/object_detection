@@ -34,8 +34,8 @@ parser.add_argument('--negative_positive_rate', default=2, type=float, help='Neg
 parser.add_argument('--epochs_lr_update', default=10, type=int, help='Maximum number of epochs without improvement used to reset or decrease learning rate')
 parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16 training/inference')
 parser.add_argument('--dataset_type', type=str, choices=['tfrecords'], default='tfrecords', help='Dataset type')
-parser.add_argument('--train_tfrecord_dir', type=str, help='Directory containing training TFRecords')
-parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
+parser.add_argument('--train_tfrecord_dir', type=str, action='append', help='Directory containing training TFRecords')
+parser.add_argument('--eval_tfrecord_dir', type=str, action='append', help='Directory containing evaluation TFRecords')
 parser.add_argument('--image_size', type=int, required=True, help='Use this image size, if 0 - use default')
 parser.add_argument('--steps_per_eval_epoch', default=30, type=int, help='Number of steps per evaluation run')
 parser.add_argument('--steps_per_train_epoch', default=200, type=int, help='Number of steps per train run')
@@ -293,12 +293,15 @@ def train():
 
         anchors_all, output_xy_grids, output_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
 
-        def create_dataset_from_tfrecord(name, dataset_dir, is_training):
+        def create_dataset_from_tfrecord(name, dataset_dirs, is_training):
             filenames = []
-            for fn in os.listdir(dataset_dir):
-                fn = os.path.join(dataset_dir, fn)
-                if os.path.isfile(fn):
-                    filenames.append(fn)
+            for dirname in dataset_dirs:
+                for fn in os.listdir(dirname):
+                    fn = os.path.join(dirname, fn)
+                    if os.path.isfile(fn):
+                        filenames.append(fn)
+
+            np.random.shuffle(filenames)
 
             ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
             ds = ds.map(lambda record: unpack_tfrecord(record, anchors_all,
