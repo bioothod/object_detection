@@ -6,6 +6,9 @@ import os
 import sys
 import time
 
+import matplotlib.pyplot as plt
+from matplotlib import patches, patheffects
+
 import numpy as np
 import tensorflow as tf
 
@@ -13,8 +16,6 @@ from collections import defaultdict
 
 import anchors_gen
 import encoder
-import image as image_draw
-import loss
 
 logger = logging.getLogger('detection')
 logger.propagate = False
@@ -258,7 +259,7 @@ def per_image_supression(pred_values, image_size, dictionary_size, all_anchors):
     char_bboxes = polygon2bbox(char_poly)
     word_bboxes = polygon2bbox(word_poly)
 
-    scores_to_sort = tf.squeeze(char_obj, 1)
+    scores_to_sort = tf.squeeze(char_obj * char_letters_prob, 1)
     bboxes_to_sort = char_bboxes
     if True:
         selected_indexes = tf.image.non_max_suppression(bboxes_to_sort, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
@@ -270,8 +271,8 @@ def per_image_supression(pred_values, image_size, dictionary_size, all_anchors):
     char_letters = tf.gather(char_letters, selected_indexes)
     char_letters_prob = tf.gather(char_letters_prob, selected_indexes)
 
-    #scores_to_sort = char_obj * char_letters_prob
-    scores_to_sort = char_obj
+    scores_to_sort = char_obj * char_letters_prob
+    #scores_to_sort = char_obj
     scores_to_sort = tf.squeeze(scores_to_sort, 1)
     _, best_index = tf.math.top_k(scores_to_sort, tf.minimum(FLAGS.max_ret, tf.shape(scores_to_sort)[0]), sorted=True)
 
@@ -343,6 +344,30 @@ def run_eval(model, dataset, image_size, dst_dir, all_anchors, dictionary_size, 
             }
             js_anns = []
 
+            fig = None
+            text_ax = None
+            image_ax = None
+            if not FLAGS.do_not_save_images:
+                image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR) # only needed for images opened with imread()
+
+                rows = 1
+                columns = 2
+                scale = 5
+                fig = plt.figure(figsize=(columns*scale, rows*scale))
+
+                image_ax = fig.add_subplot(rows, columns, 1)
+                image_ax.get_xaxis().set_visible(False)
+                image_ax.get_yaxis().set_visible(False)
+
+                image_ax.set_autoscale_on(True)
+                image_ax.imshow(image)
+
+                text_ax = fig.add_subplot(rows, columns, 2)
+                text_ax.set_autoscale_on(True)
+                text_ax.get_xaxis().set_visible(False)
+                text_ax.get_yaxis().set_visible(False)
+
+
             for crop_idx, (poly, obj, letter) in enumerate(zip(polys, objs, letters)):
                 if obj < FLAGS.min_obj_score:
                     break
@@ -363,14 +388,32 @@ def run_eval(model, dataset, image_size, dst_dir, all_anchors, dictionary_size, 
                 anns.append((None, poly, None))
                 js_anns.append(ann_js)
 
+                if not FLAGS.do_not_save_images:
+                    xmin = poly[0][0]
+                    ymin = poly[0][1]
+
+                    x = xmin/image.shape[1]
+                    y = 1 - ymin/image.shape[0]
+                    text = text_ax.text(x, y, letter, verticalalignment='top', color='black', fontsize=8, weight='normal')
+
+                    poly = poly.reshape([-1, 2])
+                    for xy in poly:
+                        cr = patches.Circle(xy, 2, color='r')
+                        image_ax.add_artist(cr)
+
+                    poly = patches.Polygon(poly, fill=False)
+                    image_ax.add_artist(poly)
+
+
             js['annotations'] = js_anns
             dump_js.append(js)
 
             if not FLAGS.do_not_save_images:
-                image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR) # only needed for images opened with imread()
                 dst_filename = os.path.join(FLAGS.output_dir, base_filename)
-                image_draw.draw_im(image, anns, dst_filename, {})
 
+                plt.axis('off')
+                plt.savefig(dst_filename)
+                plt.close(fig)
 
     json_fn = os.path.join(FLAGS.output_dir, 'results.json')
     logger.info('Saving {} objects into {}'.format(len(dump_js), json_fn))
