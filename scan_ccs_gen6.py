@@ -25,7 +25,7 @@ def _bytes_feature(value):
 
 def scan_tags(input_dir, writer):
     processed = 0
-    logger.info('starting scanning directory {}'.format(input_dir))
+    logger.info('start scanning directory {}'.format(input_dir))
 
     for fn in os.listdir(input_dir):
         image_filename_full = os.path.join(input_dir, fn)
@@ -63,7 +63,9 @@ def scan_tags(input_dir, writer):
 
                 def update(text_poly, word):
                     if len(text_poly) != 0:
-                        wp = text_poly[0][0:2] + text_poly[-1][2:4]
+                        s = text_poly[0]
+                        e = text_poly[-1]
+                        wp = [s[0], s[1], e[2], e[3]]
                         word_poly.append(wp)
                         text_strings.append(word)
 
@@ -99,12 +101,14 @@ def scan_tags(input_dir, writer):
 
                     text_poly, word = update(text_poly, word)
 
-                #logger.info('{}: words: {}, chars: {}'.format(image_id, text_strings, chars))
 
                 texts = '<SEP>'.join(text_strings)
 
-                char_poly = np.array(char_poly, dtype=np.float32)
+                char_poly = np.array(char_poly, dtype=np.float64)
                 word_poly = np.array(word_poly, dtype=np.float32)
+
+                #logger.info('{}: word_poly: {}, words: {}, char_poly: {}, chars: {}'.format(image_id, word_poly.shape, len(text_strings), char_poly.shape, len(chars)))
+                #exit(0)
 
                 example = tf.train.Example(features=tf.train.Features(feature={
                     'image': _bytes_feature(image_data),
