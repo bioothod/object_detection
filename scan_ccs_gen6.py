@@ -65,7 +65,7 @@ def scan_tags(input_dir, writer):
                     if len(text_poly) != 0:
                         s = text_poly[0]
                         e = text_poly[-1]
-                        wp = [s[0], s[1], e[2], e[3]]
+                        wp = [s[0], e[1], e[2], s[3]]
                         word_poly.append(wp)
                         text_strings.append(word)
 
