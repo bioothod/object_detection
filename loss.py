@@ -89,8 +89,9 @@ class LossMetricAggregator:
         m = self.eval_metric
         obj_acc = m.char_obj_accuracy.result() + m.word_obj_accuracy.result()
         dist = tf.math.exp(-m.char_dist_loss.result()) + tf.math.exp(-m.word_dist_loss.result())
+        letters_acc = m.letters_accuracy.result()
 
-        return obj_acc * 2 + dist
+        return obj_acc * 2 + dist + letters_acc
 
     def reset_states(self):
         self.train_metric.reset_states()
@@ -174,8 +175,8 @@ class LossMetricAggregator:
         m.char_dist_loss.update_state(char_dist_loss)
         m.word_dist_loss.update_state(word_dist_loss)
 
-        char_dist_loss = tf.reduce_mean(char_dist_loss)
-        word_dist_loss = tf.reduce_mean(word_dist_loss)
+        char_dist_loss = tf.nn.compute_average_loss(char_dist_loss, global_batch_size=self.global_batch_size)
+        word_dist_loss = tf.nn.compute_average_loss(word_dist_loss, global_batch_size=self.global_batch_size)
         dist_loss = char_dist_loss + word_dist_loss
 
 
@@ -189,16 +190,16 @@ class LossMetricAggregator:
         m.char_obj_accuracy.update_state(true_char_obj, pred_char_obj)
         m.word_obj_accuracy.update_state(true_word_obj, pred_word_obj)
 
-        char_obj_loss = tf.reduce_mean(char_obj_loss)
-        word_obj_loss = tf.reduce_mean(word_obj_loss)
+        char_obj_loss = tf.nn.compute_average_loss(char_obj_loss, global_batch_size=self.global_batch_size)
+        word_obj_loss = tf.nn.compute_average_loss(word_obj_loss, global_batch_size=self.global_batch_size)
         obj_loss = char_obj_loss + word_obj_loss
 
         # char CE loss
         letters_ce_loss = self.letters_loss(y_true=true_char_letters, y_pred=pred_char_letters)
         m.letters_accuracy.update_state(true_char_letters, pred_char_letters)
 
-        letters_ce_loss = tf.reduce_mean(letters_ce_loss)
-        total_loss = dist_loss + obj_loss * 2 + letters_ce_loss
+        letters_ce_loss = tf.nn.compute_average_loss(letters_ce_loss, global_batch_size=self.global_batch_size)
+        total_loss = dist_loss + obj_loss + letters_ce_loss
         m.total_loss.update_state(total_loss)
 
         return total_loss
