@@ -126,14 +126,12 @@ def unpack_tfrecord(record, anchors_all, image_size, dictionary_size, dict_table
                 image = tf.image.flip_left_right(image)
                 cx = image_size - cx
                 wx = image_size - wx
-
-            if tf.random.uniform([]) >= 0.5:
+            elif False and tf.random.uniform([]) >= 0.5:
                 image = tf.image.flip_up_down(image)
                 diff = tf.stack([0., image_size])
                 cy = image_size - cy
                 wy = image_size - wy
-
-            if tf.random.uniform([]) >= 0.5:
+            elif tf.random.uniform([]) >= 0.5:
                 k = tf.random.uniform([], minval=0, maxval=4, dtype=tf.int32)
                 angle = k * 90
 
@@ -160,20 +158,11 @@ def unpack_tfrecord(record, anchors_all, image_size, dictionary_size, dict_table
             word_poly = tf.stack([wx, wy], -1)
 
 
-
     image = tf.cast(image, tf.float32)
     image -= 128
     image /= 128
 
-
-    #tf.print(filename, '1 word_poly', tf.shape(word_poly), 'char_poly', tf.shape(char_poly), 'text', text)
-
     true_values = anchors_gen.generate_true_values_for_anchors(char_poly, word_poly, encoded_chars, anchors_all, dictionary_size)
-
-    word_objs = true_values[..., dictionary_size + 1 + 4 * 2]
-    num_words = tf.reduce_sum(word_objs)
-
-    #tf.print(filename, '2', tf.shape(word_poly), '->', num_words)
 
     return filename, image, true_values
 
