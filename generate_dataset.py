@@ -83,13 +83,17 @@ def do_work(worker_id, tup):
             dst = os.path.join(images_dir, fn)
             image_draw.draw_im(image, new_anns, dst, {})
 
-        texts = []
-        for t in text:
-            s = [w.strip() for w in t.split()]
-            texts += s
+        def text_cleanup(text):
+            texts = []
+            for t in text:
+                s = [w.strip() for w in t.split()]
+                texts += s
+            return texts
 
-        text_concat = ''.join(texts)
-        texts = '<SEP>'.join(texts)
+        text = text_cleanup(text)
+
+        text_concat = ''.join(text)
+        texts = '<SEP>'.join(text)
 
         char_poly = char_poly.astype(np.float32)
         word_poly = word_poly.astype(np.float32)
