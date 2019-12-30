@@ -11,11 +11,10 @@ logger = logging.getLogger('detection')
 
 
 import anchors_gen
-import autoaugment
 import encoder
 import image as image_draw
 import loss
-import preprocess_ssd
+import preprocess
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch.')
@@ -39,7 +38,6 @@ parser.add_argument('--eval_tfrecord_dir', type=str, action='append', help='Dire
 parser.add_argument('--image_size', type=int, required=True, help='Use this image size, if 0 - use default')
 parser.add_argument('--steps_per_eval_epoch', default=30, type=int, help='Number of steps per evaluation run')
 parser.add_argument('--steps_per_train_epoch', default=200, type=int, help='Number of steps per train run')
-parser.add_argument('--use_random_augmentation', action='store_true', help='Use efficientnet random augmentation')
 parser.add_argument('--save_examples', type=int, default=0, help='Number of example images to save and exit')
 parser.add_argument('--reset_on_lr_update', action='store_true', help='Whether to reset to the best model after learning rate update')
 parser.add_argument('--disable_rotation_augmentation', action='store_true', help='Whether to disable rotation/flipping augmentation')
@@ -106,63 +104,15 @@ def unpack_tfrecord(record, anchors_all, image_size, dictionary_size, dict_table
     word_poly *= scale
     char_poly *= scale
 
+    image = tf.cast(image, tf.float32)
+    image -= 128
+    image /= 128
 
     chars = tf.strings.unicode_split(text, 'UTF-8')
     encoded_chars = dict_table.lookup(chars)
 
     if is_training:
-        if FLAGS.use_random_augmentation:
-            randaug_num_layers = 2
-            randaug_magnitude = 2
-
-            image = tf.cast(image, tf.uint8)
-            image = autoaugment.distort_image_with_randaugment(image, randaug_num_layers, randaug_magnitude)
-
-        if not FLAGS.disable_rotation_augmentation and tf.random.uniform([]) >= 0.5:
-            cx = char_poly[..., 0]
-            cy = char_poly[..., 1]
-            wx = word_poly[..., 0]
-            wy = word_poly[..., 1]
-
-            if tf.random.uniform([]) >= 0.5:
-                image = tf.image.flip_left_right(image)
-                cx = image_size - cx
-                wx = image_size - wx
-            elif False and tf.random.uniform([]) >= 0.5:
-                image = tf.image.flip_up_down(image)
-                diff = tf.stack([0., image_size])
-                cy = image_size - cy
-                wy = image_size - wy
-            elif tf.random.uniform([]) >= 0.5:
-                k = tf.random.uniform([], minval=0, maxval=4, dtype=tf.int32)
-                angle = k * 90
-
-                def rot90(x, y):
-                    return -y + image_size, x
-                def rot180(x, y):
-                    return -x + image_size, -y + image_size
-                def rot270(x, y):
-                    return y, -x + image_size
-
-                if k == 3:
-                    cx, cy = rot90(cx, cy)
-                    wx, wy = rot90(wx, wy)
-                if k == 2:
-                    cx, cy = rot180(cx, cy)
-                    wx, wy = rot180(wx, wy)
-                if k == 1:
-                    cx, cy = rot270(cx, cy)
-                    wx, wy = rot270(wx, wy)
-
-                image = tf.image.rot90(image, k)
-
-            char_poly = tf.stack([cx, cy], -1)
-            word_poly = tf.stack([wx, wy], -1)
-
-
-    image = tf.cast(image, tf.float32)
-    image -= 128
-    image /= 128
+        image, char_poly, word_poly = preprocess.preprocess_for_train(image, char_poly, word_poly, FLAGS.disable_rotation_augmentation)
 
     true_values = anchors_gen.generate_true_values_for_anchors(char_poly, word_poly, encoded_chars, anchors_all, dictionary_size)
 
@@ -244,7 +194,7 @@ def draw_bboxes(image_size, train_dataset, num_examples, all_anchors, dictionary
 
 
         new_anns = []
-        for poly in char_poly:
+        for poly in word_poly:
             new_anns.append((None, poly, None))
 
         image_draw.draw_im(image, new_anns, dst, {})
@@ -446,7 +396,7 @@ def train():
 
             eval_steps = run_epoch('eval', eval_dataset, distributed_eval_step, steps_per_eval_epoch)
             best_metric = validation_metric()
-            logger.info('initial validation metric: {:.3f}'.format(best_metric))
+            logger.info('initial validation: {}, metric: {:.3f}'.format(metric.str_result(False), best_metric))
 
         if best_metric < FLAGS.min_eval_metric:
             logger.info('setting minimal evaluation metric {:.3f} -> {} from command line arguments'.format(best_metric, FLAGS.min_eval_metric))
