@@ -98,7 +98,7 @@ def distort_color(image, color_ordering=0, fast_mode=True, scope='distort_color'
         # The random_* ops do not necessarily clamp.
         return tf.clip_by_value(image, 0.0, 1.0)
 
-def ssd_random_sample_patch(image, labels, bboxes, ratio_list=[0.1, 0.3, 0.5, 0.7, 0.9, 1.], name=None):
+def ssd_random_sample_patch(image, labels, polys, bboxes, ratio_list=[0.1, 0.3, 0.5, 0.7, 0.9, 1.], name=None):
     '''ssd_random_sample_patch.
     select one min_iou
     sample _width and _height from [0-width] and [0-height]
@@ -149,13 +149,13 @@ def ssd_random_sample_patch(image, labels, bboxes, ratio_list=[0.1, 0.3, 0.5, 0.
             return vol
 
     @tf.function
-    def check_roi_center(width, height, labels, bboxes):
+    def check_roi_center(width, height, bboxes):
         with tf.name_scope('check_roi_center'):
             max_attempts = 20
             roi = [0., 0., 0., 0.]
             float_width = tf.cast(width, tf.float32)
             float_height = tf.cast(height, tf.float32)
-            mask = tf.cast(tf.zeros_like(labels, dtype=tf.uint8), tf.bool)
+            mask = tf.cast(tf.zeros(tf.shape(bboxes)[0], dtype=tf.uint8), tf.bool)
             center_x, center_y = (bboxes[:, 1] + bboxes[:, 3]) / 2, (bboxes[:, 0] + bboxes[:, 2]) / 2
 
             for index in tf.range(max_attempts):
@@ -179,14 +179,14 @@ def ssd_random_sample_patch(image, labels, bboxes, ratio_list=[0.1, 0.3, 0.5, 0.
             return roi, mask
 
     @tf.function
-    def check_roi_overlap(width, height, labels, bboxes, min_iou):
+    def check_roi_overlap(width, height, labels, polys, bboxes, min_iou):
         with tf.name_scope('check_roi_overlap'):
             max_attempt = 50
             roi = [0., 0., 1., 1.]
-            mask = tf.cast(tf.zeros_like(labels, dtype=tf.uint8), tf.bool)
+            mask = tf.cast(tf.zeros(tf.shape(bboxes)[0], dtype=tf.uint8), tf.bool)
 
             for index in tf.range(max_attempt):
-                roi, mask = check_roi_center(width, height, labels, bboxes)
+                roi, mask = check_roi_center(width, height, bboxes)
                 mask_labels = tf.boolean_mask(labels, mask)
                 if tf.shape(mask_labels)[0] == 0:
                     continue
@@ -199,22 +199,23 @@ def ssd_random_sample_patch(image, labels, bboxes, ratio_list=[0.1, 0.3, 0.5, 0.
                     break
 
             mask_labels = tf.boolean_mask(labels, mask)
+            mask_polys = tf.boolean_mask(polys, mask)
             mask_bboxes = tf.boolean_mask(bboxes, mask)
 
             if tf.shape(mask_labels)[0] > 0:
                 height = tf.cast(height, tf.float32)
                 width = tf.cast(width, tf.float32)
 
-                return (tf.cast([roi[0] * height, roi[1] * width, (roi[2] - roi[0]) * height, (roi[3] - roi[1]) * width], tf.int32), mask_labels, mask_bboxes)
+                return (tf.cast([roi[0] * height, roi[1] * width, (roi[2] - roi[0]) * height, (roi[3] - roi[1]) * width], tf.int32), mask_labels, mask_polys, mask_bboxes)
 
-            return (tf.cast([0, 0, height, width], tf.int32), labels, bboxes)
+            return (tf.cast([0, 0, height, width], tf.int32), labels, polys, bboxes)
 
 
-    def sample_patch(image, labels, bboxes, min_iou):
+    def sample_patch(image, labels, polys, bboxes, min_iou):
         with tf.name_scope('sample_patch'):
             height, width, depth = _ImageDimensions(image, rank=3)
 
-            roi_slice_range, mask_labels, mask_bboxes = check_roi_overlap(width, height, labels, bboxes, min_iou)
+            roi_slice_range, mask_labels, mask_polys, mask_bboxes = check_roi_overlap(width, height, labels, polys, bboxes, min_iou)
 
             scale = tf.cast(tf.stack([height, width, height, width]), mask_bboxes.dtype)
             mask_bboxes = mask_bboxes * scale
@@ -222,6 +223,7 @@ def ssd_random_sample_patch(image, labels, bboxes, ratio_list=[0.1, 0.3, 0.5, 0.
             # Add offset.
             offset = tf.cast(tf.stack([roi_slice_range[0], roi_slice_range[1], roi_slice_range[0], roi_slice_range[1]]), mask_bboxes.dtype)
             mask_bboxes = mask_bboxes - offset
+            mask_polys = mask_polys - offset[..., :2]
 
             cliped_ymin = tf.maximum(0., mask_bboxes[:, 0])
             cliped_xmin = tf.maximum(0., mask_bboxes[:, 1])
@@ -230,13 +232,14 @@ def ssd_random_sample_patch(image, labels, bboxes, ratio_list=[0.1, 0.3, 0.5, 0.
 
             mask_bboxes = tf.stack([cliped_ymin, cliped_xmin, cliped_ymax, cliped_xmax], axis=-1)
             # Rescale to target dimension.
-            scale = tf.cast(tf.stack([roi_slice_range[2], roi_slice_range[3],
+            scale_bboxes = tf.cast(tf.stack([roi_slice_range[2], roi_slice_range[3],
                                       roi_slice_range[2], roi_slice_range[3]]), mask_bboxes.dtype)
+            scale_polys = tf.cast(tf.stack([roi_slice_range[3], roi_slice_range[2]]), mask_bboxes.dtype)
 
             return tf.cond(tf.logical_or(tf.less(roi_slice_range[2], 1), tf.less(roi_slice_range[3], 1)),
-                        lambda: (image, labels, bboxes),
+                        lambda: (image, labels, polys, bboxes),
                         lambda: (tf.slice(image, [roi_slice_range[0], roi_slice_range[1], 0], [roi_slice_range[2], roi_slice_range[3], -1]),
-                                        mask_labels, mask_bboxes / scale))
+                                    mask_labels, mask_polys / scale_polys, mask_bboxes / scale_bboxes))
 
     with tf.name_scope('ssd_random_sample_patch'):
         image = tf.convert_to_tensor(image, name='image')
@@ -246,9 +249,9 @@ def ssd_random_sample_patch(image, labels, bboxes, ratio_list=[0.1, 0.3, 0.5, 0.
 
         sampled_min_iou = min_iou_list[tf.cast(samples_min_iou[0][0], tf.int32)]
 
-        return tf.cond(tf.less(sampled_min_iou, 1.), lambda: sample_patch(image, labels, bboxes, sampled_min_iou), lambda: (image, labels, bboxes))
+        return tf.cond(tf.less(sampled_min_iou, 1.), lambda: sample_patch(image, labels, polys, bboxes, sampled_min_iou), lambda: (image, labels, polys, bboxes))
 
-def ssd_random_expand(image, bboxes, ratio=2., name=None):
+def ssd_random_expand(image, polys, bboxes, ratio=2., name=None):
     with tf.name_scope('ssd_random_expand'):
         image = tf.convert_to_tensor(image, name='image')
         if image.get_shape().ndims != 3:
@@ -271,44 +274,19 @@ def ssd_random_expand(image, bboxes, ratio=2., name=None):
                               tf.pad(image[:, :, 1], paddings, "CONSTANT", constant_values = mean_color_of_image[1]),
                               tf.pad(image[:, :, 2], paddings, "CONSTANT", constant_values = mean_color_of_image[2])], axis=-1)
 
-        scale = tf.cast(tf.stack([height, width, height, width]), bboxes.dtype)
-        absolute_bboxes = bboxes * scale + tf.cast(tf.stack([y, x, y, x]), bboxes.dtype)
+        scale_bboxes = tf.cast(tf.stack([height, width, height, width]), bboxes.dtype)
+        scale_polys = tf.cast(tf.stack([width, height]), bboxes.dtype)
+        absolute_bboxes = bboxes * scale_bboxes + tf.cast(tf.stack([y, x, y, x]), bboxes.dtype)
+        absolute_polys = polys * scale_polys + tf.cast(tf.stack([x, y]), bboxes.dtype)
 
-        return big_canvas, absolute_bboxes / tf.cast(tf.stack([canvas_height, canvas_width, canvas_height, canvas_width]), bboxes.dtype)
+        bboxes = absolute_bboxes / tf.cast(tf.stack([canvas_height, canvas_width, canvas_height, canvas_width]), bboxes.dtype)
+        polys = absolute_polys / tf.cast(tf.stack([canvas_width, canvas_height]), bboxes.dtype)
 
-# def ssd_random_sample_patch_wrapper(image, labels, bboxes):
-#   with tf.name_scope('ssd_random_sample_patch_wrapper'):
-#     orgi_image, orgi_labels, orgi_bboxes = image, labels, bboxes
-#     def check_bboxes(bboxes):
-#       areas = (bboxes[:, 3] - bboxes[:, 1]) * (bboxes[:, 2] - bboxes[:, 0])
-#       return tf.logical_and(tf.logical_and(areas < 0.9, areas > 0.001),
-#                             tf.logical_and((bboxes[:, 3] - bboxes[:, 1]) > 0.025, (bboxes[:, 2] - bboxes[:, 0]) > 0.025))
+        return big_canvas, polys, bboxes
 
-#     index = 0
-#     max_attempt = 3
-#     def condition(index, image, labels, bboxes):
-#       return tf.logical_or(tf.logical_and(tf.reduce_sum(tf.cast(check_bboxes(bboxes), tf.int64)) < 1, tf.less(index, max_attempt)), tf.less(index, 1))
-
-#     def body(index, image, labels, bboxes):
-#       image, bboxes = tf.cond(tf.random.uniform([], minval=0., maxval=1., dtype=tf.float32) < 0.5,
-#                       lambda: (image, bboxes),
-#                       lambda: ssd_random_expand(image, bboxes, tf.random.uniform([1], minval=1.1, maxval=4., dtype=tf.float32)[0]))
-#       # Distort image and bounding boxes.
-#       random_sample_image, labels, bboxes = ssd_random_sample_patch(image, labels, bboxes, ratio_list=[-0.1, 0.1, 0.3, 0.5, 0.7, 0.9, 1.])
-#       random_sample_image.set_shape([None, None, 3])
-#       return index+1, random_sample_image, labels, bboxes
-
-#     [index, image, labels, bboxes] = tf.while_loop(condition, body, [index, orgi_image, orgi_labels, orgi_bboxes], parallel_iterations=4, back_prop=False, swap_memory=True)
-
-#     valid_mask = check_bboxes(bboxes)
-#     labels, bboxes = tf.boolean_mask(labels, valid_mask), tf.boolean_mask(bboxes, valid_mask)
-#     return tf.cond(tf.less(index, max_attempt),
-#                 lambda : (image, labels, bboxes),
-#                 lambda : (orgi_image, orgi_labels, orgi_bboxes))
-
-def ssd_random_sample_patch_wrapper(image, labels, bboxes):
+def ssd_random_sample_patch_wrapper(image, labels, polys, bboxes):
     with tf.name_scope('ssd_random_sample_patch_wrapper'):
-        orgi_image, orgi_labels, orgi_bboxes = image, labels, bboxes
+        orig_image, orig_labels, orig_polys, orig_bboxes = image, labels, polys, bboxes
         def check_bboxes(bboxes):
             areas = (bboxes[:, 3] - bboxes[:, 1]) * (bboxes[:, 2] - bboxes[:, 0])
             return tf.logical_and(tf.logical_and(areas < 0.9, areas > 0.001),
@@ -316,25 +294,34 @@ def ssd_random_sample_patch_wrapper(image, labels, bboxes):
 
         index = 0
         max_attempt = 3
-        def condition(index, image, labels, bboxes, orgi_image, orgi_labels, orgi_bboxes):
+        def condition(index, image, labels, polys, bboxes, orig_image, orig_labels, orig_polys, orig_bboxes):
             return tf.logical_or(tf.logical_and(tf.reduce_sum(tf.cast(check_bboxes(bboxes), tf.int64)) < 1, tf.less(index, max_attempt)), tf.less(index, 1))
 
-        def body(index, image, labels, bboxes, orgi_image, orgi_labels, orgi_bboxes):
-            image, bboxes = tf.cond(tf.random.uniform([], minval=0., maxval=1., dtype=tf.float32) < 0.5,
-                            lambda: (orgi_image, orgi_bboxes),
-                            lambda: ssd_random_expand(orgi_image, orgi_bboxes, tf.random.uniform([1], minval=1.1, maxval=4., dtype=tf.float32)[0]))
+        def body(index, image, labels, polys, bboxes, orig_image, orig_labels, orig_polys, orig_bboxes):
+            image, polys, bboxes = tf.cond(tf.random.uniform([], minval=0., maxval=1., dtype=tf.float32) < 0.5,
+                            lambda: (orig_image, orig_polys, orig_bboxes),
+                            lambda: ssd_random_expand(orig_image, orig_polys, orig_bboxes, tf.random.uniform([1], minval=1.1, maxval=4., dtype=tf.float32)[0]))
             # Distort image and bounding boxes.
-            random_sample_image, labels, bboxes = ssd_random_sample_patch(image, orgi_labels, bboxes, ratio_list=[-0.1, 0.1, 0.3, 0.5, 0.7, 0.9, 1.])
+            random_sample_image, labels, polys, bboxes = ssd_random_sample_patch(image, orig_labels, polys, bboxes, ratio_list=[-0.1, 0.1, 0.3, 0.5, 0.7, 0.9, 1.])
             random_sample_image.set_shape([None, None, 3])
-            return index+1, random_sample_image, labels, bboxes, orgi_image, orgi_labels, orgi_bboxes
+            return index+1, random_sample_image, labels, polys, bboxes, orig_image, orig_labels, orig_polys, orig_bboxes
 
-        [index, image, labels, bboxes, orgi_image, orgi_labels, orgi_bboxes] = tf.while_loop(condition, body, [index,  image, labels, bboxes, orgi_image, orgi_labels, orgi_bboxes], parallel_iterations=4, back_prop=False, swap_memory=True)
+        [index, image, labels, polys, bboxes, orig_image, orig_labels, orig_polys, orig_bboxes] = tf.while_loop(condition, body,
+                                                                                                    [index,  image, labels, polys, bboxes, orig_image, orig_labels, orig_polys, orig_bboxes],
+                                                                                                    parallel_iterations=8,
+                                                                                                    shape_invariants=[tf.TensorShape([]),
+                                                                                                        tf.TensorShape([None, None, 3]),
+                                                                                                        labels.get_shape(), polys.get_shape(), bboxes.get_shape(),
+                                                                                                        tf.TensorShape([None, None, 3]),
+                                                                                                        orig_labels.get_shape(), orig_polys.get_shape(), orig_bboxes.get_shape()],
+                                                                                                    back_prop=False,
+                                                                                                    swap_memory=True)
 
         valid_mask = check_bboxes(bboxes)
-        labels, bboxes = tf.boolean_mask(labels, valid_mask), tf.boolean_mask(bboxes, valid_mask)
+        labels, polys, bboxes = tf.boolean_mask(labels, valid_mask), tf.boolean_mask(polys, valid_mask), tf.boolean_mask(bboxes, valid_mask)
         return tf.cond(tf.less(index, max_attempt),
-                    lambda : (image, labels, bboxes),
-                    lambda : (orgi_image, orgi_labels, orgi_bboxes))
+                    lambda : (image, labels, polys, bboxes),
+                    lambda : (orig_image, orig_labels, orig_polys, orig_bboxes))
 
 def _mean_image_subtraction(image, means):
     ndims = image.get_shape().ndims
@@ -375,7 +362,7 @@ def random_flip_left_right(image, bboxes):
         bboxes = tf.cond(mirror_cond, lambda: mirror_bboxes, lambda: bboxes)
         return result, bboxes
 
-def preprocess_for_train(image, labels, bboxes, out_shape, data_format='channels_last', scope='ssd_preprocessing_train', output_rgb=True):
+def preprocess_for_train(image, labels, polys, bboxes, out_shape, data_format='channels_last', scope='ssd_preprocessing_train', output_rgb=True):
     """Preprocesses the given image for training.
 
     Args:
@@ -392,30 +379,15 @@ def preprocess_for_train(image, labels, bboxes, out_shape, data_format='channels
             raise ValueError('Input must be of size [height, width, C>0]')
         # Convert to float scaled [0, 1].
         orig_dtype = image.dtype
-        if orig_dtype != tf.float32:
-            image = tf.image.convert_image_dtype(image, dtype=tf.float32)
 
-        # Randomly distort the colors. There are 4 ways to do it.
-        distort_image = apply_with_random_selector(image,
-                                              lambda x, ordering: distort_color(x, ordering, True),
-                                              num_cases=4)
+        if False:
+            # Randomly distort the colors. There are 4 ways to do it.
+            image = apply_with_random_selector(image,
+                                                  lambda x, ordering: distort_color(x, ordering, True),
+                                                  num_cases=4)
 
-        random_sample_image, labels, bboxes = ssd_random_sample_patch_wrapper(distort_image, labels, bboxes)
-        # image, bboxes = tf.cond(tf.random.uniform([1], minval=0., maxval=1., dtype=tf.float32)[0] < 0.25,
-        #                     lambda: (image, bboxes),
-        #                     lambda: ssd_random_expand(image, bboxes, tf.random.uniform([1], minval=2, maxval=4, dtype=tf.int32)[0]))
-
-        # # Distort image and bounding boxes.
-        # random_sample_image, labels, bboxes = ssd_random_sample_patch(image, labels, bboxes, ratio_list=[0.1, 0.3, 0.5, 0.7, 0.9, 1.])
-
-        # Randomly flip the image horizontally.
-        random_sample_flip_image, bboxes = random_flip_left_right(random_sample_image, bboxes)
-        # Rescale to VGG input scale.
-        random_sample_flip_resized_image = tf.image.resize(random_sample_flip_image, out_shape, method=tf.image.ResizeMethod.BILINEAR)
-        random_sample_flip_resized_image.set_shape([None, None, 3])
-
-        final_image = tf.cast(tf.image.convert_image_dtype(random_sample_flip_resized_image, orig_dtype, saturate=True), tf.float32)
-        final_image = normalize_image(final_image)
+        image, labels, polys, bboxes = ssd_random_sample_patch_wrapper(image, labels, polys, bboxes)
+        final_image = tf.image.resize(image, out_shape, method=tf.image.ResizeMethod.BILINEAR)
 
         final_image.set_shape(out_shape + [3])
         if not output_rgb:
@@ -423,7 +395,7 @@ def preprocess_for_train(image, labels, bboxes, out_shape, data_format='channels
             final_image = tf.stack([image_channels[2], image_channels[1], image_channels[0]], axis=-1, name='merge_bgr')
         if data_format == 'channels_first':
             final_image = tf.transpose(final_image, perm=(2, 0, 1))
-        return final_image, labels, bboxes
+        return final_image, labels, polys, bboxes
 
 def preprocess_for_eval(image, out_shape, data_format='channels_last', scope='ssd_preprocessing_eval', output_rgb=True):
     """Preprocesses the given image for evaluation.
@@ -440,7 +412,6 @@ def preprocess_for_eval(image, out_shape, data_format='channels_last', scope='ss
         image = tf.image.resize(image, out_shape, method=tf.image.ResizeMethod.BILINEAR)
         image.set_shape(out_shape + [3])
 
-        image = normalize_image(image)
         if not output_rgb:
             image_channels = tf.unstack(image, axis=-1, name='split_rgb')
             image = tf.stack([image_channels[2], image_channels[1], image_channels[0]], axis=-1, name='merge_bgr')
