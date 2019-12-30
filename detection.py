@@ -41,6 +41,7 @@ parser.add_argument('--steps_per_eval_epoch', default=30, type=int, help='Number
 parser.add_argument('--steps_per_train_epoch', default=200, type=int, help='Number of steps per train run')
 parser.add_argument('--use_random_augmentation', action='store_true', help='Use efficientnet random augmentation')
 parser.add_argument('--save_examples', type=int, default=0, help='Number of example images to save and exit')
+parser.add_argument('--reset_on_lr_update', action='store_true', help='Whether to reset to the best model after learning rate update')
 
 default_char_dictionary="!\"#&\'\\()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 parser.add_argument('--dictionary', type=str, default=default_char_dictionary, help='Dictionary to use')
@@ -499,7 +500,8 @@ def train():
                     if learning_rate_multiplier > 0.1:
                         learning_rate_multiplier /= 2
 
-                    #want_reset = True
+                    if FLAGS.reset_on_lr_update:
+                        want_reset = True
                 elif num_epochs_without_improvement >= FLAGS.epochs_lr_update:
                     new_lr = FLAGS.initial_learning_rate
                     logger.info('epoch: {}, epochs without metric improvement: {}, best metric: {:.5f}, resetting learning rate: {:.2e} -> {:.2e}'.format(
