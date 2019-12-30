@@ -42,6 +42,7 @@ parser.add_argument('--steps_per_train_epoch', default=200, type=int, help='Numb
 parser.add_argument('--use_random_augmentation', action='store_true', help='Use efficientnet random augmentation')
 parser.add_argument('--save_examples', type=int, default=0, help='Number of example images to save and exit')
 parser.add_argument('--reset_on_lr_update', action='store_true', help='Whether to reset to the best model after learning rate update')
+parser.add_argument('--disable_rotation_augmentation', action='store_true', help='Whether to disable rotation/flipping augmentation')
 
 default_char_dictionary="!\"#&\'\\()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 parser.add_argument('--dictionary', type=str, default=default_char_dictionary, help='Dictionary to use')
@@ -117,7 +118,7 @@ def unpack_tfrecord(record, anchors_all, image_size, dictionary_size, dict_table
             image = tf.cast(image, tf.uint8)
             image = autoaugment.distort_image_with_randaugment(image, randaug_num_layers, randaug_magnitude)
 
-        if tf.random.uniform([]) >= 0.5:
+        if not FLAGS.disable_rotation_augmentation and tf.random.uniform([]) >= 0.5:
             cx = char_poly[..., 0]
             cy = char_poly[..., 1]
             wx = word_poly[..., 0]
