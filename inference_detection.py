@@ -51,10 +51,7 @@ default_char_dictionary="!\"#&\'\\()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXY
 parser.add_argument('--dictionary', type=str, default=default_char_dictionary, help='Dictionary to use')
 FLAGS = parser.parse_args()
 
-def tf_read_image(filename, image_size, dtype):
-    image = tf.io.read_file(filename)
-    image = tf.image.decode_jpeg(image, channels=3)
-
+def scale_norm_image(image, image_size, dtype):
     orig_image_height = tf.cast(tf.shape(image)[0], tf.float32)
     orig_image_width = tf.cast(tf.shape(image)[1], tf.float32)
 
@@ -72,63 +69,31 @@ def tf_read_image(filename, image_size, dtype):
     image -= 128
     image /= 128
 
+    return image
+
+def tf_read_image(filename, image_size, dtype):
+    image = tf.io.read_file(filename)
+    image = tf.image.decode_jpeg(image, channels=3)
+
+    image = scale_norm_image(image, image_size, dtype)
     return filename, image
 
-def tf_left_needed_dimensions_from_tfrecord(image_size, anchors_all, filename, image, true_values, dictionary_size):
-    char_boundary_start = 0
-    word_boundary_start = dictionary_size + 1 + 4 * 2
+def mscoco_unpack_tfrecord(record, anchors_all, image_size, dictionary_size, dict_table, is_training, data_format, dtype):
+    features = tf.train.Example(features=tf.train.Features(feature={
+        'image_id': _int64_feature(image_id),
+        'image': _bytes_feature(bytes(image_enc)),
+        'filename': _bytes_feature(bytes(filename, 'utf8')),
+        'true_bboxes': _bytes_feature(true_bboxes.tobytes()),
+        'true_labels': _bytes_feature(bytes(true_labels, 'utf8')),
+    }))
 
-    true_char = true_values[..., char_boundary_start : char_boundary_start + word_boundary_start]
-    true_word = true_values[..., word_boundary_start : ]
+    filename = features['filename']
 
-    true_char_obj = true_char[..., 0]
-    true_char_poly = true_char[..., 1 : 9]
-    true_char_letters = true_char[..., 10 :]
+    true_text_labels = tf.strings.split(features['true_labels'], '<SEP>')
 
-    true_word_obj = true_word[..., 0]
-    true_word_poly = true_word[..., 1 : 9]
+    image = tf.image.decode_jpeg(features['image'], channels=3)
+    image = scale_norm_image(image, image_size, dtype)
 
-    char_index = tf.where(true_char_obj != 0)
-    word_index = tf.where(true_word_obj != 0)
-
-    char_poly = tf.gather(true_char_poly, char_index)
-    char_poly = tf.reshape(char_poly, [-1, 4, 2])
-    word_poly = tf.gather(true_word_poly, word_index).numpy()
-    word_poly = tf.reshape(word_poly, [-1, 4, 2])
-
-    best_anchors = tf.gather(all_anchors[..., :2], char_index)
-    best_anchors = tf.expand_dims(best_anchors, 1)
-    best_anchors = tf.tile(best_anchors, [1, 4, 1])
-    char_poly = char_poly + best_anchors
-
-    best_anchors = tf.gather(all_anchors[..., :2], word_index)
-    best_anchors = tf.expand_dims(best_anchors, 1)
-    best_anchors = tf.tile(best_anchors, [1, 4, 1])
-    word_poly = word_poly + best_anchors
-
-    imh = tf.shape(image)[0]
-    imw = tf.shape(image)[1]
-
-    max_side = tf.maximum(imh, imw)
-    pad_y = (max_side - imh) / 2
-    pad_x = (max_side - imw) / 2
-    square_scale = max_side / image_size
-
-    char_poly *= square_scale
-    word_poly *= square_scale
-
-    diff = [pad_x, pad_y]
-    char_poly -= diff
-    word_poly -= diff
-
-    boxes = tf.stack([y0, x0, y1, x1], axis=1)
-    boxes = tf.expand_dims(boxes, 0)
-
-    colors = tf.random.uniform([tf.shape(true_bboxes)[0], 4], minval=0, maxval=1, dtype=tf.dtypes.float32)
-
-    image = tf.expand_dims(image, 0)
-    image = tf.image.draw_bounding_boxes(image,  boxes, colors)
-    image = tf.squeeze(image, 0)
     return filename, image
 
 def non_max_suppression(coords, scores, max_ret, iou_threshold):
@@ -202,19 +167,30 @@ def non_max_suppression(coords, scores, max_ret, iou_threshold):
     return pick
     #return tf.gather(coords, pick), tf.gather(scores, pick)
 
-def polygon2bbox(poly):
-    # polygon shape [N, 4, 2]
+def nms_for_poly(poly, obj, scores_to_sort):
+    # polygon [N, 4] -> [N, [ymin, xmin, ymax, xmax]]
+    bboxes_to_sort = anchors_gen.polygon2bbox(poly, want_yx=True)
 
-    x = poly[..., 0]
-    y = poly[..., 1]
+    if True:
+        selected_indexes = tf.image.non_max_suppression(bboxes_to_sort, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
+    else:
+        selected_indexes = non_max_suppression(bboxes_to_sort, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
 
-    xmin = tf.math.reduce_min(x, axis=1)
-    ymin = tf.math.reduce_min(y, axis=1)
-    xmax = tf.math.reduce_max(x, axis=1)
-    ymax = tf.math.reduce_max(y, axis=1)
+    poly = tf.gather(poly, selected_indexes)
+    obj = tf.gather(obj, selected_indexes)
+    return poly, obj, selected_indexes
 
-    bbox = tf.stack([ymin, xmin, ymax, xmax], 1)
-    return bbox
+def sort_and_pad_for_poly(poly, obj, scores_to_sort):
+    _, best_index = tf.math.top_k(scores_to_sort, tf.minimum(FLAGS.max_ret, tf.shape(scores_to_sort)[0]), sorted=True)
+
+    poly = tf.gather(poly, best_index)
+    obj = tf.gather(obj, best_index)
+    obj = tf.squeeze(obj, 1)
+
+    to_add = tf.maximum(FLAGS.max_ret - tf.shape(obj)[0], 0)
+    poly = tf.pad(poly, [[0, to_add], [0, 0], [0, 0]] , 'CONSTANT')
+    obj = tf.pad(obj, [[0, to_add]], 'CONSTANT')
+    return poly, obj, best_index
 
 def per_image_supression(pred_values, image_size, dictionary_size, all_anchors):
     char_boundary_start = 0
@@ -255,39 +231,22 @@ def per_image_supression(pred_values, image_size, dictionary_size, all_anchors):
     char_letters = tf.gather(pred_char_letters, char_index)
     char_letters_prob = tf.gather(pred_char_letters_prob, char_index)
 
-    # polygon [N, 4] -> [N, [ymin, xmin, ymax, xmax]]
-    char_bboxes = polygon2bbox(char_poly)
-    word_bboxes = polygon2bbox(word_poly)
-
-    scores_to_sort = tf.squeeze(char_obj * char_letters_prob, 1)
-    bboxes_to_sort = char_bboxes
-    if True:
-        selected_indexes = tf.image.non_max_suppression(bboxes_to_sort, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
-    else:
-        selected_indexes = non_max_suppression(bboxes_to_sort, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
-
-    char_poly = tf.gather(char_poly, selected_indexes)
-    char_obj = tf.gather(char_obj, selected_indexes)
-    char_letters = tf.gather(char_letters, selected_indexes)
-    char_letters_prob = tf.gather(char_letters_prob, selected_indexes)
-
-    scores_to_sort = char_obj * char_letters_prob
-    #scores_to_sort = char_obj
-    scores_to_sort = tf.squeeze(scores_to_sort, 1)
-    _, best_index = tf.math.top_k(scores_to_sort, tf.minimum(FLAGS.max_ret, tf.shape(scores_to_sort)[0]), sorted=True)
-
-    char_poly = tf.gather(char_poly, best_index)
-    char_obj = tf.gather(char_obj, best_index)
-    char_obj = tf.squeeze(char_obj, 1)
-    char_letters = tf.gather(char_letters, best_index)
+    char_poly, char_obj, char_index = nms_for_poly(char_poly, char_obj, tf.squeeze(char_obj * char_letters_prob, 1))
+    char_letters = tf.gather(char_letters, char_index)
+    char_letters_prob = tf.gather(char_letters_prob, char_index)
+    char_poly, char_obj, char_index = sort_and_pad_for_poly(char_poly, char_obj, tf.squeeze(char_obj * char_letters_prob, 1))
+    char_letters = tf.gather(char_letters, char_index)
     char_letters = tf.squeeze(char_letters, 1)
+    char_letters_prob = tf.gather(char_letters_prob, char_index)
 
-    to_add = tf.maximum(FLAGS.max_ret - tf.shape(char_obj)[0], 0)
-    char_poly = tf.pad(char_poly, [[0, to_add], [0, 0], [0, 0]] , 'CONSTANT')
-    char_obj = tf.pad(char_obj, [[0, to_add]], 'CONSTANT')
+    to_add = tf.maximum(FLAGS.max_ret - tf.shape(char_index)[0], 0)
     char_letters = tf.pad(char_letters, [[0, to_add]], 'CONSTANT')
 
-    return char_poly, char_obj, char_letters
+
+    word_poly, word_obj, word_index = nms_for_poly(word_poly, word_obj, tf.squeeze(word_obj, 1))
+    word_poly, word_obj, word_index = sort_and_pad_for_poly(word_poly, word_obj, tf.squeeze(word_obj, 1))
+
+    return char_obj, char_poly, char_letters, word_obj, word_poly
 
 def eval_step_logits(model, images, image_size, all_anchors, dictionary_size):
     pred_values = model(images, training=False)
@@ -297,25 +256,83 @@ def eval_step_logits(model, images, image_size, all_anchors, dictionary_size):
                      parallel_iterations=FLAGS.num_cpus,
                      back_prop=False,
                      infer_shape=False,
-                     dtype=(tf.float32, tf.float32, tf.int64))
+                     dtype=(tf.float32, tf.float32, tf.int64, tf.float32, tf.float32))
+
+def draw_poly(image_ax, objs, polys, color='black'):
+    js_anns = []
+
+    for obj, poly in zip(objs, polys):
+        if obj < FLAGS.min_obj_score:
+            break
+
+        ann_js = {
+            'poly': poly.tolist(),
+            'objectness': float(obj),
+        }
+        js_anns.append(ann_js)
+
+        if not FLAGS.do_not_save_images:
+            poly = poly.reshape([-1, 2])
+            for xy in poly:
+                cr = patches.Circle(xy, 2, color='r')
+                image_ax.add_artist(cr)
+
+            poly = patches.Polygon(poly, fill=False, color=color)
+            image_ax.add_artist(poly)
+
+    return js_anns
+
+def draw_char_letters(text_ax, char_objs, char_polys, char_letters, dictionary, image_shape):
+    js_anns = []
+
+    for obj, poly, letter in zip(char_objs, char_polys, char_letters):
+        if obj < FLAGS.min_obj_score:
+            break
+
+        if letter == 0:
+            letter = ' '
+        else:
+            letter = dictionary[letter - 1]
+
+        ann_js = {
+            'poly': poly.tolist(),
+            'letter': letter,
+            'objectness': float(obj),
+        }
+        js_anns.append(ann_js)
+
+        if not FLAGS.do_not_save_images:
+            xmin = poly[0][0]
+            ymin = poly[0][1]
+
+            x = xmin/image_shape[1]
+            y = 1 - ymin/image_shape[0]
+            text = text_ax.text(x, y, letter, verticalalignment='top', color='black', fontsize=8, weight='normal')
+
+    return js_anns
 
 def run_eval(model, dataset, image_size, dst_dir, all_anchors, dictionary_size, dictionary):
     num_files = 0
     dump_js = []
     for filenames, images in dataset:
         start_time = time.time()
-        poly_batch, objs_batch, letters_batch = eval_step_logits(model, images, image_size, all_anchors, dictionary_size)
+        char_obj_batch, char_poly_batch, char_letters_batch, word_obj_batch, word_poly_batch = eval_step_logits(model, images, image_size, all_anchors, dictionary_size)
         num_files += len(filenames)
         time_per_image_ms = (time.time() - start_time) / len(filenames) * 1000
 
         logger.info('batch images: {}, total_processed: {}, time_per_image: {:.1f} ms'.format(len(filenames), num_files, time_per_image_ms))
 
 
-        poly_batch = poly_batch.numpy()
-        objs_batch = objs_batch.numpy()
-        letters_batch = letters_batch.numpy()
+        char_obj_batch = char_obj_batch.numpy()
+        char_poly_batch = char_poly_batch.numpy()
+        char_letters_batch = char_letters_batch.numpy()
 
-        for filename, nn_image, polys, objs, letters in zip(filenames, images, poly_batch, objs_batch, letters_batch):
+        word_obj_batch = word_obj_batch.numpy()
+        word_poly_batch = word_poly_batch.numpy()
+
+        for filename, nn_image, char_objs, char_polys, char_letters, word_objs, word_polys in zip(filenames, images,
+                                                                                                    char_obj_batch, char_poly_batch, char_letters_batch,
+                                                                                                    word_obj_batch, word_poly_batch):
             filename = str(filename.numpy(), 'utf8')
 
             if os.path.isabs(filename):
@@ -332,17 +349,16 @@ def run_eval(model, dataset, image_size, dst_dir, all_anchors, dictionary_size, 
             pad_x = (max_side - imw) / 2
 
             square_scale = max_side / image_size
-            polys *= square_scale
+            char_polys *= square_scale
+            word_polys *= square_scale
 
             diff = [pad_x, pad_y]
-            polys -= diff
-
-            anns = []
+            char_polys -= diff
+            word_polys -= diff
 
             js = {
                 'filename': filename,
             }
-            js_anns = []
 
             fig = None
             text_ax = None
@@ -368,44 +384,13 @@ def run_eval(model, dataset, image_size, dst_dir, all_anchors, dictionary_size, 
                 text_ax.get_yaxis().set_visible(False)
 
 
-            for crop_idx, (poly, obj, letter) in enumerate(zip(polys, objs, letters)):
-                if obj < FLAGS.min_obj_score:
-                    break
+            char_js_anns = draw_char_letters(text_ax, char_objs, char_polys, char_letters, dictionary, image.shape)
 
-                if letter == 0:
-                    letter = ' '
-                else:
-                    letter = dictionary[letter - 1]
+            _ = draw_poly(image_ax, char_objs, char_polys, color='orange')
+            word_js_anns = draw_poly(image_ax, word_objs, word_polys, color='green')
 
-                #logger.info('{}: poly: {}, obj: {:.3f}, letter: {}'.format(filename, poly, obj, letter))
-
-                ann_js = {
-                    'poly': poly.tolist(),
-                    'letter': letter,
-                    'objectness': float(obj),
-                }
-
-                anns.append((None, poly, None))
-                js_anns.append(ann_js)
-
-                if not FLAGS.do_not_save_images:
-                    xmin = poly[0][0]
-                    ymin = poly[0][1]
-
-                    x = xmin/image.shape[1]
-                    y = 1 - ymin/image.shape[0]
-                    text = text_ax.text(x, y, letter, verticalalignment='top', color='black', fontsize=8, weight='normal')
-
-                    poly = poly.reshape([-1, 2])
-                    for xy in poly:
-                        cr = patches.Circle(xy, 2, color='r')
-                        image_ax.add_artist(cr)
-
-                    poly = patches.Polygon(poly, fill=False)
-                    image_ax.add_artist(poly)
-
-
-            js['annotations'] = js_anns
+            js['char'] = char_js_anns
+            js['word'] = word_js_anns
             dump_js.append(js)
 
             if not FLAGS.do_not_save_images:
@@ -470,9 +455,7 @@ def run_inference():
                     filenames.append(line)
         ds = tf.data.Dataset.from_tensor_slices((filenames))
         ds = ds.map(lambda fn: tf_read_image(fn, image_size, dtype), num_parallel_calls=FLAGS.num_cpus)
-    elif FLAGS.dataset_type == 'tfrecords':
-        from detection import unpack_tfrecord
-
+    elif FLAGS.dataset_type == 'mscoco_tfrecords':
         filenames = []
         for fn in os.listdir(FLAGS.eval_tfrecord_dir):
             fn = os.path.join(FLAGS.eval_tfrecord_dir, fn)
@@ -480,11 +463,7 @@ def run_inference():
                 filenames.append(fn)
 
         ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=2)
-        ds = ds.map(lambda record: unpack_tfrecord(record, all_anchors,
-                    image_size, False,
-                    FLAGS.data_format),
-            num_parallel_calls=16)
-        ds = ds.map(lambda filename, image, true_values: tf_left_needed_dimensions_from_tfrecord(image_size, all_anchors, filename, image, true_values, dictionary_size),
+        ds = ds.map(lambda record: mscoco_unpack_tfrecord(record, all_anchors, image_size, False, FLAGS.data_format),
             num_parallel_calls=16)
 
     ds = ds.batch(FLAGS.batch_size)
