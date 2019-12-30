@@ -118,18 +118,22 @@ def box_iou(pred_boxes, valid_true_boxes):
 
     return iou
 
-def polygon2bbox(poly):
+def polygon2bbox(poly, want_yx=False):
     # polygon shape [N, 4, 2]
 
     x = poly[..., 0]
     y = poly[..., 1]
 
-    xmin = tf.math.reduce_min(x, axis=1)
-    ymin = tf.math.reduce_min(y, axis=1)
-    xmax = tf.math.reduce_max(x, axis=1)
-    ymax = tf.math.reduce_max(y, axis=1)
+    xmin = tf.math.reduce_min(x, axis=1, keepdims=True)
+    ymin = tf.math.reduce_min(y, axis=1, keepdims=True)
+    xmax = tf.math.reduce_max(x, axis=1, keepdims=True)
+    ymax = tf.math.reduce_max(y, axis=1, keepdims=True)
 
-    bbox = tf.stack([xmin, ymin, xmax, ymax], 1)
+    if want_yx:
+        bbox = tf.concat([ymin, xmin, ymax, xmax], 1)
+    else:
+        bbox = tf.concat([xmin, ymin, xmax, ymax], 1)
+
     return bbox
 
 def find_bbox_anchor_for_poly(poly, anchors_all):
