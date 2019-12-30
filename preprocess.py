@@ -120,7 +120,7 @@ def random_expand(image, polys, ratio=2):
 
     return big_canvas, polys
 
-def preprocess_for_train(image, char_poly, word_poly, disable_rotation_augmentation):
+def preprocess_for_train(image, char_poly, word_poly, image_size, disable_rotation_augmentation):
     image = apply_with_random_selector(image,
             lambda x, ordering: distort_color(x, ordering, True),
             num_cases=4)
