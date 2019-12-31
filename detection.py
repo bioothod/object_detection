@@ -461,7 +461,7 @@ def train():
                     want_reset = True
                     learning_rate_multiplier = initial_learning_rate_multiplier
 
-                if want_reset and best_saved_path is not None:
+                if want_reset and best_saved_path:
                     logger.info('epoch: {}, best metric: {:.5f}, learning rate: {:.2e} -> {:.2e}, restoring best checkpoint: {}'.format(
                         epoch, best_metric, learning_rate.numpy(), new_lr, best_saved_path))
 
