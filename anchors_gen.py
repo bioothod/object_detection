@@ -118,7 +118,7 @@ def box_iou(pred_boxes, valid_true_boxes):
 
     return iou
 
-def polygon2bbox(poly, want_yx=False):
+def polygon2bbox(poly, want_yx=False, want_wh=False):
     # polygon shape [N, 4, 2]
 
     x = poly[..., 0]
@@ -131,6 +131,8 @@ def polygon2bbox(poly, want_yx=False):
 
     if want_yx:
         bbox = tf.concat([ymin, xmin, ymax, xmax], 1)
+    elif want_wh:
+        bbox = tf.concat([xmin, ymin, xmax - xmin, ymax - ymin], 1)
     else:
         bbox = tf.concat([xmin, ymin, xmax, ymax], 1)
 
