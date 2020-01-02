@@ -77,7 +77,7 @@ def tf_read_image(filename, image_size, dtype):
     image = tf.image.decode_jpeg(image, channels=3)
     orig_shape = tf.shape(image)
 
-    image = scale_norm_image(image, image_size, 0, dtype)
+    image = scale_norm_image(image, image_size, dtype)
     return filename, image, 0, 0, orig_shape
 
 def mscoco_unpack_tfrecord(record, anchors_all, image_size, is_training, dict_table, dictionary_size, data_format, dtype):
@@ -119,7 +119,7 @@ def mscoco_unpack_tfrecord(record, anchors_all, image_size, is_training, dict_ta
     word_poly = tf.pad(word_poly, [[0, to_add], [0, 0], [0, 0]] , 'CONSTANT')
     text_labels = tf.pad(text_labels, [[0, to_add]], 'CONSTANT')
 
-    return filename, image, word_poly, text_labels, orig_shape
+    return filename, image, word_poly, text_labels, tf.cast(orig_shape, tf.float32)
 
 def non_max_suppression(coords, scores, max_ret, iou_threshold):
     ymin, xmin, ymax, xmax = tf.split(coords, num_or_size_splits=4, axis=1)
@@ -394,6 +394,8 @@ def run_eval(model, dataset, image_size, dst_dir, all_anchors, dictionary_size, 
         word_obj_batch = word_obj_batch.numpy()
         word_poly_batch = word_poly_batch.numpy()
 
+        orig_image_shapes = orig_image_shapes.numpy()
+
         for filename, orig_image_shape, char_objs, nn_char_polys, char_letters, word_objs, nn_word_polys, true_word_poly, true_text_labels in zip(filenames, orig_image_shapes,
                                                                                                                                     char_obj_batch, char_poly_batch, char_letters_batch,
                                                                                                                                     word_obj_batch, word_poly_batch,
@@ -414,7 +416,7 @@ def run_eval(model, dataset, image_size, dst_dir, all_anchors, dictionary_size, 
             pad_y = (max_side - imh) / 2
             pad_x = (max_side - imw) / 2
 
-            square_scale = float(max_side / image_size)
+            square_scale = max_side / image_size
             diff = np.array([pad_x, pad_y], dtype=np.float32)
 
             char_polys = nn_char_polys * square_scale - diff
@@ -456,7 +458,7 @@ def run_eval(model, dataset, image_size, dst_dir, all_anchors, dictionary_size, 
 
                         new_word_polys.append(wp)
 
-                if len(new_char_polys):
+                if len(new_char_polys) > 0:
                     char_polys = np.concatenate(new_char_polys, 0)
                     word_polys = np.stack(new_word_polys, 0)
                     #logger.info('{}: char_poly: {}, word_poly: {}'.format(filename, char_polys.shape, word_polys.shape))

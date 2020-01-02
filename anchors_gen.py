@@ -196,13 +196,13 @@ def generate_true_values_for_anchors(char_poly, word_poly, encoded_chars, anchor
 
     return output
 
-def unpack_true_values(true_values, all_anchors, dst_image_shape):
+def unpack_true_values(true_values, all_anchors, current_image_shape, image_size, dictionary_size):
     char_boundary_start = 0
     word_boundary_start = dictionary_size + 1 + 4 * 2
 
     # true tensors
-    true_char = y_true[..., char_boundary_start : char_boundary_start + word_boundary_start]
-    true_word = y_true[..., word_boundary_start : ]
+    true_char = true_values[..., char_boundary_start : char_boundary_start + word_boundary_start]
+    true_word = true_values[..., word_boundary_start : ]
 
     true_char_obj = true_char[..., 0]
     true_char_poly = true_char[..., 1 : 9]
@@ -221,16 +221,16 @@ def unpack_true_values(true_values, all_anchors, dst_image_shape):
     word_poly = tf.reshape(word_poly, [-1, 4, 2])
 
     best_anchors = tf.gather(all_anchors[..., :2], char_index)
-    best_anchors = tf.expand_dims(best_anchors, 1)
     best_anchors = tf.tile(best_anchors, [1, 4, 1])
     char_poly = char_poly + best_anchors
 
     best_anchors = tf.gather(all_anchors[..., :2], word_index)
-    best_anchors = tf.expand_dims(best_anchors, 1)
     best_anchors = tf.tile(best_anchors, [1, 4, 1])
     word_poly = word_poly + best_anchors
 
-    imh, imw = dst_image_shape[:2]
+    current_image_shape = tf.cast(current_image_shape, tf.float32)
+
+    imh, imw = current_image_shape[:2]
     max_side = tf.maximum(imh, imw)
     pad_y = (max_side - imh) / 2
     pad_x = (max_side - imw) / 2

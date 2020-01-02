@@ -103,8 +103,8 @@ def unpack_tfrecord(record, anchors_all, image_size, dictionary_size, dict_table
     chars = tf.strings.unicode_split(text, 'UTF-8')
     encoded_chars = dict_table.lookup(chars)
 
-    if is_training:
-        image, char_poly, word_poly = preprocess.preprocess_for_train(image, char_poly, word_poly, image_size, FLAGS.disable_rotation_augmentation)
+    #if is_training:
+    #    image, char_poly, word_poly = preprocess.preprocess_for_train(image, char_poly, word_poly, image_size, FLAGS.disable_rotation_augmentation)
 
     true_values = anchors_gen.generate_true_values_for_anchors(char_poly, word_poly, encoded_chars, anchors_all, dictionary_size)
 
@@ -132,13 +132,13 @@ def draw_bboxes(image_size, train_dataset, num_examples, all_anchors, dictionary
             image = image * 128 + 128
             image = image.astype(np.uint8)
 
-        true_char_obj, char_poly, true_char_letter, true_word_obj, word_poly = anchors_gen.unpack_true_values(true_values, all_anchors, image.shape)
+        true_char_obj, char_poly, true_char_letter, true_word_obj, word_poly = anchors_gen.unpack_true_values(true_values, all_anchors, image.shape, image_size, dictionary_size)
 
         word_poly = word_poly.numpy()
         char_poly = char_poly.numpy()
 
         new_anns = []
-        for poly in word_poly:
+        for poly in char_poly:
             new_anns.append((None, poly, None))
 
         image_draw.draw_im(image, new_anns, dst, {})
