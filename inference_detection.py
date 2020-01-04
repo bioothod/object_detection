@@ -76,6 +76,7 @@ def tf_read_image(filename, image_size, dtype):
     image = tf.io.read_file(filename)
     image = tf.image.decode_jpeg(image, channels=3)
     orig_shape = tf.shape(image)
+    orig_shape = tf.cast(orig_shape, tf.float32)
 
     image = scale_norm_image(image, image_size, dtype)
     return filename, image, 0, 0, orig_shape
@@ -96,6 +97,8 @@ def mscoco_unpack_tfrecord(record, anchors_all, image_size, is_training, dict_ta
 
     image = tf.image.decode_jpeg(features['image'], channels=3)
     orig_shape = tf.shape(image)
+    orig_shape = tf.cast(orig_shape, tf.float32)
+
     image = scale_norm_image(image, image_size, dtype)
 
 
@@ -113,13 +116,16 @@ def mscoco_unpack_tfrecord(record, anchors_all, image_size, is_training, dict_ta
     p3 = tf.concat([xmin, ymin + h], axis=1)
 
     word_poly = tf.stack([p0, p1, p2, p3], axis=1)
-    word_poly = word_poly[:250, ...]
 
-    to_add = tf.maximum(250 - tf.shape(word_poly)[0], 0)
+    max_elements = 250
+    word_poly = word_poly[:max_elements, ...]
+    text_labels = text_labels[:max_elements]
+
+    to_add = tf.maximum(max_elements - tf.shape(word_poly)[0], 0)
     word_poly = tf.pad(word_poly, [[0, to_add], [0, 0], [0, 0]] , 'CONSTANT')
     text_labels = tf.pad(text_labels, [[0, to_add]], 'CONSTANT')
 
-    return filename, image, word_poly, text_labels, tf.cast(orig_shape, tf.float32)
+    return filename, image, word_poly, text_labels, orig_shape
 
 def non_max_suppression(coords, scores, max_ret, iou_threshold):
     ymin, xmin, ymax, xmax = tf.split(coords, num_or_size_splits=4, axis=1)
