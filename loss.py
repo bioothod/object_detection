@@ -14,6 +14,7 @@ class Metric:
         self.char_obj_loss = tf.keras.metrics.Mean()
         self.word_obj_loss = tf.keras.metrics.Mean()
 
+        self.letters_ce_loss = tf.keras.metrics.Mean()
         self.letters_accuracy = tf.keras.metrics.CategoricalAccuracy()
 
         self.char_obj_accuracy = tf.keras.metrics.BinaryAccuracy()
@@ -28,13 +29,14 @@ class Metric:
         self.char_obj_loss.reset_states()
         self.word_obj_loss.reset_states()
 
+        self.letters_ce_loss.reset_states()
         self.letters_accuracy.reset_states()
 
         self.char_obj_accuracy.reset_states()
         self.word_obj_accuracy.reset_states()
 
     def str_result(self):
-        return 'total_loss: {:.3e}, dist_loss: {:.3e}/{:.3e}, obj_loss: {:.3e}/{:.3e}, letters_accuracy: {:.4f}, obj_accuracy: {:.4f}/{:.4f}'.format(
+        return 'total_loss: {:.3e}, dist: {:.3e}/{:.3e}, obj: {:.3e}/{:.3e}, letters_ce: {:.3e}, letters_accuracy: {:.4f}, obj_accuracy: {:.4f}/{:.4f}'.format(
                 self.total_loss.result(),
                 self.char_dist_loss.result(),
                 self.word_dist_loss.result(),
@@ -42,6 +44,7 @@ class Metric:
                 self.char_obj_loss.result(),
                 self.word_obj_loss.result(),
 
+                self.letters_ce_loss.result(),
                 self.letters_accuracy.result(),
 
                 self.char_obj_accuracy.result(),
@@ -72,8 +75,8 @@ class LossMetricAggregator:
         self.grid_xy = tf.expand_dims(self.grid_xy, 0)
 
         self.mae = tf.keras.losses.MeanAbsoluteError(reduction=tf.keras.losses.Reduction.NONE)
-        self.letters_loss = tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.05, from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
-        self.obj_loss = tf.keras.losses.BinaryCrossentropy(label_smoothing=0.05, from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
+        self.letters_loss = tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.1, from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
+        self.obj_loss = tf.keras.losses.BinaryCrossentropy(label_smoothing=0.1, from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
 
         self.train_metric = Metric(name='train_metric')
         self.eval_metric = Metric(name='eval_metric')
@@ -196,11 +199,12 @@ class LossMetricAggregator:
 
         # char CE loss
         letters_ce_loss = self.letters_loss(y_true=true_char_letters, y_pred=pred_char_letters)
+        m.letters_ce_loss.update_state(letters_ce_loss)
         m.letters_accuracy.update_state(true_char_letters, pred_char_letters)
 
         letters_ce_loss = tf.nn.compute_average_loss(letters_ce_loss, global_batch_size=self.global_batch_size)
 
-        total_loss = dist_loss + obj_loss + letters_ce_loss
+        total_loss = dist_loss*0.1 + obj_loss + letters_ce_loss
         m.total_loss.update_state(total_loss)
 
         return total_loss
