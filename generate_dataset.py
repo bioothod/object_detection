@@ -95,7 +95,7 @@ def do_work(worker_id, tup):
         text_concat = ''.join(text)
         texts = '<SEP>'.join(text)
 
-        char_poly = char_poly.astype(np.float32)
+        char_poly = char_poly.astype(np.float64)
         word_poly = word_poly.astype(np.float32)
 
         example = tf.train.Example(features=tf.train.Features(feature={
