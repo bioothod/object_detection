@@ -121,9 +121,10 @@ def random_expand(image, polys, ratio=2):
     return big_canvas, polys
 
 def preprocess_for_train(image, char_poly, word_poly, image_size, disable_rotation_augmentation):
-    image = apply_with_random_selector(image,
-            lambda x, ordering: distort_color(x, ordering, True),
-            num_cases=4)
+    if tf.random.uniform([], 0, 1) > 0.5:
+        image = apply_with_random_selector(image,
+                lambda x, ordering: distort_color(x, ordering, True),
+                num_cases=4)
 
     char_poly_rel = char_poly / image_size
     word_poly_rel = word_poly / image_size
