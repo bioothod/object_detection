@@ -16,6 +16,7 @@ from collections import defaultdict
 
 import anchors_gen
 import encoder
+import tfrecord_writer
 
 logger = logging.getLogger('detection')
 logger.propagate = False
@@ -41,10 +42,10 @@ parser.add_argument('--skip_checkpoint_assertion', action='store_true', help='Sk
 parser.add_argument('--no_channel_swap', action='store_true', help='When set, do not perform rgb-bgr conversion, needed, when using files as input')
 parser.add_argument('--freeze', action='store_true', help='Save frozen protobuf near checkpoint')
 parser.add_argument('--do_not_save_images', action='store_true', help='Do not save images with bounding boxes')
-parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
 parser.add_argument('--save_crops_dir', type=str, help='Directory to save slightly upscaled text crops')
-parser.add_argument('--dataset_type', type=str, choices=['files', 'tfrecords', 'filelist'], default='files', help='Dataset type')
+parser.add_argument('--dataset_type', type=str, choices=['files', 'mscoco_tfrecords', 'filelist'], default='files', help='Dataset type')
 parser.add_argument('--image_size', type=int, required=True, help='Use this image size, if 0 - use default')
+parser.add_argument('--num_images_per_tfrecord', default=10000, type=int, help='Maximum number of images per tfrecord')
 parser.add_argument('filenames', type=str, nargs='*', help='Numeric label : file path')
 
 default_char_dictionary="!\"#&\'\\()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -74,27 +75,51 @@ def scale_norm_image(image, image_size, dtype):
 def tf_read_image(filename, image_size, dtype):
     image = tf.io.read_file(filename)
     image = tf.image.decode_jpeg(image, channels=3)
+    orig_shape = tf.shape(image)
 
     image = scale_norm_image(image, image_size, dtype)
-    return filename, image
+    return filename, image, 0, 0, orig_shape
 
-def mscoco_unpack_tfrecord(record, anchors_all, image_size, dictionary_size, dict_table, is_training, data_format, dtype):
-    features = tf.train.Example(features=tf.train.Features(feature={
-        'image_id': _int64_feature(image_id),
-        'image': _bytes_feature(bytes(image_enc)),
-        'filename': _bytes_feature(bytes(filename, 'utf8')),
-        'true_bboxes': _bytes_feature(true_bboxes.tobytes()),
-        'true_labels': _bytes_feature(bytes(true_labels, 'utf8')),
-    }))
+def mscoco_unpack_tfrecord(record, anchors_all, image_size, is_training, dict_table, dictionary_size, data_format, dtype):
+    features = tf.io.parse_single_example(record,
+            features={
+                'image_id': tf.io.FixedLenFeature([], tf.int64),
+                'filename': tf.io.FixedLenFeature([], tf.string),
+                'true_labels': tf.io.FixedLenFeature([], tf.string),
+                'true_bboxes': tf.io.FixedLenFeature([], tf.string),
+                'image': tf.io.FixedLenFeature([], tf.string),
+            })
 
     filename = features['filename']
 
-    true_text_labels = tf.strings.split(features['true_labels'], '<SEP>')
+    text_labels = tf.strings.split(features['true_labels'], '<SEP>')
 
     image = tf.image.decode_jpeg(features['image'], channels=3)
+    orig_shape = tf.shape(image)
     image = scale_norm_image(image, image_size, dtype)
 
-    return filename, image
+
+    orig_bboxes = tf.io.decode_raw(features['true_bboxes'], tf.float32)
+    orig_bboxes = tf.reshape(orig_bboxes, [-1, 4])
+
+    cx, cy, h, w = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
+    xmin = cx - w / 2
+    ymin = cy - h / 2
+
+    # return bboxes in the original format without scaling it to square
+    p0 = tf.concat([xmin, ymin], axis=1)
+    p1 = tf.concat([xmin + w, ymin], axis=1)
+    p2 = tf.concat([xmin + w, ymin + h], axis=1)
+    p3 = tf.concat([xmin, ymin + h], axis=1)
+
+    word_poly = tf.stack([p0, p1, p2, p3], axis=1)
+    word_poly = word_poly[:250, ...]
+
+    to_add = tf.maximum(250 - tf.shape(word_poly)[0], 0)
+    word_poly = tf.pad(word_poly, [[0, to_add], [0, 0], [0, 0]] , 'CONSTANT')
+    text_labels = tf.pad(text_labels, [[0, to_add]], 'CONSTANT')
+
+    return filename, image, word_poly, text_labels, tf.cast(orig_shape, tf.float32)
 
 def non_max_suppression(coords, scores, max_ret, iou_threshold):
     ymin, xmin, ymax, xmax = tf.split(coords, num_or_size_splits=4, axis=1)
@@ -192,6 +217,14 @@ def sort_and_pad_for_poly(poly, obj, scores_to_sort):
     obj = tf.pad(obj, [[0, to_add]], 'CONSTANT')
     return poly, obj, best_index
 
+def filter_poly(poly, obj):
+    best_index = tf.where(tf.greater(obj, FLAGS.min_obj_score))
+
+    new_poly = tf.gather(poly, best_index)
+    new_obj = tf.gather(obj, best_index)
+    logger.info('best_index: {}, poly: {} -> {}, obj: {} -> {}'.format(best_index.shape, poly.shape, new_poly.shape, obj.shape, new_obj.shape))
+    return new_poly, new_obj, best_index
+
 def per_image_supression(pred_values, image_size, dictionary_size, all_anchors):
     char_boundary_start = 0
     word_boundary_start = dictionary_size + 1 + 4 * 2
@@ -209,8 +242,8 @@ def per_image_supression(pred_values, image_size, dictionary_size, all_anchors):
     pred_word_obj = tf.math.sigmoid(pred_word[..., 0])
     pred_word_poly = pred_word[..., 1 : 9]
 
-    char_index = tf.where(pred_char_obj > 0)
-    word_index = tf.where(pred_word_obj > 0)
+    char_index = tf.where(pred_char_obj > FLAGS.min_obj_score)
+    word_index = tf.where(pred_word_obj > FLAGS.min_obj_score)
 
     char_poly = tf.gather(pred_char_poly, char_index)
     char_poly = tf.reshape(char_poly, [-1, 4, 2])
@@ -231,10 +264,13 @@ def per_image_supression(pred_values, image_size, dictionary_size, all_anchors):
     char_letters = tf.gather(pred_char_letters, char_index)
     char_letters_prob = tf.gather(pred_char_letters_prob, char_index)
 
-    char_poly, char_obj, char_index = nms_for_poly(char_poly, char_obj, tf.squeeze(char_obj * char_letters_prob, 1))
+    scores_to_sort = tf.squeeze(char_obj * char_letters_prob, 1)
+    char_poly, char_obj, char_index = nms_for_poly(char_poly, char_obj, scores_to_sort)
     char_letters = tf.gather(char_letters, char_index)
     char_letters_prob = tf.gather(char_letters_prob, char_index)
-    char_poly, char_obj, char_index = sort_and_pad_for_poly(char_poly, char_obj, tf.squeeze(char_obj * char_letters_prob, 1))
+
+    scores_to_sort = tf.squeeze(char_obj * char_letters_prob, 1)
+    char_poly, char_obj, char_index = sort_and_pad_for_poly(char_poly, char_obj, scores_to_sort)
     char_letters = tf.gather(char_letters, char_index)
     char_letters = tf.squeeze(char_letters, 1)
     char_letters_prob = tf.gather(char_letters_prob, char_index)
@@ -302,19 +338,47 @@ def draw_char_letters(text_ax, char_objs, char_polys, char_letters, dictionary, 
         js_anns.append(ann_js)
 
         if not FLAGS.do_not_save_images:
-            xmin = poly[0][0]
-            ymin = poly[0][1]
+            x = poly[0][0]
+            y = poly[0][1]
 
-            x = xmin/image_shape[1]
-            y = 1 - ymin/image_shape[0]
+            x = x/image_shape[1]
+            y = 1 - y/image_shape[0]
             text = text_ax.text(x, y, letter, verticalalignment='top', color='black', fontsize=8, weight='normal')
 
     return js_anns
 
-def run_eval(model, dataset, image_size, dst_dir, all_anchors, dictionary_size, dictionary):
+def _int64_feature(value):
+    return tf.train.Feature(int64_list=tf.train.Int64List(value=[value]))
+
+def _bytes_feature(value):
+    return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
+
+def write_example(writer, filename, char_polys, word_polys, text_strings):
+    texts = '<SEP>'.join(text_strings)
+    chars = ''.join(text_strings)
+
+    with open(filename, 'rb') as fin:
+        image_data = fin.read()
+
+    char_polys = char_polys.astype(np.float64)
+    word_polys = word_polys.astype(np.float32)
+
+    example = tf.train.Example(features=tf.train.Features(feature={
+        'image': _bytes_feature(image_data),
+        'filename': _bytes_feature(bytes(filename, 'UTF-8')),
+        'char_poly': _bytes_feature(char_polys.tobytes()),
+        'word_poly': _bytes_feature(word_polys.tobytes()),
+        'text': _bytes_feature(bytes(texts, 'UTF-8')),
+        'text_concat': _bytes_feature(bytes(chars, 'UTF-8')),
+        }))
+
+    data = bytes(example.SerializeToString())
+    writer.write(data)
+
+def run_eval(model, dataset, image_size, dst_dir, all_anchors, dictionary_size, dictionary, writer):
     num_files = 0
     dump_js = []
-    for filenames, images in dataset:
+    for filenames, images, true_word_poly_batch, true_text_labels_batch, orig_image_shapes in dataset:
         start_time = time.time()
         char_obj_batch, char_poly_batch, char_letters_batch, word_obj_batch, word_poly_batch = eval_step_logits(model, images, image_size, all_anchors, dictionary_size)
         num_files += len(filenames)
@@ -330,31 +394,79 @@ def run_eval(model, dataset, image_size, dst_dir, all_anchors, dictionary_size, 
         word_obj_batch = word_obj_batch.numpy()
         word_poly_batch = word_poly_batch.numpy()
 
-        for filename, nn_image, char_objs, char_polys, char_letters, word_objs, word_polys in zip(filenames, images,
-                                                                                                    char_obj_batch, char_poly_batch, char_letters_batch,
-                                                                                                    word_obj_batch, word_poly_batch):
+        orig_image_shapes = orig_image_shapes.numpy()
+
+        for filename, orig_image_shape, char_objs, nn_char_polys, char_letters, word_objs, nn_word_polys, true_word_poly, true_text_labels in zip(filenames, orig_image_shapes,
+                                                                                                                                    char_obj_batch, char_poly_batch, char_letters_batch,
+                                                                                                                                    word_obj_batch, word_poly_batch,
+                                                                                                                                    true_word_poly_batch, true_text_labels_batch):
             filename = str(filename.numpy(), 'utf8')
 
-            if os.path.isabs(filename):
-                image = cv2.imread(filename)
-            else:
-                image_filename = '/shared2/object_detection/datasets/text/synth_text/SynthText/{}'.format(filename)
-                image = cv2.imread(image_filename)
+            if not FLAGS.do_not_save_images:
+                if os.path.isabs(filename):
+                    image = cv2.imread(filename)
+                else:
+                    image_filename = '/shared2/object_detection/datasets/text/synth_text/SynthText/{}'.format(filename)
+                    image = cv2.imread(image_filename)
 
             base_filename = os.path.basename(filename)
 
-            imh, imw = image.shape[:2]
+            imh, imw = orig_image_shape[:2]
             max_side = max(imh, imw)
             pad_y = (max_side - imh) / 2
             pad_x = (max_side - imw) / 2
 
             square_scale = max_side / image_size
-            char_polys *= square_scale
-            word_polys *= square_scale
+            diff = np.array([pad_x, pad_y], dtype=np.float32)
 
-            diff = [pad_x, pad_y]
-            char_polys -= diff
-            word_polys -= diff
+            char_polys = nn_char_polys * square_scale - diff
+            word_polys = nn_word_polys * square_scale - diff
+
+            if FLAGS.dataset_type == 'mscoco_tfrecords':
+                char_bboxes = anchors_gen.polygon2bbox(char_polys)
+                true_word_bboxes = anchors_gen.polygon2bbox(true_word_poly, want_wh=True)
+
+                ious = anchors_gen.box_iou(char_bboxes, true_word_bboxes)
+                # [char, word] -> [word, char]
+                ious = tf.transpose(ious, [1, 0])
+
+                new_char_polys = []
+                new_word_polys = []
+                new_text_labels = []
+
+                true_word_poly = true_word_poly.numpy()
+                true_text_labels = true_text_labels.numpy()
+
+                ious = ious.numpy()
+
+                for wp, text_label, iou in zip(true_word_poly, true_text_labels, ious):
+                    if len(wp) == 0:
+                        break
+
+                    text_label = str(text_label, 'utf8')
+                    if len(text_label) == 0 or text_label == '<SKIP>':
+                        continue
+
+                    iou_int = np.where(iou > 1 / len(text_label) / 2)[0]
+                    if len(iou_int) == len(text_label):
+                        good_cp = char_polys[iou_int]
+                        new_char_polys.append(good_cp)
+
+                        new_text_labels.append(text_label)
+
+                        #logger.info('{}: text_label: {}, good_cp: {}, iou: {}'.format(filename, text_label, len(good_cp), iou_int))
+
+                        new_word_polys.append(wp)
+
+                if len(new_char_polys) > 0:
+                    char_polys = np.concatenate(new_char_polys, 0)
+                    word_polys = np.stack(new_word_polys, 0)
+                    #logger.info('{}: char_poly: {}, word_poly: {}'.format(filename, char_polys.shape, word_polys.shape))
+
+                    if FLAGS.do_not_save_images:
+                        write_example(writer, filename, char_polys, word_polys, new_text_labels)
+                else:
+                    continue
 
             js = {
                 'filename': filename,
@@ -368,7 +480,7 @@ def run_eval(model, dataset, image_size, dst_dir, all_anchors, dictionary_size, 
 
                 rows = 1
                 columns = 2
-                scale = 5
+                scale = 10
                 fig = plt.figure(figsize=(columns*scale, rows*scale))
 
                 image_ax = fig.add_subplot(rows, columns, 1)
@@ -384,7 +496,7 @@ def run_eval(model, dataset, image_size, dst_dir, all_anchors, dictionary_size, 
                 text_ax.get_yaxis().set_visible(False)
 
 
-            char_js_anns = draw_char_letters(text_ax, char_objs, char_polys, char_letters, dictionary, image.shape)
+            char_js_anns = draw_char_letters(text_ax, char_objs, char_polys, char_letters, dictionary, orig_image_shape)
 
             _ = draw_poly(image_ax, char_objs, char_polys, color='orange')
             word_js_anns = draw_poly(image_ax, word_objs, word_polys, color='green')
@@ -417,9 +529,13 @@ def run_inference():
 
     num_images = len(FLAGS.filenames)
 
+    writer = None
+
     dtype = tf.float32
     image_size = FLAGS.image_size
-    dictionary_size = len(FLAGS.dictionary) + 1
+
+    dictionary_size, dict_table = anchors_gen.create_lookup_table(FLAGS.dictionary)
+
     model = encoder.create_model(FLAGS.model_name, dictionary_size)
     if model.output_sizes is None:
         dummy_input = tf.ones((int(FLAGS.batch_size), image_size, image_size, 3), dtype=dtype)
@@ -457,13 +573,21 @@ def run_inference():
         ds = ds.map(lambda fn: tf_read_image(fn, image_size, dtype), num_parallel_calls=FLAGS.num_cpus)
     elif FLAGS.dataset_type == 'mscoco_tfrecords':
         filenames = []
-        for fn in os.listdir(FLAGS.eval_tfrecord_dir):
-            fn = os.path.join(FLAGS.eval_tfrecord_dir, fn)
-            if os.path.isfile(fn):
-                filenames.append(fn)
+        for dirname in FLAGS.filenames:
+            for fn in os.listdir(dirname):
+                fn = os.path.join(dirname, fn)
+                if os.path.isfile(fn):
+                    filenames.append(fn)
+
+
+        tfrecords_dir = os.path.join(FLAGS.output_dir, FLAGS.dataset_type)
+        os.makedirs(tfrecords_dir, exist_ok=True)
+
+        if FLAGS.do_not_save_images:
+            writer = tfrecord_writer.tf_records_writer('{}/tfrecord'.format(tfrecords_dir), 0, FLAGS.num_images_per_tfrecord)
 
         ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=2)
-        ds = ds.map(lambda record: mscoco_unpack_tfrecord(record, all_anchors, image_size, False, FLAGS.data_format),
+        ds = ds.map(lambda record: mscoco_unpack_tfrecord(record, all_anchors, image_size, False, dict_table, dictionary_size, FLAGS.data_format, dtype),
             num_parallel_calls=16)
 
     ds = ds.batch(FLAGS.batch_size)
@@ -471,7 +595,10 @@ def run_inference():
 
     logger.info('Dataset has been created: num_images: {}, model_name: {}'.format(num_images, FLAGS.model_name))
 
-    run_eval(model, ds, image_size, FLAGS.output_dir, all_anchors, dictionary_size, FLAGS.dictionary)
+    run_eval(model, ds, image_size, FLAGS.output_dir, all_anchors, dictionary_size, FLAGS.dictionary, writer)
+
+    if writer:
+        writer.close()
 
 if __name__ == '__main__':
     np.set_printoptions(formatter={'float': '{:0.4f}'.format, 'int': '{:4d}'.format}, linewidth=250, suppress=True, threshold=np.inf)

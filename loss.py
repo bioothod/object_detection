@@ -199,6 +199,7 @@ class LossMetricAggregator:
         m.letters_accuracy.update_state(true_char_letters, pred_char_letters)
 
         letters_ce_loss = tf.nn.compute_average_loss(letters_ce_loss, global_batch_size=self.global_batch_size)
+
         total_loss = dist_loss + obj_loss + letters_ce_loss
         m.total_loss.update_state(total_loss)
 

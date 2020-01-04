@@ -45,14 +45,6 @@ parser.add_argument('--disable_rotation_augmentation', action='store_true', help
 default_char_dictionary="!\"#&\'\\()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 parser.add_argument('--dictionary', type=str, default=default_char_dictionary, help='Dictionary to use')
 
-def create_lookup_table(dictionary):
-    dict_split = tf.strings.unicode_split(dictionary, 'UTF-8')
-    dictionary_size = dict_split.shape[0] + 1
-    kv_init = tf.lookup.KeyValueTensorInitializer(keys=dict_split, values=tf.range(1, dictionary_size, 1), key_dtype=tf.string, value_dtype=tf.int32)
-    dict_table = tf.lookup.StaticHashTable(kv_init, 0)
-
-    return dictionary_size, dict_table
-
 def unpack_tfrecord(record, anchors_all, image_size, dictionary_size, dict_table, is_training, data_format):
     features = tf.io.parse_single_example(record,
             features={
@@ -111,8 +103,8 @@ def unpack_tfrecord(record, anchors_all, image_size, dictionary_size, dict_table
     chars = tf.strings.unicode_split(text, 'UTF-8')
     encoded_chars = dict_table.lookup(chars)
 
-    if is_training:
-        image, char_poly, word_poly = preprocess.preprocess_for_train(image, char_poly, word_poly, image_size, FLAGS.disable_rotation_augmentation)
+    #if is_training:
+    #    image, char_poly, word_poly = preprocess.preprocess_for_train(image, char_poly, word_poly, image_size, FLAGS.disable_rotation_augmentation)
 
     true_values = anchors_gen.generate_true_values_for_anchors(char_poly, word_poly, encoded_chars, anchors_all, dictionary_size)
 
@@ -131,41 +123,6 @@ def draw_bboxes(image_size, train_dataset, num_examples, all_anchors, dictionary
 
         dst = os.path.join(data_dir, filename_base)
 
-        char_boundary_start = 0
-        word_boundary_start = dictionary_size + 1 + 4 * 2
-
-        y_true = true_values.numpy()
-        logger.info(filename)
-
-        # true tensors
-        true_char = y_true[..., char_boundary_start : char_boundary_start + word_boundary_start]
-        true_word = y_true[..., word_boundary_start : ]
-
-        true_char_obj = true_char[..., 0]
-        true_char_poly = true_char[..., 1 : 9]
-        true_char_letters = true_char[..., 10 :]
-
-        true_word_obj = true_word[..., 0]
-        true_word_poly = true_word[..., 1 : 9]
-
-        char_index = np.where(true_char_obj != 0)[0]
-        word_index = np.where(true_word_obj != 0)[0]
-
-        char_poly = tf.gather(true_char_poly, char_index)
-        char_poly = tf.reshape(char_poly, [-1, 4, 2])
-        word_poly = tf.gather(true_word_poly, word_index).numpy()
-        word_poly = tf.reshape(word_poly, [-1, 4, 2])
-
-        best_anchors = tf.gather(all_anchors[..., :2], char_index)
-        best_anchors = tf.expand_dims(best_anchors, 1)
-        best_anchors = tf.tile(best_anchors, [1, 4, 1])
-        char_poly = char_poly + best_anchors
-
-        best_anchors = tf.gather(all_anchors[..., :2], word_index)
-        best_anchors = tf.expand_dims(best_anchors, 1)
-        best_anchors = tf.tile(best_anchors, [1, 4, 1])
-        word_poly = word_poly + best_anchors
-
         image_filename = '/shared2/object_detection/datasets/text/synth_text/SynthText/{}'.format(filename)
         if False:
             image = cv2.imread(image_filename)
@@ -175,26 +132,13 @@ def draw_bboxes(image_size, train_dataset, num_examples, all_anchors, dictionary
             image = image * 128 + 128
             image = image.astype(np.uint8)
 
-        imh, imw = image.shape[:2]
-        max_side = max(imh, imw)
-        pad_y = (max_side - imh) / 2
-        pad_x = (max_side - imw) / 2
-        square_scale = max_side / image_size
+        true_char_obj, char_poly, true_char_letter, true_word_obj, word_poly = anchors_gen.unpack_true_values(true_values, all_anchors, image.shape, image_size, dictionary_size)
 
-        char_poly = char_poly.numpy()
         word_poly = word_poly.numpy()
-
-        char_poly *= square_scale
-        word_poly *= square_scale
-
-
-        diff = [pad_x, pad_y]
-        char_poly -= diff
-        word_poly -= diff
-
+        char_poly = char_poly.numpy()
 
         new_anns = []
-        for poly in word_poly:
+        for poly in char_poly:
             new_anns.append((None, poly, None))
 
         image_draw.draw_im(image, new_anns, dst, {})
@@ -222,7 +166,7 @@ def train():
         global_step = tf.Variable(1, dtype=tf.int64, name='global_step', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
         learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
 
-        dictionary_size, dict_table = create_lookup_table(FLAGS.dictionary)
+        dictionary_size, dict_table = anchors_gen.create_lookup_table(FLAGS.dictionary)
 
         image_size = FLAGS.image_size
         #num_classes = 1 + 4*2 + dictionary_size + 1 + 4*2
