@@ -51,6 +51,38 @@ class Metric:
                 self.word_obj_accuracy.result(),
                 )
 
+from tensorflow.python.ops import array_ops
+
+class FocalLoss(tf.keras.losses.Loss):
+    def __init__(self, from_logits=False, label_smoothing=0, reduction=tf.keras.losses.Reduction.NONE):
+        super(FocalLoss, self).__init__()
+        self.alpha = 0.25
+        self.gamma = 2
+        self.reduction = reduction
+        self.from_logits = from_logits
+
+    def call(self, y_true, y_pred, weights=None):
+        y_true = tf.clip_by_value(y_true, 0, 1)
+
+        if self.from_logits:
+            sigmoid_p = tf.nn.sigmoid(y_pred)
+        else:
+            sigmoid_p = y_pred
+
+        zeros = array_ops.zeros_like(sigmoid_p, dtype=sigmoid_p.dtype)
+
+        pos_p_sub = array_ops.where(y_true > zeros, y_true - sigmoid_p, zeros)
+        neg_p_sub = array_ops.where(y_true > zeros, zeros, sigmoid_p)
+
+        per_entry_cross_ent = - self.alpha * (pos_p_sub ** self.gamma) * tf.math.log(tf.clip_by_value(sigmoid_p, 1e-8, 1)) - \
+            (1 - self.alpha) * (neg_p_sub ** self.gamma) * tf.math.log(tf.clip_by_value(1.0 - sigmoid_p, 1e-8, 1))
+
+        if self.reduction == tf.keras.losses.Reduction.NONE:
+            return per_entry_cross_ent
+
+        raise "qwe"
+
+
 class LossMetricAggregator:
     def __init__(self,
                  dictionary_size,
@@ -75,8 +107,8 @@ class LossMetricAggregator:
         self.grid_xy = tf.expand_dims(self.grid_xy, 0)
 
         self.mae = tf.keras.losses.MeanAbsoluteError(reduction=tf.keras.losses.Reduction.NONE)
-        self.letters_loss = tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.1, from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
-        self.obj_loss = tf.keras.losses.BinaryCrossentropy(label_smoothing=0.1, from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
+        self.obj_loss = FocalLoss(label_smoothing=0.1, from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
+        self.label_loss = FocalLoss(label_smoothing=0.1, from_logits=False, reduction=tf.keras.losses.Reduction.NONE)
 
         self.train_metric = Metric(name='train_metric')
         self.eval_metric = Metric(name='eval_metric')
@@ -124,7 +156,7 @@ class LossMetricAggregator:
 
         pred_char_obj = pred_char[..., 0]
         pred_char_poly = pred_char[..., 1 : 9]
-        pred_char_letters = pred_char[..., 10 :]
+        pred_char_letters = pred_char[..., 9 : 9 + self.dictionary_size]
 
         pred_word_obj = pred_word[..., 0]
         pred_word_poly = pred_word[..., 1 : 9]
@@ -135,7 +167,7 @@ class LossMetricAggregator:
 
         true_char_obj = true_char[..., 0]
         true_char_poly = true_char[..., 1 : 9]
-        true_char_letters = true_char[..., 10 :]
+        true_char_letters = true_char[..., 9 :]
 
         true_word_obj = true_word[..., 0]
         true_word_poly = true_word[..., 1 : 9]
@@ -198,13 +230,16 @@ class LossMetricAggregator:
         obj_loss = char_obj_loss + word_obj_loss
 
         # char CE loss
-        letters_ce_loss = self.letters_loss(y_true=true_char_letters, y_pred=pred_char_letters)
+        delta = 0.1
+        true_char_letters_smooth = (1 - delta) * true_char_letters + delta / self.dictionary_size
+        letters_ce_loss = tf.nn.softmax_cross_entropy_with_logits(labels=true_char_letters_smooth, logits=pred_char_letters)
+
         m.letters_ce_loss.update_state(letters_ce_loss)
         m.letters_accuracy.update_state(true_char_letters, pred_char_letters)
 
         letters_ce_loss = tf.nn.compute_average_loss(letters_ce_loss, global_batch_size=self.global_batch_size)
 
-        total_loss = dist_loss*0.1 + obj_loss + letters_ce_loss
+        total_loss = dist_loss + obj_loss + letters_ce_loss
         m.total_loss.update_state(total_loss)
 
         return total_loss
