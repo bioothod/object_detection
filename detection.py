@@ -103,8 +103,8 @@ def unpack_tfrecord(record, anchors_all, image_size, dictionary_size, dict_table
     chars = tf.strings.unicode_split(text, 'UTF-8')
     encoded_chars = dict_table.lookup(chars)
 
-    #if is_training:
-    #    image, char_poly, word_poly = preprocess.preprocess_for_train(image, char_poly, word_poly, image_size, FLAGS.disable_rotation_augmentation)
+    if is_training:
+        image, char_poly, word_poly = preprocess.preprocess_for_train(image, char_poly, word_poly, image_size, FLAGS.disable_rotation_augmentation)
 
     true_values = anchors_gen.generate_true_values_for_anchors(char_poly, word_poly, encoded_chars, anchors_all, dictionary_size)
 
