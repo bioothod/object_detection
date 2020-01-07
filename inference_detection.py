@@ -241,7 +241,7 @@ def per_image_supression(pred_values, image_size, dictionary_size, all_anchors):
 
     pred_char_obj = tf.math.sigmoid(pred_char[..., 0])
     pred_char_poly = pred_char[..., 1 : 9]
-    pred_char_letters_dim = tf.nn.softmax(pred_char[..., 10 :], axis=-1)
+    pred_char_letters_dim = tf.nn.softmax(pred_char[..., 9 : 9 + dictionary_size], axis=-1)
     pred_char_letters = tf.argmax(pred_char_letters_dim, axis=-1)
     pred_char_letters_prob = tf.reduce_max(pred_char_letters_dim, axis=-1)
 
