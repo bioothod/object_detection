@@ -206,7 +206,7 @@ def unpack_true_values(true_values, all_anchors, current_image_shape, image_size
 
     true_char_obj = true_char[..., 0]
     true_char_poly = true_char[..., 1 : 9]
-    true_char_letters = true_char[..., 10 :]
+    true_char_letters = true_char[..., 9 :]
     true_char_letter = tf.argmax(true_char_letters, -1)
 
     true_word_obj = true_word[..., 0]
