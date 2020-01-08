@@ -147,14 +147,17 @@ class Head(tf.keras.layers.Layer):
     def __init__(self, params, **kwargs):
         super().__init__(**kwargs)
 
+        self.s2_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
         self.s2_input = EncoderConv5(params, [512, 1024, 512, 1024, 512])
         self.s2_output = OutputLayer(params, 512, name="detection_layer_2")
         self.up2 = DarknetUpsampling(params, 512)
 
+        self.s1_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
         self.s1_input = EncoderConv5(params, [256, 512, 256, 512, 256])
         self.s1_output = OutputLayer(params, 256, name="detection_layer_1")
         self.up1 = DarknetUpsampling(params, 256)
 
+        self.s0_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
         self.s0_input = EncoderConv5(params, [128, 256, 128, 256, 128])
         self.s0_output = OutputLayer(params, 128, name="detection_layer_0")
 
@@ -163,8 +166,8 @@ class Head(tf.keras.layers.Layer):
             self.pads.append(tf.keras.layers.ZeroPadding2D(((0, pad), (0, pad))))
 
     def call(self, in0, in1, in2, training=True):
-        x2 = in2
-        x2 = self.s2_input(x2)
+        x2 = self.s2_input(in2)
+        x2 = self.s2_dropout(x2, training=training)
         up2 = self.up2(x2)
         out2 = self.s2_output(x2, training=training)
 
@@ -176,6 +179,7 @@ class Head(tf.keras.layers.Layer):
 
         x1 = tf.keras.layers.concatenate([up2, in1])
         x1 = self.s1_input(x1)
+        x1 = self.s1_dropout(x1, training=training)
         up1 = self.up1(x1)
         out1 = self.s1_output(x1, training=training)
 
@@ -187,6 +191,7 @@ class Head(tf.keras.layers.Layer):
 
         x0 = tf.keras.layers.concatenate([up1, in0])
         x0 = self.s0_input(x0)
+        x0 = self.s1_dropout(x0, training=training)
         out0 = self.s0_output(x0, training=training)
 
         return out2, out1, out0
