@@ -84,7 +84,6 @@ def tf_read_image(filename, image_size, dtype):
 def mscoco_unpack_tfrecord(record, anchors_all, image_size, is_training, dict_table, dictionary_size, data_format, dtype):
     features = tf.io.parse_single_example(record,
             features={
-                'image_id': tf.io.FixedLenFeature([], tf.int64),
                 'filename': tf.io.FixedLenFeature([], tf.string),
                 'true_labels': tf.io.FixedLenFeature([], tf.string),
                 'true_bboxes': tf.io.FixedLenFeature([], tf.string),
@@ -390,7 +389,7 @@ def run_eval(model, dataset, image_size, dst_dir, all_anchors, dictionary_size, 
         num_files += len(filenames)
         time_per_image_ms = (time.time() - start_time) / len(filenames) * 1000
 
-        logger.info('batch images: {}, total_processed: {}, time_per_image: {:.1f} ms'.format(len(filenames), num_files, time_per_image_ms))
+        logger.info('batch images: {}, images_processed: {}, time_per_image: {:.1f} ms'.format(len(filenames), num_files, time_per_image_ms))
 
 
         char_obj_batch = char_obj_batch.numpy()
@@ -586,10 +585,10 @@ def run_inference():
                     filenames.append(fn)
 
 
-        tfrecords_dir = os.path.join(FLAGS.output_dir, FLAGS.dataset_type)
-        os.makedirs(tfrecords_dir, exist_ok=True)
-
         if FLAGS.do_not_save_images:
+            tfrecords_dir = os.path.join(FLAGS.output_dir, FLAGS.dataset_type)
+            os.makedirs(tfrecords_dir, exist_ok=True)
+
             writer = tfrecord_writer.tf_records_writer('{}/tfrecord'.format(tfrecords_dir), 0, FLAGS.num_images_per_tfrecord)
 
         ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=2)
