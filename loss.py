@@ -90,6 +90,7 @@ class Metric:
 
         self.word_dist_loss = tf.keras.metrics.Mean()
         self.word_obj_loss = tf.keras.metrics.Mean()
+        self.word_obj_whole_loss = tf.keras.metrics.Mean()
         self.word_obj_accuracy = tf.keras.metrics.BinaryAccuracy()
         self.word_obj_whole_accuracy = tf.keras.metrics.BinaryAccuracy()
 
@@ -108,11 +109,12 @@ class Metric:
         self.word_obj_whole_accuracy.reset_states()
 
     def str_result(self):
-        return 'total_loss: {:.3e}, dist: {:.3e}, obj: {:.3e}, text_ce: {:.3e}, text_acc: {:.4f}, word_obj_acc: {:.4f}/{:.4f}'.format(
+        return 'total_loss: {:.3e}, dist: {:.3e}, obj: {:.3e}/{:.3e}, text_ce: {:.3e}, text_acc: {:.4f}, word_obj_acc: {:.5f}/{:.5f}'.format(
                 self.total_loss.result(),
                 self.word_dist_loss.result(),
 
                 self.word_obj_loss.result(),
+                self.word_obj_whole_loss.result(),
 
                 self.text_metric.result(want_loss=True),
                 self.text_metric.result(want_acc=True),
@@ -219,10 +221,14 @@ class LossMetricAggregator:
 
 
         # obj CE loss
-        word_obj_loss = self.obj_loss(y_true=true_word_obj_whole, y_pred=pred_word_obj_whole)
+        word_obj_whole_loss = self.obj_loss(y_true=true_word_obj_whole, y_pred=pred_word_obj_whole)
+        m.word_obj_whole_loss.update_state(word_obj_whole_loss)
+        word_obj_whole_loss = tf.nn.compute_average_loss(word_obj_whole_loss, global_batch_size=self.global_batch_size)
+
+        word_obj_loss = self.obj_loss(y_true=true_word_obj, y_pred=pred_word_obj)
         m.word_obj_loss.update_state(word_obj_loss)
         word_obj_loss = tf.nn.compute_average_loss(word_obj_loss, global_batch_size=self.global_batch_size)
-        obj_loss = word_obj_loss
+        obj_loss = word_obj_loss + word_obj_whole_loss
 
         # for accuracy metric, only check true object matches
         m.word_obj_accuracy.update_state(true_word_obj, pred_word_obj)
