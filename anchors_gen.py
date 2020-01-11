@@ -164,65 +164,39 @@ def find_bbox_anchor_for_poly(poly, anchors_all):
     poly_for_loss = tf.reshape(poly_for_loss, [-1, 8])
     return poly_for_loss, best_anchors_index
 
-def generate_true_values_for_anchors(char_poly, word_poly, encoded_chars, anchors_all, dictionary_size):
+def generate_true_values_for_anchors(word_poly, anchors_all, text_labels, text_lenghts, max_word_len):
     # input polygon shape [N, 4, 2]
     # output polygon shape [N, 4, 2]
-    char_poly_for_loss, char_index = find_bbox_anchor_for_poly(char_poly, anchors_all)
     word_poly_for_loss, word_index = find_bbox_anchor_for_poly(word_poly, anchors_all)
 
-    encoded_chars_for_loss = tf.one_hot(encoded_chars, dictionary_size)
-
-    char_objs = tf.ones((tf.shape(char_poly_for_loss)[0], 1))
     word_objs = tf.ones((tf.shape(word_poly_for_loss)[0], 1))
 
-    char_idx = tf.expand_dims(char_index, 1)
     word_idx = tf.expand_dims(word_index, 1)
 
-    char_dims = dictionary_size + 2*4 + 1
-    word_dims = 2*4 + 1
-    output_dims = char_dims + word_dims
+    output_dims = 1 + 2*4 + max_word_len + 1
 
     num_anchors = anchors_all.shape[0]
     output = tf.zeros((num_anchors, output_dims))
 
-    char_values_for_loss = tf.concat([char_objs, char_poly_for_loss, encoded_chars_for_loss], axis=1)
-    char_values_for_loss = tf.pad(char_values_for_loss, [[0, 0], [0, output_dims - tf.shape(char_values_for_loss)[1]]])
+    text_labels = tf.cast(text_labels, word_objs.dtype)
+    text_lenghts = tf.cast(text_lenghts, word_objs.dtype)
 
-    word_values_for_loss = tf.concat([word_objs, word_poly_for_loss], axis=1)
-    word_values_for_loss = tf.pad(word_values_for_loss, [[0, 0], [output_dims - tf.shape(word_values_for_loss)[1], 0]])
+    word_values_for_loss = tf.concat([word_objs, word_poly_for_loss, text_labels, text_lenghts], axis=1)
 
-    output = tf.tensor_scatter_nd_update(output, char_idx, char_values_for_loss)
     output = tf.tensor_scatter_nd_update(output, word_idx, word_values_for_loss)
 
     return output
 
-def unpack_true_values(true_values, all_anchors, current_image_shape, image_size, dictionary_size):
-    char_boundary_start = 0
-    word_boundary_start = dictionary_size + 1 + 4 * 2
+def unpack_true_values(true_values, all_anchors, current_image_shape, image_size, max_word_len):
+    true_word_obj = true_values[..., 0]
+    true_word_poly = true_values[..., 1 : 9]
+    true_words = true_values[..., 9 : 9 + max_word_len]
+    true_lenghts = true_values[..., 9 + max_word_len]
 
-    # true tensors
-    true_char = true_values[..., char_boundary_start : char_boundary_start + word_boundary_start]
-    true_word = true_values[..., word_boundary_start : ]
-
-    true_char_obj = true_char[..., 0]
-    true_char_poly = true_char[..., 1 : 9]
-    true_char_letters = true_char[..., 9 :]
-    true_char_letter = tf.argmax(true_char_letters, -1)
-
-    true_word_obj = true_word[..., 0]
-    true_word_poly = true_word[..., 1 : 9]
-
-    char_index = tf.where(true_char_obj != 0)
     word_index = tf.where(true_word_obj != 0)
 
-    char_poly = tf.gather(true_char_poly, char_index)
-    char_poly = tf.reshape(char_poly, [-1, 4, 2])
     word_poly = tf.gather(true_word_poly, word_index)
     word_poly = tf.reshape(word_poly, [-1, 4, 2])
-
-    best_anchors = tf.gather(all_anchors[..., :2], char_index)
-    best_anchors = tf.tile(best_anchors, [1, 4, 1])
-    char_poly = char_poly + best_anchors
 
     best_anchors = tf.gather(all_anchors[..., :2], word_index)
     best_anchors = tf.tile(best_anchors, [1, 4, 1])
@@ -236,23 +210,19 @@ def unpack_true_values(true_values, all_anchors, current_image_shape, image_size
     pad_x = (max_side - imw) / 2
     square_scale = max_side / image_size
 
-    char_poly = char_poly
-    word_poly = word_poly
-
-    char_poly *= square_scale
     word_poly *= square_scale
 
-
     diff = [pad_x, pad_y]
-    char_poly -= diff
     word_poly -= diff
 
-    return true_char_obj, char_poly, true_char_letter, true_word_obj, word_poly
+    return true_word_obj, word_poly, true_words, true_lenghts
 
 def create_lookup_table(dictionary):
+    pad_value = 0
+
     dict_split = tf.strings.unicode_split(dictionary, 'UTF-8')
     dictionary_size = dict_split.shape[0] + 1
     kv_init = tf.lookup.KeyValueTensorInitializer(keys=dict_split, values=tf.range(1, dictionary_size, 1), key_dtype=tf.string, value_dtype=tf.int32)
-    dict_table = tf.lookup.StaticHashTable(kv_init, 0)
+    dict_table = tf.lookup.StaticHashTable(kv_init, pad_value)
 
-    return dictionary_size, dict_table
+    return dictionary_size, dict_table, pad_value

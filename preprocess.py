@@ -120,15 +120,13 @@ def random_expand(image, polys, ratio=2):
 
     return big_canvas, polys
 
-def preprocess_for_train(image, char_poly, word_poly, image_size, disable_rotation_augmentation):
+def preprocess_for_train(image, word_poly, image_size, disable_rotation_augmentation):
     if tf.random.uniform([], 0, 1) > 0.5:
         image = apply_with_random_selector(image,
                 lambda x, ordering: distort_color(x, ordering, True),
                 num_cases=4)
 
-    char_poly_rel = char_poly / image_size
-    word_poly_rel = word_poly / image_size
-    poly_rel = tf.concat([char_poly_rel, word_poly_rel], axis=0)
+    poly_rel = word_poly / image_size
 
     ratio = tf.random.uniform([], minval=1.2, maxval=2.5, dtype=tf.float32)
 
@@ -136,24 +134,17 @@ def preprocess_for_train(image, char_poly, word_poly, image_size, disable_rotati
     image = tf.image.resize(image, [image_size, image_size])
 
     new_poly *= image_size
-
-    size_splits = [tf.shape(char_poly)[0], tf.shape(word_poly)[0]]
-    char_poly, word_poly = tf.split(new_poly, size_splits, axis=0)
+    word_poly = new_poly
 
     if not disable_rotation_augmentation and tf.random.uniform([]) >= 0.5:
-        cx = char_poly[..., 0]
-        cy = char_poly[..., 1]
         wx = word_poly[..., 0]
         wy = word_poly[..., 1]
 
         if tf.random.uniform([]) >= 0.5:
             image = tf.image.flip_left_right(image)
-            cx = image_size - cx
             wx = image_size - wx
         elif False and tf.random.uniform([]) >= 0.5:
             image = tf.image.flip_up_down(image)
-            diff = tf.stack([0., image_size])
-            cy = image_size - cy
             wy = image_size - wy
         elif tf.random.uniform([]) >= 0.5:
             k = tf.random.uniform([], minval=0, maxval=4, dtype=tf.int32)
@@ -167,18 +158,29 @@ def preprocess_for_train(image, char_poly, word_poly, image_size, disable_rotati
                 return y, -x + image_size
 
             if k == 3:
-                cx, cy = rot90(cx, cy)
                 wx, wy = rot90(wx, wy)
             if k == 2:
-                cx, cy = rot180(cx, cy)
                 wx, wy = rot180(wx, wy)
             if k == 1:
-                cx, cy = rot270(cx, cy)
                 wx, wy = rot270(wx, wy)
 
             image = tf.image.rot90(image, k)
 
-        char_poly = tf.stack([cx, cy], -1)
         word_poly = tf.stack([wx, wy], -1)
 
-    return image, char_poly, word_poly
+    return image, word_poly
+
+def pad_resize_image(image, dims):
+    image = tf.image.resize(image, dims, preserve_aspect_ratio=True)
+
+    shape = tf.shape(image)
+
+    sxd = dims[1] - shape[1]
+    syd = dims[0] - shape[0]
+
+    sx = tf.cast(sxd / 2, dtype=tf.int32)
+    sy = tf.cast(syd / 2, dtype=tf.int32)
+
+    paddings = tf.convert_to_tensor([[sy, syd - sy], [sx, sxd - sx], [0, 0]])
+    image = tf.pad(image, paddings, mode='CONSTANT', constant_values=128)
+    return image

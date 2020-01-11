@@ -252,7 +252,7 @@ def per_image_supression(pred_values, image_size, dictionary_size, all_anchors):
 
     char_poly = tf.gather(pred_char_poly, char_index)
     char_poly = tf.reshape(char_poly, [-1, 4, 2])
-    word_poly = tf.gather(pred_word_poly, word_index).numpy()
+    word_poly = tf.gather(pred_word_poly, word_index)
     word_poly = tf.reshape(word_poly, [-1, 4, 2])
 
     best_anchors = tf.gather(all_anchors[..., :2], char_index)
@@ -539,9 +539,9 @@ def run_inference():
     dtype = tf.float32
     image_size = FLAGS.image_size
 
-    dictionary_size, dict_table = anchors_gen.create_lookup_table(FLAGS.dictionary)
+    dictionary_size, dict_table, pad_value = anchors_gen.create_lookup_table(FLAGS.dictionary)
 
-    model = encoder.create_model(FLAGS.model_name, dictionary_size)
+    model = encoder.create_model(FLAGS.model_name, FLAGS.max_word_len, dictionary_size, pad_value)
     if model.output_sizes is None:
         dummy_input = tf.ones((int(FLAGS.batch_size), image_size, image_size, 3), dtype=dtype)
         model(dummy_input, training=False)

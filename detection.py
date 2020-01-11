@@ -39,21 +39,21 @@ parser.add_argument('--image_size', type=int, required=True, help='Use this imag
 parser.add_argument('--steps_per_eval_epoch', default=30, type=int, help='Number of steps per evaluation run')
 parser.add_argument('--steps_per_train_epoch', default=200, type=int, help='Number of steps per train run')
 parser.add_argument('--save_examples', type=int, default=0, help='Number of example images to save and exit')
+parser.add_argument('--max_sequence_len', type=int, default=32, help='Maximum word length, also number of RNN attention timesteps')
+parser.add_argument('--min_sequence_len', type=int, default=32, help='Minimum number of time steps in training')
 parser.add_argument('--reset_on_lr_update', action='store_true', help='Whether to reset to the best model after learning rate update')
 parser.add_argument('--disable_rotation_augmentation', action='store_true', help='Whether to disable rotation/flipping augmentation')
 
 default_char_dictionary="!\"#&\'\\()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 parser.add_argument('--dictionary', type=str, default=default_char_dictionary, help='Dictionary to use')
 
-def unpack_tfrecord(record, anchors_all, image_size, dictionary_size, dict_table, is_training, data_format):
+def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_table, pad_value, is_training, data_format):
     features = tf.io.parse_single_example(record,
             features={
                 'filename': tf.io.FixedLenFeature([], tf.string),
-                'word_poly': tf.io.FixedLenFeature([], tf.string),
-                'char_poly': tf.io.FixedLenFeature([], tf.string),
-                'text': tf.io.FixedLenFeature([], tf.string),
-                'text_concat': tf.io.FixedLenFeature([], tf.string),
                 'image': tf.io.FixedLenFeature([], tf.string),
+                'true_labels': tf.io.FixedLenFeature([], tf.string),
+                'true_bboxes': tf.io.FixedLenFeature([], tf.string),
             })
 
     filename = features['filename']
@@ -61,16 +61,34 @@ def unpack_tfrecord(record, anchors_all, image_size, dictionary_size, dict_table
     image = features['image']
     image = tf.image.decode_jpeg(image, channels=3)
 
-    char_poly = features['char_poly']
-    char_poly = tf.io.decode_raw(char_poly, out_type=tf.float64)
-    char_poly = tf.cast(char_poly, tf.float32)
-    char_poly = tf.reshape(char_poly, [-1, 4, 2])
+    text_labels = tf.strings.split(features['true_labels'], '<SEP>')
+    text_split = tf.strings.unicode_split(text_labels, 'UTF-8')
+    text_lenghts = text_split.row_lengths()
+    text_lenghts = tf.expand_dims(text_lenghts, 1)
 
-    word_poly = features['word_poly']
-    word_poly = tf.io.decode_raw(word_poly, out_type=tf.float32)
-    word_poly = tf.reshape(word_poly, [-1, 4, 2])
+    encoded_values = dict_table.lookup(text_split.values)
+    rg = tf.RaggedTensor.from_row_splits(values=encoded_values, row_splits=text_split.row_splits)
+    encoded_padded_text = rg.to_tensor(default_value=pad_value)
+    encoded_padded_text = encoded_padded_text[..., :max_sequence_len]
 
-    text = features['text_concat']
+    to_add = max_sequence_len - tf.shape(encoded_padded_text)[1]
+    if to_add > 0:
+        encoded_padded_text = tf.pad(encoded_padded_text, [[0, 0], [0, to_add]], mode='CONSTANT', constant_values=pad_value)
+
+    orig_bboxes = tf.io.decode_raw(features['true_bboxes'], tf.float32)
+    orig_bboxes = tf.reshape(orig_bboxes, [-1, 4])
+
+    cx, cy, h, w = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
+    xmin = cx - w / 2
+    ymin = cy - h / 2
+
+    # return bboxes in the original format without scaling it to square
+    p0 = tf.concat([xmin, ymin], axis=1)
+    p1 = tf.concat([xmin + w, ymin], axis=1)
+    p2 = tf.concat([xmin + w, ymin + h], axis=1)
+    p3 = tf.concat([xmin, ymin + h], axis=1)
+
+    word_poly = tf.stack([p0, p1, p2, p3], axis=1)
 
     orig_image_height = tf.cast(tf.shape(image)[0], tf.float32)
     orig_image_width = tf.cast(tf.shape(image)[1], tf.float32)
@@ -78,8 +96,8 @@ def unpack_tfrecord(record, anchors_all, image_size, dictionary_size, dict_table
     mx = tf.maximum(orig_image_height, orig_image_width)
     mx_int = tf.cast(mx, tf.int32)
     image = tf.image.pad_to_bounding_box(image,
-                tf.cast((mx - orig_image_height) / 2, tf.int32),
-                tf.cast((mx - orig_image_width) / 2, tf.int32),
+                tf.cast((mx - orig_image_height) / 2., tf.int32),
+                tf.cast((mx - orig_image_width) / 2., tf.int32),
                 mx_int,
                 mx_int)
 
@@ -88,32 +106,28 @@ def unpack_tfrecord(record, anchors_all, image_size, dictionary_size, dict_table
 
     add = tf.stack([xdiff, ydiff])
     word_poly += add
-    char_poly += add
 
     image = tf.image.resize(image, [image_size, image_size])
 
     scale = image_size / mx
     word_poly *= scale
-    char_poly *= scale
 
     image = tf.cast(image, tf.float32)
     image -= 128
     image /= 128
 
-    chars = tf.strings.unicode_split(text, 'UTF-8')
-    encoded_chars = dict_table.lookup(chars)
 
     if is_training:
-        image, char_poly, word_poly = preprocess.preprocess_for_train(image, char_poly, word_poly, image_size, FLAGS.disable_rotation_augmentation)
+        image, word_poly = preprocess.preprocess_for_train(image, word_poly, image_size, FLAGS.disable_rotation_augmentation)
 
-    true_values = anchors_gen.generate_true_values_for_anchors(char_poly, word_poly, encoded_chars, anchors_all, dictionary_size)
+    true_values = anchors_gen.generate_true_values_for_anchors(word_poly, anchors_all, encoded_padded_text, text_lenghts, max_sequence_len)
 
     return filename, image, true_values
 
 def calc_epoch_steps(num_files):
     return (num_files + FLAGS.batch_size - 1) // FLAGS.batch_size
 
-def draw_bboxes(image_size, train_dataset, num_examples, all_anchors, dictionary, dictionary_size):
+def draw_bboxes(image_size, train_dataset, num_examples, all_anchors, dictionary, max_sequence_len):
     data_dir = os.path.join(FLAGS.train_dir, 'tmp')
     os.makedirs(data_dir, exist_ok=True)
 
@@ -132,13 +146,13 @@ def draw_bboxes(image_size, train_dataset, num_examples, all_anchors, dictionary
             image = image * 128 + 128
             image = image.astype(np.uint8)
 
-        true_char_obj, char_poly, true_char_letter, true_word_obj, word_poly = anchors_gen.unpack_true_values(true_values, all_anchors, image.shape, image_size, dictionary_size)
+        true_word_obj, word_poly, text_labels = anchors_gen.unpack_true_values(true_values, all_anchors, image.shape, image_size, max_sequence_len)
 
         word_poly = word_poly.numpy()
         char_poly = char_poly.numpy()
 
         new_anns = []
-        for poly in char_poly:
+        for poly in word_poly:
             new_anns.append((None, poly, None))
 
         image_draw.draw_im(image, new_anns, dst, {})
@@ -166,14 +180,15 @@ def train():
         global_step = tf.Variable(1, dtype=tf.int64, name='global_step', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
         learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
 
-        dictionary_size, dict_table = anchors_gen.create_lookup_table(FLAGS.dictionary)
+        dictionary_size, dict_table, pad_value = anchors_gen.create_lookup_table(FLAGS.dictionary)
 
         image_size = FLAGS.image_size
-        #num_classes = 1 + 4*2 + dictionary_size + 1 + 4*2
-        model = encoder.create_model(FLAGS.model_name, dictionary_size)
+        model = encoder.create_model(FLAGS.model_name, FLAGS.max_sequence_len, dictionary_size, pad_value)
         if model.output_sizes is None:
             dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
-            dstrategy.experimental_run_v2(lambda m, inp: m(inp, True), args=(model, dummy_input))
+
+            dstrategy.experimental_run_v2(lambda m, inp: m(inp, word_obj_mask=0, true_words=0, true_lengths=0, anchors_all=0, training=True, only_output_sizes=True), args=(model, dummy_input))
+
             logger.info('image_size: {}, model output sizes: {}'.format(image_size, model.output_sizes))
 
         anchors_all, output_xy_grids, output_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
@@ -188,9 +203,9 @@ def train():
 
             np.random.shuffle(filenames)
 
-            ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
+            ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=FLAGS.num_cpus)
             ds = ds.map(lambda record: unpack_tfrecord(record, anchors_all,
-                            image_size, dictionary_size, dict_table,
+                            image_size, FLAGS.max_sequence_len, dict_table, pad_value,
                             is_training, FLAGS.data_format),
                     num_parallel_calls=FLAGS.num_cpus)
 
@@ -208,7 +223,7 @@ def train():
             eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, is_training=False)
 
         if FLAGS.save_examples > 0:
-            draw_bboxes(image_size, train_dataset, FLAGS.save_examples, anchors_all, FLAGS.dictionary, dictionary_size)
+            draw_bboxes(image_size, train_dataset, FLAGS.save_examples, anchors_all, FLAGS.dictionary, FLAGS.max_sequence_len)
             exit(0)
 
         steps_per_train_epoch = FLAGS.steps_per_train_epoch
@@ -238,14 +253,23 @@ def train():
                 logger.info("Restored base model from external checkpoint {} and saved object-based checkpoint {}".format(FLAGS.base_checkpoint, saved_path))
                 exit(0)
 
-        metric = loss.LossMetricAggregator(dictionary_size, output_xy_grids, FLAGS.batch_size)
-
-        def calculate_metrics(images, is_training, true_values):
-            logits = model(images, training=is_training)
-            total_loss = metric.loss(true_values, logits, is_training)
-            return total_loss
+        metric = loss.LossMetricAggregator(FLAGS.max_sequence_len, dictionary_size, FLAGS.batch_size)
 
         epoch_var = tf.Variable(0, dtype=tf.float32, name='epoch_number', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
+        current_max_sequence_len = tf.Variable(FLAGS.min_sequence_len, dtype=tf.int32, name='current_max_sequence_len', trainable=False, aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
+
+
+        def calculate_metrics(images, is_training, true_values):
+            true_word_obj = true_values[..., 0]
+            true_words = true_values[..., 9 : 9 + FLAGS.max_sequence_len]
+            true_lengths = true_values[..., 9 + FLAGS.max_sequence_len]
+            true_words = tf.cast(true_words, tf.int64)
+            true_lengths = tf.cast(true_lengths, tf.int64)
+
+            #logits, rnn_logits = model(images, true_word_obj, true_words, true_lengths, anchors_all=anchors_all, training=is_training, only_output_sizes=False)
+            logits, rnn_logits = model(images, true_word_obj, true_words, true_lengths, anchors_all=anchors_all, training=is_training, only_output_sizes=True)
+            total_loss = metric.loss(true_values, logits, rnn_logits, current_max_sequence_len, is_training)
+            return total_loss
 
         def eval_step(filenames, images, true_values):
             total_loss = calculate_metrics(images, False, true_values)
@@ -263,7 +287,8 @@ def train():
             clip_gradients = []
             for g, v in zip(gradients, variables):
                 if g is None:
-                    logger.info('no gradients for variable: {}'.format(v))
+                    pass
+                    #logger.info('no gradients for variable: {}'.format(v))
                 else:
                     #g += tf.random.normal(stddev=stddev, mean=0., shape=g.shape)
                     #g = tf.clip_by_value(g, -5, 5)

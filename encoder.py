@@ -2,10 +2,13 @@ import collections
 import logging
 
 import tensorflow as tf
+import tensorflow_addons as tfa
 
+import attention
 import darknet
 import encoder_efficientnet as efn_encoder
 import feature_gated_conv as features
+import preprocess
 
 logger = logging.getLogger('detection')
 
@@ -14,7 +17,7 @@ GlobalParams = collections.namedtuple('GlobalParams', [
     'relu_fn',
     'l2_reg_weight', 'spatial_dims', 'channel_axis', 'model_name',
     'obj_score_threshold', 'lstm_dropout', 'spatial_dropout',
-    'dictionary_size'
+    'dictionary_size', 'max_word_len', 'pad_value'
 ])
 
 GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
@@ -59,30 +62,30 @@ class EncoderConv(tf.keras.layers.Layer):
 
         return x
 
-class EncoderConv5(tf.keras.layers.Layer):
+class EncoderConvList(tf.keras.layers.Layer):
     def __init__(self, params, filters, **kwargs):
         super().__init__(**kwargs)
 
-        self.conv0 = EncoderConv(params, filters[0], kernel_size=(1, 1), strides=(1, 1), padding='SAME')
-        self.conv1 = EncoderConv(params, filters[1], kernel_size=(3, 3), strides=(1, 1), padding='SAME')
-        self.conv2 = EncoderConv(params, filters[2], kernel_size=(1, 1), strides=(1, 1), padding='SAME')
-        self.conv3 = EncoderConv(params, filters[3], kernel_size=(3, 3), strides=(1, 1), padding='SAME')
-        self.conv4 = EncoderConv(params, filters[4], kernel_size=(1, 1), strides=(1, 1), padding='SAME')
+        self.convs = []
+        idx = 0
+        for num_filters in filters:
+            kernel_size = 3
+            if idx % 2 == 0:
+                kernel_size = 1
+            idx += 1
 
-    def call(self, input_tensor, training):
-        x = self.conv0(input_tensor, training)
-        x = self.conv1(x, training)
-        x = self.conv2(x, training)
-        x = self.conv3(x, training)
-        x = self.conv4(x, training)
+            conv = EncoderConv(params, num_filters, kernel_size=(kernel_size, kernel_size), strides=(1, 1), padding='SAME')
+            self.convs.append(conv)
+
+    def call(self, x, training):
+        for conv in self.convs:
+            x = conv(x, training)
         return x
 
 class HeadLayer(tf.keras.layers.Layer):
-    def __init__(self, params, num_features, num_outputs, **kwargs):
+    def __init__(self, params, num_outputs, **kwargs):
         super().__init__(**kwargs)
         self.relu_fn = params.relu_fn or local_swish
-
-        self.conv0 = EncoderConv(params, num_features, kernel_size=(3, 3), strides=(1, 1), padding='SAME')
 
         self.outputs = []
         for n in num_outputs:
@@ -99,67 +102,32 @@ class HeadLayer(tf.keras.layers.Layer):
 
             self.outputs.append(out)
 
-    def call(self, input_tensor, training):
-        x = self.conv0(input_tensor, training=training)
-
+    def call(self, x, training):
         outputs = []
         for f in self.outputs:
             out = f(x)
             outputs.append(out)
 
+        outputs = tf.concat(outputs, -1)
         return outputs
-
-class OutputLayer(tf.keras.layers.Layer):
-    def __init__(self, params, input_filters, **kwargs):
-        super().__init__(**kwargs)
-
-        char_features = [1, 2*4, params.dictionary_size]
-        word_features = [1, 2*4]
-
-        self.conv0 = EncoderConv(params, input_filters, kernel_size=(3, 3), strides=(1, 1), padding='SAME')
-
-        self.char_output = HeadLayer(params, input_filters, char_features)
-        self.word_output = HeadLayer(params, input_filters, word_features)
-
-    def call(self, input_tensor, training):
-        x = self.conv0(input_tensor, training)
-
-        char_out = self.char_output(x, training=training)
-        word_out = self.word_output(x, training=training)
-
-        outputs = tf.concat(char_out + word_out, -1)
-        return outputs
-
-class DarknetUpsampling(tf.keras.layers.Layer):
-    def __init__(self, params, num_features, **kwargs):
-        super().__init__(**kwargs)
-
-        self.num_features = num_features
-        self.conv = EncoderConv(params, num_features, kernel_size=(1, 1), strides=(1, 1), padding='SAME')
-        self.upsampling = tf.keras.layers.UpSampling2D(2)
-
-    def call(self, inputs, training):
-        x = self.conv(inputs, training)
-        x = self.upsampling(x)
-        return x
 
 class Head(tf.keras.layers.Layer):
-    def __init__(self, params, **kwargs):
+    def __init__(self, params, num_classes, **kwargs):
         super().__init__(**kwargs)
 
         self.s2_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
-        self.s2_input = EncoderConv5(params, [512, 1024, 512, 1024, 512])
-        self.s2_output = OutputLayer(params, 512, name="detection_layer_2")
-        self.up2 = DarknetUpsampling(params, 512)
+        self.s2_input = EncoderConvList(params, [512, 1024, 512, 1024, 512])
+        self.s2_output = HeadLayer(params, num_classes, name="detection_layer_2")
+        self.up2 = tf.keras.layers.UpSampling2D(2)
 
         self.s1_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
-        self.s1_input = EncoderConv5(params, [256, 512, 256, 512, 256])
-        self.s1_output = OutputLayer(params, 256, name="detection_layer_1")
-        self.up1 = DarknetUpsampling(params, 256)
+        self.s1_input = EncoderConvList(params, [256, 512, 256, 512, 256])
+        self.s1_output = HeadLayer(params, num_classes, name="detection_layer_1")
+        self.up1 = tf.keras.layers.UpSampling2D(2)
 
         self.s0_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
-        self.s0_input = EncoderConv5(params, [128, 256, 128, 256, 128])
-        self.s0_output = OutputLayer(params, 128, name="detection_layer_0")
+        self.s0_input = EncoderConvList(params, [128, 256, 128, 256, 128])
+        self.s0_output = HeadLayer(params, num_classes, name="detection_layer_0")
 
         self.pads = [None]
         for pad in [1, 2, 3, 4, 5, 6]:
@@ -167,8 +135,8 @@ class Head(tf.keras.layers.Layer):
 
     def call(self, in0, in1, in2, training=True):
         x2 = self.s2_input(in2)
-        x2 = self.s2_dropout(x2, training=training)
         up2 = self.up2(x2)
+        x2 = self.s2_dropout(x2, training=training)
         out2 = self.s2_output(x2, training=training)
 
         diff = up2.shape[1] - in1.shape[1]
@@ -179,8 +147,8 @@ class Head(tf.keras.layers.Layer):
 
         x1 = tf.keras.layers.concatenate([up2, in1])
         x1 = self.s1_input(x1)
-        x1 = self.s1_dropout(x1, training=training)
         up1 = self.up1(x1)
+        x1 = self.s1_dropout(x1, training=training)
         out1 = self.s1_output(x1, training=training)
 
         diff = up1.shape[1] - in0.shape[1]
@@ -194,13 +162,56 @@ class Head(tf.keras.layers.Layer):
         x0 = self.s1_dropout(x0, training=training)
         out0 = self.s0_output(x0, training=training)
 
-        return out2, out1, out0
+        return [out2, out1, out0]
+
+class ConcatFeatures(tf.keras.layers.Layer):
+    def __init__(self, params, **kwargs):
+        super().__init__(**kwargs)
+
+        self.s2_input = EncoderConv(params, 512)
+        self.up2 = tf.keras.layers.UpSampling2D(2)
+
+        self.s1_input = EncoderConv(params, 256)
+        self.up1 = tf.keras.layers.UpSampling2D(2)
+
+        self.s0_input = EncoderConv(params, 128)
+
+        self.pads = [None]
+        for pad in [1, 2, 3, 4, 5, 6]:
+            self.pads.append(tf.keras.layers.ZeroPadding2D(((0, pad), (0, pad))))
+
+    def call(self, in0, in1, in2, training=True):
+        x2 = self.s2_input(in2)
+        up2 = self.up2(x2)
+
+        diff = up2.shape[1] - in1.shape[1]
+        if diff > 0:
+            in1 = self.pads[diff](in1)
+        if diff < 0:
+            up2 = self.pads[-diff](up2)
+
+        x1 = tf.keras.layers.concatenate([up2, in1])
+        x1 = self.s1_input(x1)
+        up1 = self.up1(x1)
+
+        diff = up1.shape[1] - in0.shape[1]
+        if diff > 0:
+            in0 = self.pads[diff](in0)
+        if diff < 0:
+            up1 = self.pads[-diff](up1)
+
+        x0 = tf.keras.layers.concatenate([up1, in0])
+        x0 = self.s0_input(x0)
+
+        return x0
 
 class Encoder(tf.keras.layers.Layer):
     def __init__(self, params, **kwargs):
         super().__init__(**kwargs)
 
-        self.num_classes = 1 + 2*4 + params.dictionary_size + 1 + 2*4
+        classes = [1, 2*4]
+        self.num_classes = sum(classes)
+        self.max_word_len = params.max_word_len
 
         if params.model_name.startswith('darknet'):
             self.body = darknet.DarknetBody(params)
@@ -211,33 +222,137 @@ class Encoder(tf.keras.layers.Layer):
         else:
             raise NameError('unsupported model name {}'.format(params.model_name))
 
-        self.head = Head(params)
+        self.head = Head(params, classes)
+
+        self.rnn_features = ConcatFeatures(params)
+        self.rnn_layer = attention.RNNLayer(params, 256, self.max_word_len, params.dictionary_size, params.pad_value, cell='lstm')
 
         self.output_sizes = None
 
-    def call(self, inputs, training):
+    # word mask is per anchor, i.e. this is true word_obj
+    def call(self, inputs, word_obj_mask, true_words, true_lengths, anchors_all, training, only_output_sizes=False):
         l = self.body(inputs, training)
-        f2, f1, f0 = self.head(l[0], l[1], l[2], training)
+        head_outputs = self.head(l[0], l[1], l[2], training)
 
-        self.output_sizes = [tf.shape(f2)[1], tf.shape(f1)[1], tf.shape(f0)[1]]
+        self.output_sizes = [tf.shape(o)[1] for o in head_outputs]
+
+
+        splits = [os*os*3 for os in self.output_sizes]
 
         batch_size = tf.shape(inputs)[0]
         outputs = []
-        for output in [f2, f1, f0]:
-            flat = tf.reshape(output, [batch_size, -1, self.num_classes])
-            outputs.append(flat)
+        for head_output in head_outputs:
+            head_output_flat = tf.reshape(head_output, [batch_size, -1, self.num_classes])
+            outputs.append(head_output_flat)
 
-        outputs = tf.concat(outputs, axis=1)
-        return outputs
+        class_outputs = tf.concat(outputs, axis=1)
 
-def create_params(model_name, dictionary_size):
+        rnn_features = self.rnn_features(l[0], l[1], l[2])
+        channels = rnn_features.shape[3]
+
+        rnn_feature_height = tf.cast(tf.shape(rnn_features)[1], tf.float32)
+        rnn_feature_width = tf.cast(tf.shape(rnn_features)[2], tf.float32)
+
+        logger.info('inputs: {}, outputs: {}, l: {}, rnn_features: {}'.format(inputs.shape, class_outputs.shape, [x.shape.as_list() for x in l], rnn_features.shape))
+
+        if only_output_sizes:
+            return class_outputs, None
+
+        rnn_features_scale = tf.cast(tf.shape(rnn_features)[1], tf.float32) / tf.cast(tf.shape(inputs)[1], tf.float32)
+
+        poly = class_outputs[..., 1 : 1 + 4*2]
+        poly = tf.reshape(poly, [-1, tf.shape(poly)[1], 4, 2])
+
+        num_words = tf.math.count_nonzero(word_obj_mask, dtype=tf.int32)
+        picked_features = tf.TensorArray(tf.float32, size=num_words)
+        written = 0
+
+        batch_index = tf.range(tf.shape(rnn_features)[0])
+        for idx in batch_index:
+            # D = ~14k
+            # [B, D, 4, 2] -> [D, 4, 2]
+            poly_single_image = poly[idx, ...]
+
+            # [B, 60, 60, C] -> [60, 60, C]
+            features = rnn_features[idx, ...]
+
+            # [B, D] -> [D]
+            word_mask_single = word_obj_mask[idx]
+
+            # N = ~10
+            # [D, 4, 2] -> [N, 4, 2]
+            poly_single_image = tf.boolean_mask(poly_single_image, word_mask_single)
+
+            best_anchors = tf.boolean_mask(anchors_all[..., :2], word_mask_single)
+            best_anchors = tf.expand_dims(best_anchors, 1)
+            best_anchors = tf.tile(best_anchors, [1, 4, 1])
+            logger.info('poly_single_image: {}, anchors_all: {}, best_anchors: {}'.format(poly_single_image.shape, anchors_all.shape, best_anchors.shape))
+            poly_single_image = poly_single_image + best_anchors
+
+            poly_scaled = poly_single_image * rnn_features_scale
+
+            for poly_single in poly_scaled:
+                # [4, 2] - > [4], [4]
+                x = poly_single[..., 0]
+                y = poly_single[..., 1]
+
+                x = tf.maximum(x, 0.)
+                y = tf.maximum(y, 0.)
+
+                x = tf.minimum(x, rnn_feature_width - 1)
+                y = tf.minimum(y, rnn_feature_height - 1)
+
+                xmin = tf.math.reduce_min(x, axis=0)
+                ymin = tf.math.reduce_min(y, axis=0)
+                xmax = tf.math.reduce_max(x, axis=0)
+                ymax = tf.math.reduce_max(y, axis=0)
+
+                xmin = tf.cast(xmin, tf.int32)
+                xmax = tf.cast(xmax, tf.int32)
+                ymin = tf.cast(ymin, tf.int32)
+                ymax = tf.cast(ymax, tf.int32)
+
+                if ymax > ymin and xmax > xmin:
+                    features_for_one_crop = tf.image.crop_to_bounding_box(features, ymin, xmin, ymax - ymin + 1, xmax - xmin + 1)
+
+                    lx = (x[0] + x[3]) / 2
+                    ly = (y[0] + y[3]) / 2
+
+                    rx = (x[1] + x[2]) / 2
+                    ry = (y[1] + y[2]) / 2
+
+                    angle = tf.math.atan2(ry - ly, rx - lx)
+                    features_for_one_crop = tfa.image.rotate(features_for_one_crop, -angle, interpolation='BILINEAR')
+
+                    features_for_one_crop = preprocess.pad_resize_image(features_for_one_crop, [8, 8])
+                    features_for_one_crop.set_shape([8, 8, channels])
+
+                    picked_features = picked_features.write(written, features_for_one_crop)
+                    written += 1
+
+        cropped_features = picked_features.stack()
+
+        logger.info('rnn_features: {} -> {}'.format(rnn_features.shape, cropped_features.shape))
+
+
+        true_words_flat = tf.boolean_mask(true_words, word_obj_mask)
+        true_word_lengths_flat = tf.boolean_mask(true_lengths, word_obj_mask)
+
+        rnn_outputs = self.rnn_layer(cropped_features, true_words_flat, true_word_lengths_flat, training)
+
+        rnn_outputs = tf.concat(rnn_outputs, axis=-1)
+        logger.info('class_outputs: {}, rnn_outputs: {}'.format(class_outputs.shape, rnn_outputs.shape))
+
+        return class_outputs, rnn_outputs
+
+def create_params(model_name, max_word_len, dictionary_size, pad_value):
     data_format='channels_last'
 
     if data_format == 'channels_first':
         channel_axis = 1
         spatial_dims = [2, 3]
     else:
-        channel_axis = -1
+        channel_axis = 3
         spatial_dims = [1, 2]
 
     params = {
@@ -252,6 +367,8 @@ def create_params(model_name, dictionary_size):
         'lstm_dropout': 0.3,
         'spatial_dropout': 0.3,
         'dictionary_size': dictionary_size,
+        'max_word_len': max_word_len,
+        'pad_value': pad_value,
     }
 
     params = GlobalParams(**params)
@@ -259,7 +376,7 @@ def create_params(model_name, dictionary_size):
     return params
 
 
-def create_model(model_name, dictionary_size):
-    params = create_params(model_name, dictionary_size)
+def create_model(model_name, max_word_len, dictionary_size, pad_value):
+    params = create_params(model_name, max_word_len, dictionary_size, pad_value)
     model = Encoder(params)
     return model
