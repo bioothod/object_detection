@@ -156,7 +156,7 @@ class LossMetricAggregator:
 
         pred_char_obj = pred_char[..., 0]
         pred_char_poly = pred_char[..., 1 : 9]
-        pred_char_letters = pred_char[..., 10 :]
+        pred_char_letters = pred_char[..., 9 : 9 + self.dictionary_size]
 
         pred_word_obj = pred_word[..., 0]
         pred_word_poly = pred_word[..., 1 : 9]
@@ -167,7 +167,7 @@ class LossMetricAggregator:
 
         true_char_obj = true_char[..., 0]
         true_char_poly = true_char[..., 1 : 9]
-        true_char_letters = true_char[..., 10 :]
+        true_char_letters = true_char[..., 9 :]
 
         true_word_obj = true_word[..., 0]
         true_word_poly = true_word[..., 1 : 9]
@@ -239,7 +239,7 @@ class LossMetricAggregator:
 
         letters_ce_loss = tf.nn.compute_average_loss(letters_ce_loss, global_batch_size=self.global_batch_size)
 
-        total_loss = dist_loss + obj_loss*10 + letters_ce_loss
+        total_loss = dist_loss + obj_loss + letters_ce_loss
         m.total_loss.update_state(total_loss)
 
         return total_loss
