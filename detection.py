@@ -187,7 +187,11 @@ def train():
         if model.output_sizes is None:
             dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
 
-            dstrategy.experimental_run_v2(lambda m, inp: m(inp, word_obj_mask=0, true_words=0, true_lengths=0, anchors_all=0, training=True, only_output_sizes=True), args=(model, dummy_input))
+            dstrategy.experimental_run_v2(
+                    lambda m, inp:
+                        m(inp, word_obj_mask=0, true_word_poly=0, true_words=0, true_lengths=0,
+                            anchors_all=0, training=True, only_output_sizes=True),
+                    args=(model, dummy_input))
 
             logger.info('image_size: {}, model output sizes: {}'.format(image_size, model.output_sizes))
 
@@ -261,12 +265,13 @@ def train():
 
         def calculate_metrics(images, is_training, true_values):
             true_word_obj = true_values[..., 0]
+            true_word_poly = true_values[..., 1 : 9]
             true_words = true_values[..., 9 : 9 + FLAGS.max_sequence_len]
             true_lengths = true_values[..., 9 + FLAGS.max_sequence_len]
             true_words = tf.cast(true_words, tf.int64)
             true_lengths = tf.cast(true_lengths, tf.int64)
 
-            logits, rnn_logits = model(images, true_word_obj, true_words, true_lengths, anchors_all=anchors_all, training=is_training, only_output_sizes=False)
+            logits, rnn_logits = model(images, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all=anchors_all, training=is_training, only_output_sizes=False)
             total_loss = metric.loss(true_values, logits, rnn_logits, current_max_sequence_len, is_training)
             return total_loss
 

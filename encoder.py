@@ -230,7 +230,7 @@ class Encoder(tf.keras.layers.Layer):
         self.output_sizes = None
 
     # word mask is per anchor, i.e. this is true word_obj
-    def call(self, inputs, word_obj_mask, true_words, true_lengths, anchors_all, training, only_output_sizes=False):
+    def call(self, inputs, word_obj_mask, true_word_poly, true_words, true_lengths, anchors_all, training, only_output_sizes=False):
         l = self.body(inputs, training)
         head_outputs = self.head(l[0], l[1], l[2], training)
 
@@ -260,12 +260,18 @@ class Encoder(tf.keras.layers.Layer):
 
         rnn_features_scale = tf.cast(tf.shape(rnn_features)[1], tf.float32) / tf.cast(tf.shape(inputs)[1], tf.float32)
 
-        poly = class_outputs[..., 1 : 1 + 4*2]
-        poly = tf.reshape(poly, [-1, tf.shape(poly)[1], 4, 2])
 
         num_words = tf.math.count_nonzero(word_obj_mask, dtype=tf.int32)
         picked_features = tf.TensorArray(tf.float32, size=num_words)
         written = 0
+
+        #poly = class_outputs[..., 1 : 1 + 4*2]
+        poly = true_word_poly
+        poly = tf.reshape(poly, [-1, tf.shape(poly)[1], 4, 2])
+
+        true_words_flat = tf.boolean_mask(true_words, word_obj_mask)
+        true_word_lengths_flat = tf.boolean_mask(true_lengths, word_obj_mask)
+
 
         batch_index = tf.range(tf.shape(rnn_features)[0])
         for idx in batch_index:
@@ -333,10 +339,6 @@ class Encoder(tf.keras.layers.Layer):
         cropped_features = picked_features.stack()
 
         logger.info('rnn_features: {} -> {}'.format(rnn_features.shape, cropped_features.shape))
-
-
-        true_words_flat = tf.boolean_mask(true_words, word_obj_mask)
-        true_word_lengths_flat = tf.boolean_mask(true_lengths, word_obj_mask)
 
         rnn_outputs = self.rnn_layer(cropped_features, true_words_flat, true_word_lengths_flat, training)
 
