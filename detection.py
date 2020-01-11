@@ -266,8 +266,7 @@ def train():
             true_words = tf.cast(true_words, tf.int64)
             true_lengths = tf.cast(true_lengths, tf.int64)
 
-            #logits, rnn_logits = model(images, true_word_obj, true_words, true_lengths, anchors_all=anchors_all, training=is_training, only_output_sizes=False)
-            logits, rnn_logits = model(images, true_word_obj, true_words, true_lengths, anchors_all=anchors_all, training=is_training, only_output_sizes=True)
+            logits, rnn_logits = model(images, true_word_obj, true_words, true_lengths, anchors_all=anchors_all, training=is_training, only_output_sizes=False)
             total_loss = metric.loss(true_values, logits, rnn_logits, current_max_sequence_len, is_training)
             return total_loss
 

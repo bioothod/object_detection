@@ -91,6 +91,7 @@ class Metric:
         self.word_dist_loss = tf.keras.metrics.Mean()
         self.word_obj_loss = tf.keras.metrics.Mean()
         self.word_obj_accuracy = tf.keras.metrics.BinaryAccuracy()
+        self.word_obj_whole_accuracy = tf.keras.metrics.BinaryAccuracy()
 
         self.text_metric = TextMetric(max_sequence_len, dictionary_size, label_smoothing=0.1)
 
@@ -104,9 +105,10 @@ class Metric:
         self.text_metric.reset_states()
 
         self.word_obj_accuracy.reset_states()
+        self.word_obj_whole_accuracy.reset_states()
 
     def str_result(self):
-        return 'total_loss: {:.3e}, dist: {:.3e}, obj: {:.3e}, text_ce: {:.3e}, text_accuracy: {:.4f}, obj_accuracy: {:.4f}'.format(
+        return 'total_loss: {:.3e}, dist: {:.3e}, obj: {:.3e}, text_ce: {:.3e}, text_acc: {:.4f}, word_obj_acc: {:.4f}/{:.4f}'.format(
                 self.total_loss.result(),
                 self.word_dist_loss.result(),
 
@@ -116,6 +118,7 @@ class Metric:
                 self.text_metric.result(want_acc=True),
 
                 self.word_obj_accuracy.result(),
+                self.word_obj_whole_accuracy.result(),
                 )
 
 
@@ -218,20 +221,20 @@ class LossMetricAggregator:
         # obj CE loss
         word_obj_loss = self.obj_loss(y_true=true_word_obj_whole, y_pred=pred_word_obj_whole)
         m.word_obj_loss.update_state(word_obj_loss)
-
-        # for accuracy metric, only check true object matches
-        m.word_obj_accuracy.update_state(true_word_obj, pred_word_obj)
-
         word_obj_loss = tf.nn.compute_average_loss(word_obj_loss, global_batch_size=self.global_batch_size)
         obj_loss = word_obj_loss
 
-        # text CE loss
-        #pred_words = y_pred_rnn
-        #text_ce_loss = m.text_metric.update_state(true_words, pred_words, current_max_sequence_len)
-        #text_ce_loss = tf.nn.compute_average_loss(text_ce_loss, global_batch_size=self.global_batch_size)
+        # for accuracy metric, only check true object matches
+        m.word_obj_accuracy.update_state(true_word_obj, pred_word_obj)
+        m.word_obj_whole_accuracy.update_state(true_word_obj_whole, pred_word_obj_whole)
 
-        #total_loss = dist_loss + obj_loss + text_ce_loss
-        total_loss = dist_loss + obj_loss
+
+        # text CE loss
+        pred_words = y_pred_rnn
+        text_ce_loss = m.text_metric.update_state(true_words, pred_words, current_max_sequence_len)
+        text_ce_loss = tf.nn.compute_average_loss(text_ce_loss, global_batch_size=self.global_batch_size)
+
+        total_loss = dist_loss + 10*obj_loss + text_ce_loss
         m.total_loss.update_state(total_loss)
 
         return total_loss
