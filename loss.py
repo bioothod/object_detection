@@ -234,6 +234,12 @@ class LossMetricAggregator:
         m.word_obj_accuracy.update_state(true_word_obj, pred_word_obj)
         m.word_obj_whole_accuracy.update_state(true_word_obj_whole, pred_word_obj_whole)
 
+        if not tf.debugging.is_numeric_tensor(m.word_obj_accuracy.result()):
+            tf.print('nan in word_obj_accuracy:', m.word_obj_accuracy.result())
+            tf.print('pred_word_obj:', pred_word_obj)
+            tf.print('true_word_obj:', true_word_obj)
+            m.word_obj_accuracy.reset()
+
 
         # text CE loss
         pred_words = y_pred_rnn
