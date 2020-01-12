@@ -250,8 +250,8 @@ class Encoder(tf.keras.layers.Layer):
         rnn_features = self.rnn_features(l[0], l[1], l[2])
         channels = rnn_features.shape[3]
 
-        rnn_feature_height = tf.cast(tf.shape(rnn_features)[1], tf.float32)
-        rnn_feature_width = tf.cast(tf.shape(rnn_features)[2], tf.float32)
+        rnn_feature_height = tf.shape(rnn_features)[1]
+        rnn_feature_width = tf.shape(rnn_features)[2]
 
         logger.info('inputs: {}, outputs: {}, l: {}, rnn_features: {}'.format(inputs.shape, class_outputs.shape, [x.shape.as_list() for x in l], rnn_features.shape))
 
@@ -259,7 +259,6 @@ class Encoder(tf.keras.layers.Layer):
             return class_outputs, None
 
         rnn_features_scale = tf.cast(tf.shape(rnn_features)[1], tf.float32) / tf.cast(tf.shape(inputs)[1], tf.float32)
-
 
         num_words = tf.math.count_nonzero(word_obj_mask, dtype=tf.int32)
         picked_features = tf.TensorArray(tf.float32, size=num_words)
@@ -305,9 +304,6 @@ class Encoder(tf.keras.layers.Layer):
                 x = tf.maximum(x, 0.)
                 y = tf.maximum(y, 0.)
 
-                x = tf.minimum(x, rnn_feature_width - 1)
-                y = tf.minimum(y, rnn_feature_height - 1)
-
                 xmin = tf.math.reduce_min(x, axis=0)
                 ymin = tf.math.reduce_min(y, axis=0)
                 xmax = tf.math.reduce_max(x, axis=0)
@@ -318,8 +314,11 @@ class Encoder(tf.keras.layers.Layer):
                 ymin = tf.cast(ymin, tf.int32)
                 ymax = tf.cast(ymax, tf.int32)
 
-                if ymax > ymin and xmax > xmin:
-                    features_for_one_crop = tf.image.crop_to_bounding_box(features, ymin, xmin, ymax - ymin + 1, xmax - xmin + 1)
+                xmax = tf.minimum(xmax, rnn_feature_width)
+                ymax = tf.minimum(ymax, rnn_feature_height)
+
+                if ymax >= ymin and xmax >= xmin:
+                    features_for_one_crop_base = features[ymin : ymax + 1, xmin : xmax + 1, :]
 
                     lx = (x[0] + x[3]) / 2
                     ly = (y[0] + y[3]) / 2
@@ -328,8 +327,9 @@ class Encoder(tf.keras.layers.Layer):
                     ry = (y[1] + y[2]) / 2
 
                     angle = tf.math.atan2(ry - ly, rx - lx)
-                    features_for_one_crop = tfa.image.rotate(features_for_one_crop, -angle, interpolation='BILINEAR')
+                    features_for_one_crop = tfa.image.rotate(features_for_one_crop_base, -angle, interpolation='BILINEAR')
 
+                    #tf.print(tf.shape(features_for_one_crop_base), tf.shape(features_for_one_crop))
                     features_for_one_crop = preprocess.pad_resize_image(features_for_one_crop, [8, 8])
                     features_for_one_crop.set_shape([8, 8, channels])
 
