@@ -171,6 +171,17 @@ def preprocess_for_train(image, word_poly, image_size, disable_rotation_augmenta
     return image, word_poly
 
 def pad_resize_image(image, dims):
+    h = tf.shape(image)[0]
+    w = tf.shape(image)[1]
+    mx = tf.maximum(h, w)
+
+    dy = mx - h
+    dx = mx - w
+
+    dy0 = tf.cast(dy / 2, tf.int32)
+    dx0 = tf.cast(dx / 2, tf.int32)
+
+    image = tf.pad(image, [[dy0, dy - dy0], [dx0, dx - dx0], [0, 0]])
     image = tf.image.resize(image, dims, preserve_aspect_ratio=True)
 
     shape = tf.shape(image)
