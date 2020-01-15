@@ -35,12 +35,11 @@ class FocalLoss(tf.keras.losses.Loss):
 
 
 class TextMetric():
-    def __init__(self, max_sequence_len, dictionary_size, name=None, label_smoothing=0, from_logits=False, **kwargs):
+    def __init__(self, max_sequence_len, dictionary_size, label_smoothing=0, from_logits=False, **kwargs):
         self.dictionary_size = dictionary_size
         self.max_sequence_len = max_sequence_len
 
-        #self.ce = tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE, label_smoothing=label_smoothing)
-        self.ce = FocalLoss(from_logits=from_logits, reduction=tf.keras.losses.Reduction.NONE, label_smoothing=label_smoothing)
+        self.ce = tf.keras.losses.CategoricalCrossentropy(from_logits=from_logits, reduction=tf.keras.losses.Reduction.NONE, label_smoothing=label_smoothing)
 
         self.loss = tf.keras.metrics.Mean()
         self.acc = tf.keras.metrics.CategoricalAccuracy()
@@ -85,16 +84,15 @@ class TextMetric():
 
 
 class Metric:
-    def __init__(self, max_sequence_len, dictionary_size, **kwargs):
+    def __init__(self, max_sequence_len, dictionary_size, from_logits=False, **kwargs):
         self.total_loss = tf.keras.metrics.Mean()
 
         self.word_dist_loss = tf.keras.metrics.Mean()
         self.word_obj_loss = tf.keras.metrics.Mean()
         self.word_obj_whole_loss = tf.keras.metrics.Mean()
-        self.word_obj_accuracy = tf.keras.metrics.BinaryAccuracy()
-        self.word_obj_whole_accuracy = tf.keras.metrics.BinaryAccuracy()
+        self.word_obj_accuracy = tf.keras.metrics.BinaryAccuracy(threshold=0.2)
 
-        self.text_metric = TextMetric(max_sequence_len, dictionary_size, label_smoothing=0.1)
+        self.text_metric = TextMetric(max_sequence_len, dictionary_size, label_smoothing=0.1, from_logits=from_logits)
 
     def reset_states(self):
         self.total_loss.reset_states()
@@ -106,10 +104,9 @@ class Metric:
         self.text_metric.reset_states()
 
         self.word_obj_accuracy.reset_states()
-        self.word_obj_whole_accuracy.reset_states()
 
     def str_result(self):
-        return 'total_loss: {:.3e}, dist: {:.3e}, obj: {:.3e}/{:.3e}, text_ce: {:.3e}, text_acc: {:.4f}, word_obj_acc: {:.5f}/{:.5f}'.format(
+        return 'total_loss: {:.3e}, dist: {:.3e}, obj: {:.3e}/{:.3e}, text_ce: {:.3e}, text_acc: {:.4f}, word_obj_acc: {:.5f}'.format(
                 self.total_loss.result(),
                 self.word_dist_loss.result(),
 
@@ -120,7 +117,6 @@ class Metric:
                 self.text_metric.result(want_acc=True),
 
                 self.word_obj_accuracy.result(),
-                self.word_obj_whole_accuracy.result(),
                 )
 
 
@@ -129,8 +125,6 @@ class LossMetricAggregator:
                  max_sequence_len, dictionary_size,
                  global_batch_size,
                  **kwargs):
-
-        #super(YOLOLoss, self).__init__(**kwargs)
 
         self.global_batch_size = global_batch_size
         self.max_sequence_len = max_sequence_len
@@ -232,7 +226,6 @@ class LossMetricAggregator:
 
         # for accuracy metric, only check true object matches
         m.word_obj_accuracy.update_state(true_word_obj, pred_word_obj)
-        m.word_obj_whole_accuracy.update_state(true_word_obj_whole, pred_word_obj_whole)
 
         if not tf.debugging.is_numeric_tensor(m.word_obj_accuracy.result()):
             tf.print('nan in word_obj_accuracy:', m.word_obj_accuracy.result())
