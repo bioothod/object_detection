@@ -62,7 +62,7 @@ def draw_im(im, ann, dst, cat_names):
             color = np.random.rand(3,)
             color_map[c] = color
 
-        if bb:
+        if bb is not None:
             bb = bb_hw(bb)
             draw_rect(ax, bb, color)
 
@@ -71,7 +71,11 @@ def draw_im(im, ann, dst, cat_names):
 
         if c:
             if type(c) == str:
-                draw_text(ax, bb[:2], c, sz=8)
+                if bb is not None:
+                    draw_text(ax, bb[:2], c, sz=8)
+                elif kp is not None:
+                    kp = kp.reshape([-1, 2])
+                    draw_text(ax, kp[0], c, sz=8)
             else:
                 if c in cat_names:
                     draw_text(ax, bb[:2], cat_names[c], sz=16)
