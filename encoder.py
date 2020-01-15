@@ -228,49 +228,68 @@ class Encoder(tf.keras.layers.Layer):
         self.rnn_layer = attention.RNNLayer(params, 256, self.max_word_len, params.dictionary_size, params.pad_value, cell='lstm')
 
         self.output_sizes = None
+        self.rnn_features_scale = None
 
-    # word mask is per anchor, i.e. this is true word_obj
-    def call(self, inputs, word_obj_mask, true_word_poly, true_words, true_lengths, anchors_all, training, only_output_sizes=False):
-        l = self.body(inputs, training)
-        head_outputs = self.head(l[0], l[1], l[2], training)
+    def pick_features_for_single_image(self, features, picked_features, written, poly_single_image):
+        # channels_last only
+        channels = features.shape[-1]
 
-        self.output_sizes = [tf.shape(o)[1] for o in head_outputs]
+        feature_height = tf.shape(features)[0]
+        feature_width = tf.shape(features)[1]
 
 
-        splits = [os*os*3 for os in self.output_sizes]
+        for poly_single in poly_single_image:
+            # [4, 2] - > [4], [4]
+            x = poly_single[..., 0]
+            y = poly_single[..., 1]
 
-        batch_size = tf.shape(inputs)[0]
-        outputs = []
-        for head_output in head_outputs:
-            head_output_flat = tf.reshape(head_output, [batch_size, -1, self.num_classes])
-            outputs.append(head_output_flat)
+            x = tf.maximum(x, 0.)
+            y = tf.maximum(y, 0.)
 
-        class_outputs = tf.concat(outputs, axis=1)
+            xmin = tf.math.reduce_min(x, axis=0)
+            ymin = tf.math.reduce_min(y, axis=0)
+            xmax = tf.math.reduce_max(x, axis=0)
+            ymax = tf.math.reduce_max(y, axis=0)
 
-        rnn_features = self.rnn_features(l[0], l[1], l[2])
-        channels = rnn_features.shape[3]
+            xmin = tf.cast(xmin, tf.int32)
+            xmax = tf.cast(xmax, tf.int32)
+            ymin = tf.cast(ymin, tf.int32)
+            ymax = tf.cast(ymax, tf.int32)
 
-        rnn_feature_height = tf.shape(rnn_features)[1]
-        rnn_feature_width = tf.shape(rnn_features)[2]
+            xmax = tf.minimum(xmax, feature_width)
+            ymax = tf.minimum(ymax, feature_height)
 
-        logger.info('inputs: {}, outputs: {}, l: {}, rnn_features: {}'.format(inputs.shape, class_outputs.shape, [x.shape.as_list() for x in l], rnn_features.shape))
+            if ymax >= ymin and xmax >= xmin:
+                features_for_one_crop = features[ymin : ymax + 1, xmin : xmax + 1, :]
 
-        if only_output_sizes:
-            return class_outputs, None
+                lx = (x[0] + x[3]) / 2
+                ly = (y[0] + y[3]) / 2
 
-        rnn_features_scale = tf.cast(tf.shape(rnn_features)[1], tf.float32) / tf.cast(tf.shape(inputs)[1], tf.float32)
+                rx = (x[1] + x[2]) / 2
+                ry = (y[1] + y[2]) / 2
 
-        num_words = tf.math.count_nonzero(word_obj_mask, dtype=tf.int32)
-        picked_features = tf.TensorArray(tf.float32, size=num_words)
+                angle = tf.math.atan2(ry - ly, rx - lx)
+                features_for_one_crop = tfa.image.rotate(features_for_one_crop, -angle, interpolation='BILINEAR')
+
+                features_for_one_crop = preprocess.pad_resize_image(features_for_one_crop, [8, 8])
+                features_for_one_crop.set_shape([8, 8, channels])
+
+                picked_features = picked_features.write(written, features_for_one_crop)
+                written += 1
+
+        return picked_features, written
+
+    def rnn_inference_from_picked_features(self, picked_features, true_words, true_lengths, training):
+        cropped_features = picked_features.stack()
+
+        rnn_outputs = self.rnn_layer(cropped_features, true_words, true_lengths, training)
+
+        rnn_outputs = tf.concat(rnn_outputs, axis=-1)
+        return rnn_outputs
+
+    def rnn_inference(self, rnn_features, word_obj_mask, poly, true_words, true_lengths, anchors_all, training):
+        picked_features = tf.TensorArray(tf.float32, size=0, dynamic_size=True)
         written = 0
-
-        #poly = class_outputs[..., 1 : 1 + 4*2]
-        poly = true_word_poly
-        poly = tf.reshape(poly, [-1, tf.shape(poly)[1], 4, 2])
-
-        true_words_flat = tf.boolean_mask(true_words, word_obj_mask)
-        true_word_lengths_flat = tf.boolean_mask(true_lengths, word_obj_mask)
-
 
         batch_index = tf.range(tf.shape(rnn_features)[0])
         for idx in batch_index:
@@ -291,66 +310,55 @@ class Encoder(tf.keras.layers.Layer):
             best_anchors = tf.boolean_mask(anchors_all[..., :2], word_mask_single)
             best_anchors = tf.expand_dims(best_anchors, 1)
             best_anchors = tf.tile(best_anchors, [1, 4, 1])
-            logger.info('poly_single_image: {}, anchors_all: {}, best_anchors: {}'.format(poly_single_image.shape, anchors_all.shape, best_anchors.shape))
+            #logger.info('poly_single_image: {}, anchors_all: {}, best_anchors: {}'.format(poly_single_image.shape, anchors_all.shape, best_anchors.shape))
             poly_single_image = poly_single_image + best_anchors
 
-            poly_scaled = poly_single_image * rnn_features_scale
+            poly_single_image = poly_single_image * self.rnn_features_scale
+            picked_features, written = self.pick_features_for_single_image(features, picked_features, written, poly_single_image)
 
-            for poly_single in poly_scaled:
-                # [4, 2] - > [4], [4]
-                x = poly_single[..., 0]
-                y = poly_single[..., 1]
+        rnn_outputs = self.rnn_inference_from_picked_features(picked_features, true_words, true_lengths, training)
+        return rnn_outputs
 
-                x = tf.maximum(x, 0.)
-                y = tf.maximum(y, 0.)
+    def rnn_inference_from_true_values(self, rnn_features, word_obj_mask, true_word_poly, true_words, true_lengths, anchors_all, training):
+        #poly = class_outputs[..., 1 : 1 + 4*2]
+        poly = true_word_poly
 
-                xmin = tf.math.reduce_min(x, axis=0)
-                ymin = tf.math.reduce_min(y, axis=0)
-                xmax = tf.math.reduce_max(x, axis=0)
-                ymax = tf.math.reduce_max(y, axis=0)
+        true_words_flat = tf.boolean_mask(true_words, word_obj_mask)
+        true_lens_flat = tf.boolean_mask(true_lengths, word_obj_mask)
 
-                xmin = tf.cast(xmin, tf.int32)
-                xmax = tf.cast(xmax, tf.int32)
-                ymin = tf.cast(ymin, tf.int32)
-                ymax = tf.cast(ymax, tf.int32)
+        poly = tf.reshape(poly, [-1, tf.shape(poly)[1], 4, 2])
 
-                xmax = tf.minimum(xmax, rnn_feature_width)
-                ymax = tf.minimum(ymax, rnn_feature_height)
+        rnn_outputs = self.rnn_inference(rnn_features, word_obj_mask, poly, true_words_flat, true_lens_flat, anchors_all, training)
+        return rnn_outputs
 
-                if ymax >= ymin and xmax >= xmin:
-                    features_for_one_crop_base = features[ymin : ymax + 1, xmin : xmax + 1, :]
+    # word mask is per anchor, i.e. this is true word_obj
+    def call(self, inputs, training):
+        l = self.body(inputs, training)
+        head_outputs = self.head(l[0], l[1], l[2], training)
 
-                    lx = (x[0] + x[3]) / 2
-                    ly = (y[0] + y[3]) / 2
+        self.output_sizes = [tf.shape(o)[1] for o in head_outputs]
 
-                    rx = (x[1] + x[2]) / 2
-                    ry = (y[1] + y[2]) / 2
+        batch_size = tf.shape(inputs)[0]
+        outputs = []
+        for head_output in head_outputs:
+            head_output_flat = tf.reshape(head_output, [batch_size, -1, self.num_classes])
+            outputs.append(head_output_flat)
 
-                    angle = tf.math.atan2(ry - ly, rx - lx)
-                    features_for_one_crop = tfa.image.rotate(features_for_one_crop_base, -angle, interpolation='BILINEAR')
+        class_outputs = tf.concat(outputs, axis=1)
 
-                    #tf.print(tf.shape(features_for_one_crop_base), tf.shape(features_for_one_crop))
-                    features_for_one_crop = preprocess.pad_resize_image(features_for_one_crop, [8, 8])
-                    features_for_one_crop.set_shape([8, 8, channels])
+        rnn_features = self.rnn_features(l[0], l[1], l[2])
+        self.rnn_features_scale = tf.cast(tf.shape(rnn_features)[1], tf.float32) / tf.cast(tf.shape(inputs)[1], tf.float32)
 
-                    picked_features = picked_features.write(written, features_for_one_crop)
-                    written += 1
+        #logger.info('inputs: {}, outputs: {}, l: {}, rnn_features: {}'.format(inputs.shape, class_outputs.shape, [x.shape.as_list() for x in l], rnn_features.shape))
 
-        cropped_features = picked_features.stack()
-
-        logger.info('rnn_features: {} -> {}'.format(rnn_features.shape, cropped_features.shape))
-
-        rnn_outputs = self.rnn_layer(cropped_features, true_words_flat, true_word_lengths_flat, training)
-
-        rnn_outputs = tf.concat(rnn_outputs, axis=-1)
-        logger.info('class_outputs: {}, rnn_outputs: {}'.format(class_outputs.shape, rnn_outputs.shape))
-
-        return class_outputs, rnn_outputs
+        return class_outputs, rnn_features
 
 def create_params(model_name, max_word_len, dictionary_size, pad_value):
     data_format='channels_last'
 
     if data_format == 'channels_first':
+        raise NameError('unsupported data format {}'.format(data_format))
+
         channel_axis = 1
         spatial_dims = [2, 3]
     else:

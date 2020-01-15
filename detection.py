@@ -61,6 +61,9 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
     image = features['image']
     image = tf.image.decode_jpeg(image, channels=3)
 
+    orig_bboxes = tf.io.decode_raw(features['true_bboxes'], tf.float32)
+    orig_bboxes = tf.reshape(orig_bboxes, [-1, 4])
+
     text_labels = tf.strings.split(features['true_labels'], '<SEP>')
     text_split = tf.strings.unicode_split(text_labels, 'UTF-8')
     text_lenghts = text_split.row_lengths()
@@ -75,8 +78,7 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
     if to_add > 0:
         encoded_padded_text = tf.pad(encoded_padded_text, [[0, 0], [0, to_add]], mode='CONSTANT', constant_values=pad_value)
 
-    orig_bboxes = tf.io.decode_raw(features['true_bboxes'], tf.float32)
-    orig_bboxes = tf.reshape(orig_bboxes, [-1, 4])
+
 
     cx, cy, h, w = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
     xmin = cx - w / 2
@@ -146,13 +148,13 @@ def draw_bboxes(image_size, train_dataset, num_examples, all_anchors, dictionary
             image = image * 128 + 128
             image = image.astype(np.uint8)
 
-        true_word_obj, word_poly, text_labels = anchors_gen.unpack_true_values(true_values, all_anchors, image.shape, image_size, max_sequence_len)
+        true_word_obj, word_poly, text_labels, lengths = anchors_gen.unpack_true_values(true_values, all_anchors, image.shape, image_size, max_sequence_len)
 
         word_poly = word_poly.numpy()
-        char_poly = char_poly.numpy()
+        text_labels = text_labels.numpy()
 
         new_anns = []
-        for poly in word_poly:
+        for poly, text in zip(word_poly, text_labels):
             new_anns.append((None, poly, None))
 
         image_draw.draw_im(image, new_anns, dst, {})
@@ -188,9 +190,7 @@ def train():
             dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
 
             dstrategy.experimental_run_v2(
-                    lambda m, inp:
-                        m(inp, word_obj_mask=0, true_word_poly=0, true_words=0, true_lengths=0,
-                            anchors_all=0, training=True, only_output_sizes=True),
+                    lambda m, inp: m(inp, training=True),
                     args=(model, dummy_input))
 
             logger.info('image_size: {}, model output sizes: {}'.format(image_size, model.output_sizes))
@@ -287,7 +287,9 @@ def train():
             true_words = tf.cast(true_words, tf.int64)
             true_lengths = tf.cast(true_lengths, tf.int64)
 
-            logits, rnn_logits = model(images, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all=anchors_all, training=is_training, only_output_sizes=False)
+            logits, rnn_features = model(images, is_training)
+            rnn_logits = model.rnn_inference_from_true_values(rnn_features, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all, is_training)
+
             total_loss = metric.loss(true_values, logits, rnn_logits, current_max_sequence_len, is_training)
             return total_loss
 
