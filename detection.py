@@ -33,8 +33,8 @@ parser.add_argument('--negative_positive_rate', default=2, type=float, help='Neg
 parser.add_argument('--epochs_lr_update', default=10, type=int, help='Maximum number of epochs without improvement used to reset or decrease learning rate')
 parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16 training/inference')
 parser.add_argument('--dataset_type', type=str, choices=['tfrecords'], default='tfrecords', help='Dataset type')
-parser.add_argument('--train_tfrecord_dir', type=str, action='append', help='Directory containing training TFRecords')
-parser.add_argument('--eval_tfrecord_dir', type=str, action='append', help='Directory containing evaluation TFRecords')
+parser.add_argument('--train_tfrecord_dir', type=str, required=True, action='append', help='Directory containing training TFRecords')
+parser.add_argument('--eval_tfrecord_dir', type=str, required=True, action='append', help='Directory containing evaluation TFRecords')
 parser.add_argument('--image_size', type=int, required=True, help='Use this image size, if 0 - use default')
 parser.add_argument('--steps_per_eval_epoch', default=30, type=int, help='Number of steps per evaluation run')
 parser.add_argument('--steps_per_train_epoch', default=200, type=int, help='Number of steps per train run')
@@ -63,23 +63,6 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
 
     orig_bboxes = tf.io.decode_raw(features['true_bboxes'], tf.float32)
     orig_bboxes = tf.reshape(orig_bboxes, [-1, 4])
-
-    text_labels = tf.strings.split(features['true_labels'], '<SEP>')
-    text_split = tf.strings.unicode_split(text_labels, 'UTF-8')
-    text_lenghts = text_split.row_lengths()
-    text_lenghts = tf.expand_dims(text_lenghts, 1)
-
-    encoded_values = dict_table.lookup(text_split.values)
-    rg = tf.RaggedTensor.from_row_splits(values=encoded_values, row_splits=text_split.row_splits)
-    encoded_padded_text = rg.to_tensor(default_value=pad_value)
-    encoded_padded_text = encoded_padded_text[..., :max_sequence_len]
-
-    to_add = max_sequence_len - tf.shape(encoded_padded_text)[1]
-    if to_add > 0:
-        encoded_padded_text = tf.pad(encoded_padded_text, [[0, 0], [0, to_add]], mode='CONSTANT', constant_values=pad_value)
-
-
-
     cx, cy, h, w = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
     xmin = cx - w / 2
     ymin = cy - h / 2
@@ -120,7 +103,24 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
 
 
     if is_training:
-        image, word_poly = preprocess.preprocess_for_train(image, word_poly, image_size, FLAGS.disable_rotation_augmentation)
+        image, word_poly, reverse_text_labels = preprocess.preprocess_for_train(image, word_poly, image_size, FLAGS.disable_rotation_augmentation)
+
+    text_labels = tf.strings.split(features['true_labels'], '<SEP>')
+    text_split = tf.strings.unicode_split(text_labels, 'UTF-8')
+    if reverse_text_labels:
+        text_split = tf.reverse(text_split, [1])
+
+    text_lenghts = text_split.row_lengths()
+    text_lenghts = tf.expand_dims(text_lenghts, 1)
+
+    encoded_values = dict_table.lookup(text_split.values)
+    rg = tf.RaggedTensor.from_row_splits(values=encoded_values, row_splits=text_split.row_splits)
+    encoded_padded_text = rg.to_tensor(default_value=pad_value)
+    encoded_padded_text = encoded_padded_text[..., :max_sequence_len]
+
+    to_add = max_sequence_len - tf.shape(encoded_padded_text)[1]
+    if to_add > 0:
+        encoded_padded_text = tf.pad(encoded_padded_text, [[0, 0], [0, to_add]], mode='CONSTANT', constant_values=pad_value)
 
     true_values = anchors_gen.generate_true_values_for_anchors(word_poly, anchors_all, encoded_padded_text, text_lenghts, max_sequence_len)
 
