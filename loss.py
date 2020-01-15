@@ -2,7 +2,6 @@ import logging
 logger = logging.getLogger('detection')
 
 import tensorflow as tf
-from tensorflow.python.ops import array_ops
 
 class FocalLoss(tf.keras.losses.Loss):
     def __init__(self, from_logits=False, label_smoothing=0, reduction=tf.keras.losses.Reduction.NONE):
@@ -20,13 +19,16 @@ class FocalLoss(tf.keras.losses.Loss):
         else:
             sigmoid_p = y_pred
 
-        zeros = array_ops.zeros_like(sigmoid_p, dtype=sigmoid_p.dtype)
+        zeros = tf.zeros_like(sigmoid_p, dtype=sigmoid_p.dtype)
 
-        pos_p_sub = array_ops.where(y_true > zeros, y_true - sigmoid_p, zeros)
-        neg_p_sub = array_ops.where(y_true > zeros, zeros, sigmoid_p)
+        pos_p_sub = tf.where(y_true > zeros, y_true - sigmoid_p, zeros)
+        neg_p_sub = tf.where(y_true > zeros, zeros, sigmoid_p)
 
-        per_entry_cross_ent = - self.alpha * (pos_p_sub ** self.gamma) * tf.math.log(tf.clip_by_value(sigmoid_p, 1e-8, 1)) - \
-            (1 - self.alpha) * (neg_p_sub ** self.gamma) * tf.math.log(tf.clip_by_value(1.0 - sigmoid_p, 1e-8, 1))
+        p = tf.clip_by_value(sigmoid_p, 1e-10, 1)
+        one_minus_p = tf.clip_by_value(1 - sigmoid_p, 1e-10, 1)
+
+        per_entry_cross_ent = - self.alpha * (pos_p_sub ** self.gamma) * tf.math.log(p) - \
+            (1 - self.alpha) * (neg_p_sub ** self.gamma) * tf.math.log(one_minus_p)
 
         if self.reduction == tf.keras.losses.Reduction.NONE:
             return per_entry_cross_ent
@@ -227,12 +229,18 @@ class LossMetricAggregator:
         # for accuracy metric, only check true object matches
         m.word_obj_accuracy.update_state(true_word_obj, pred_word_obj)
 
-        if not tf.debugging.is_numeric_tensor(m.word_obj_accuracy.result()):
-            tf.print('nan in word_obj_accuracy:', m.word_obj_accuracy.result())
+        if not tf.debugging.is_numeric_tensor(m.word_obj_accuracy.result()) or not tf.debugging.is_numeric_tensor(m.word_obj_loss.result()):
+            tf.print('word_obj_accuracy:', m.word_obj_accuracy.result())
+            tf.print('word_obj_loss:', m.word_obj_loss.result())
             tf.print('pred_word_obj:', pred_word_obj)
             tf.print('true_word_obj:', true_word_obj)
             m.word_obj_accuracy.reset()
+            m.word_obj_loss.reset()
 
+        if not tf.debugging.is_numeric_tensor(pred_word_obj):
+            tf.print('nan in pred_word_obj')
+        if not tf.debugging.is_numeric_tensor(pred_word_poly):
+            tf.print('nan in pred_word_poly')
 
         # text CE loss
         pred_words = y_pred_rnn
