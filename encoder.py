@@ -205,6 +205,20 @@ class ConcatFeatures(tf.keras.layers.Layer):
 
         return x0
 
+@tf.function(experimental_relax_shapes=True)
+def run_crop_and_rotation(features, x, y, xmin, ymin, xmax, ymax):
+    features_for_one_crop = features[ymin : ymax + 1, xmin : xmax + 1, :]
+    features_for_one_crop = tf.convert_to_tensor(features_for_one_crop)
+
+    lx = (x[0] + x[3]) / 2
+    ly = (y[0] + y[3]) / 2
+
+    rx = (x[1] + x[2]) / 2
+    ry = (y[1] + y[2]) / 2
+
+    angle = tf.math.atan2(ry - ly, rx - lx)
+    return tfa.image.rotate(features_for_one_crop, -angle, interpolation='BILINEAR')
+
 class Encoder(tf.keras.layers.Layer):
     def __init__(self, params, **kwargs):
         super().__init__(**kwargs)
@@ -259,23 +273,13 @@ class Encoder(tf.keras.layers.Layer):
             xmax = tf.minimum(xmax, feature_width)
             ymax = tf.minimum(ymax, feature_height)
 
-            if ymax >= ymin and xmax >= xmin:
-                features_for_one_crop = features[ymin : ymax + 1, xmin : xmax + 1, :]
+            features_for_one_crop = run_crop_and_rotation(features, x, y, xmin, ymin, xmax, ymax)
 
-                lx = (x[0] + x[3]) / 2
-                ly = (y[0] + y[3]) / 2
+            features_for_one_crop = preprocess.pad_resize_image(features_for_one_crop, [8, 8])
+            features_for_one_crop.set_shape([8, 8, channels])
 
-                rx = (x[1] + x[2]) / 2
-                ry = (y[1] + y[2]) / 2
-
-                angle = tf.math.atan2(ry - ly, rx - lx)
-                features_for_one_crop = tfa.image.rotate(features_for_one_crop, -angle, interpolation='BILINEAR')
-
-                features_for_one_crop = preprocess.pad_resize_image(features_for_one_crop, [8, 8])
-                features_for_one_crop.set_shape([8, 8, channels])
-
-                picked_features = picked_features.write(written, features_for_one_crop)
-                written += 1
+            picked_features = picked_features.write(written, features_for_one_crop)
+            written += 1
 
         return picked_features, written
 
@@ -310,7 +314,6 @@ class Encoder(tf.keras.layers.Layer):
             best_anchors = tf.boolean_mask(anchors_all[..., :2], word_mask_single)
             best_anchors = tf.expand_dims(best_anchors, 1)
             best_anchors = tf.tile(best_anchors, [1, 4, 1])
-            #logger.info('poly_single_image: {}, anchors_all: {}, best_anchors: {}'.format(poly_single_image.shape, anchors_all.shape, best_anchors.shape))
             poly_single_image = poly_single_image + best_anchors
 
             poly_single_image = poly_single_image * self.rnn_features_scale
