@@ -188,6 +188,7 @@ class COCOText:
 
                 if text == '':
                     ann['utf8_string'] = '<SKIP>'
+                    continue
 
                 ctl['anns'].append(ann)
 
