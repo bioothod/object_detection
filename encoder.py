@@ -208,7 +208,6 @@ class ConcatFeatures(tf.keras.layers.Layer):
 @tf.function(experimental_relax_shapes=True)
 def run_crop_and_rotation(features, x, y, xmin, ymin, xmax, ymax):
     features_for_one_crop = features[ymin : ymax + 1, xmin : xmax + 1, :]
-    features_for_one_crop = tf.convert_to_tensor(features_for_one_crop)
 
     lx = (x[0] + x[3]) / 2
     ly = (y[0] + y[3]) / 2
