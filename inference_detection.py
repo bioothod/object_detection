@@ -30,7 +30,7 @@ parser.add_argument('--batch_size', type=int, default=24, help='Number of images
 parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel preprocessing jobs')
 parser.add_argument('--max_ret', type=int, default=100, help='Maximum number of returned boxes')
 parser.add_argument('--min_obj_score', type=float, default=0.3, help='Minimal class probability')
-parser.add_argument('--min_size', type=float, default=10, help='Minimal size of the bounding box')
+parser.add_argument('--min_size', type=float, default=2, help='Minimal size of the bounding box')
 parser.add_argument('--iou_threshold', type=float, default=0.45, help='Minimal IoU threshold for non-maximum suppression')
 parser.add_argument('--output_dir', type=str, required=True, help='Path to directory, where images will be stored')
 parser.add_argument('--checkpoint', type=str, help='Load model weights from this file')
@@ -209,6 +209,23 @@ def nms_for_poly(poly, obj, scores_to_sort):
     obj = tf.gather(obj, selected_indexes)
     return poly, obj, selected_indexes
 
+def size_filter_for_poly(poly, obj):
+    # polygon [N, 4] -> [N, [ymin, xmin, w, xh]]
+    bboxes_to_sort = anchors_gen.polygon2bbox(poly, want_wh=True)
+    w = bboxes_to_sort[:, 2]
+    h = bboxes_to_sort[:, 3]
+
+    selected_indexes = tf.where(tf.logical_and(
+                                    tf.greater(w, FLAGS.min_size),
+                                    tf.greater(h, FLAGS.min_size)
+                                ))
+
+    selected_indexes = tf.squeeze(selected_indexes, 1)
+
+    poly = tf.gather(poly, selected_indexes)
+    obj = tf.gather(obj, selected_indexes)
+    return poly, obj, selected_indexes
+
 def sort_and_pad_for_poly(poly, obj, scores_to_sort):
     _, best_index = tf.math.top_k(scores_to_sort, tf.minimum(FLAGS.max_ret, tf.shape(scores_to_sort)[0]), sorted=True)
 
@@ -221,7 +238,7 @@ def sort_and_pad_for_poly(poly, obj, scores_to_sort):
     obj = tf.pad(obj, [[0, to_add]], 'CONSTANT')
     return poly, obj, best_index
 
-def per_image_supression(y_pred, image_size, anchors_all, model):
+def per_image_supression(y_pred, image_size, anchors_all, model, pad_value):
     pred_values, features = y_pred
 
     pred_word_obj = tf.math.sigmoid(pred_values[..., 0])
@@ -239,27 +256,28 @@ def per_image_supression(y_pred, image_size, anchors_all, model):
     word_obj = tf.gather(pred_word_obj, word_index)
 
     word_poly, word_obj, word_index_nms = nms_for_poly(word_poly, word_obj, tf.squeeze(word_obj, 1))
+    word_poly, word_obj, word_index_size = size_filter_for_poly(word_poly, word_obj)
+    word_poly_sorted, word_obj_sorted, word_index_sort = sort_and_pad_for_poly(word_poly, word_obj, tf.squeeze(word_obj, 1))
 
-    feature_poly = word_poly * model.rnn_features_scale
-    picked_features = tf.TensorArray(tf.float32, size=0, dynamic_size=True)
-    picked_features, written = model.pick_features_for_single_image(features, picked_features, 0, feature_poly)
-    rnn_outputs = model.rnn_inference_from_picked_features(picked_features, 0, 0, training=False)
+    if tf.shape(word_obj)[0] > 0:
+        feature_poly = word_poly * model.rnn_feature_scale_float
+        picked_features = tf.TensorArray(tf.float32, size=0, dynamic_size=True)
+        picked_features, written = model.pick_features_for_single_image(features, picked_features, 0, feature_poly)
+        rnn_outputs = model.rnn_inference_from_picked_features(picked_features, 0, 0, training=False)
 
-    word_poly, word_obj, word_index_sort = sort_and_pad_for_poly(word_poly, word_obj, tf.squeeze(word_obj, 1))
-    rnn_outputs = tf.gather(rnn_outputs, word_index_sort)
-    texts = tf.argmax(rnn_outputs, 2)
-    texts = tf.pad(texts, [[0, FLAGS.max_ret - tf.shape(texts)[0]], [0, 0]])
+        rnn_outputs = tf.gather(rnn_outputs, word_index_sort)
 
-    return word_obj, word_poly, texts
+        texts = tf.argmax(rnn_outputs, 2)
+        texts = tf.pad(texts, [[0, FLAGS.max_ret - tf.shape(texts)[0]], [0, 0]], mode='CONSTANT', constant_values=pad_value)
+    else:
+        texts = tf.ones((FLAGS.max_ret, FLAGS.max_sequence_len), dtype=tf.int64) * pad_value
 
-@tf.function(experimental_relax_shapes=True)
-def get_model_outputs(model, images):
-    return model(images, training=False)
+    return word_obj_sorted, word_poly_sorted, texts
 
-def eval_step_logits(model, images, image_size, anchors_all):
-    pred_values, rnn_features = get_model_outputs(model, images)
+def eval_step_logits(model, images, image_size, anchors_all, pad_value):
+    pred_values, rnn_features = model(images, training=False)
 
-    word_obj, word_poly, texts = tf.map_fn(lambda vals: per_image_supression(vals, image_size, anchors_all, model),
+    word_obj, word_poly, texts = tf.map_fn(lambda vals: per_image_supression(vals, image_size, anchors_all, model, pad_value),
                                                                                 (pred_values, rnn_features),
                                                                                 parallel_iterations=FLAGS.num_cpus,
                                                                                 back_prop=False,
@@ -316,7 +334,7 @@ def run_eval(model, dataset, image_size, dst_dir, anchors_all, dictionary_size, 
     dump_js = []
     for filenames, images, true_word_poly_batch, true_text_labels_batch, orig_image_shapes in dataset:
         start_time = time.time()
-        word_obj_batch, word_poly_batch, texts_batch = eval_step_logits(model, images, image_size, anchors_all)
+        word_obj_batch, word_poly_batch, texts_batch = eval_step_logits(model, images, image_size, anchors_all, pad_value)
         num_files += len(filenames)
         time_per_image_ms = (time.time() - start_time) / len(filenames) * 1000
 
@@ -420,6 +438,7 @@ def run_inference():
         dummy_input = tf.ones((int(FLAGS.batch_size), image_size, image_size, 3), dtype=dtype)
         model(dummy_input, training=False)
         logger.info('image_size: {}, model output sizes: {}'.format(image_size, model.output_sizes))
+        model.rnn_feature_scale_float = float(model.rnn_features_scale.numpy())
 
     anchors_all, all_grid_xy, all_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
 
