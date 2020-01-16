@@ -194,6 +194,7 @@ def train():
                     args=(model, dummy_input))
 
             logger.info('image_size: {}, model output sizes: {}'.format(image_size, model.output_sizes))
+            model.rnn_feature_scale_float = float(model.rnn_features_scale.numpy())
 
         anchors_all, output_xy_grids, output_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
 
