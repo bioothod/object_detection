@@ -206,7 +206,7 @@ class DarknetUpsampling(tf.keras.layers.Layer):
         super(DarknetUpsampling, self).__init__(**kwargs)
 
         self.conv = DarknetConv(params, num_features, kernel_size=(1, 1), strides=(1, 1), padding='SAME')
-        self.upsampling = tf.keras.layers.UpSampling2D(2)
+        self.upsampling = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
 
     def call(self, inputs, training):
         x = self.conv(inputs, training)

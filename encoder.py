@@ -118,12 +118,12 @@ class Head(tf.keras.layers.Layer):
         self.s2_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
         self.s2_input = EncoderConvList(params, [512, 1024, 512, 1024, 512])
         self.s2_output = HeadLayer(params, num_classes, name="detection_layer_2")
-        self.up2 = tf.keras.layers.UpSampling2D(2)
+        self.up2 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
 
         self.s1_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
         self.s1_input = EncoderConvList(params, [256, 512, 256, 512, 256])
         self.s1_output = HeadLayer(params, num_classes, name="detection_layer_1")
-        self.up1 = tf.keras.layers.UpSampling2D(2)
+        self.up1 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
 
         self.s0_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
         self.s0_input = EncoderConvList(params, [128, 256, 128, 256, 128])
@@ -169,10 +169,10 @@ class ConcatFeatures(tf.keras.layers.Layer):
         super().__init__(**kwargs)
 
         self.s2_input = EncoderConv(params, 512)
-        self.up2 = tf.keras.layers.UpSampling2D(2)
+        self.up2 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
 
         self.s1_input = EncoderConv(params, 256)
-        self.up1 = tf.keras.layers.UpSampling2D(2)
+        self.up1 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
 
         self.s0_input = EncoderConv(params, 128)
 
@@ -216,7 +216,8 @@ def run_crop_and_rotation(features, x, y, xmin, ymin, xmax, ymax):
     ry = (y[1] + y[2]) / 2
 
     angle = tf.math.atan2(ry - ly, rx - lx)
-    return tfa.image.rotate(features_for_one_crop, -angle, interpolation='BILINEAR')
+    features_for_one_crop = tfa.image.rotate(features_for_one_crop, -angle, interpolation='BILINEAR')
+    return features_for_one_crop
 
 class Encoder(tf.keras.layers.Layer):
     def __init__(self, params, **kwargs):
