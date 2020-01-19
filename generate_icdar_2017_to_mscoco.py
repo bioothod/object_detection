@@ -71,6 +71,7 @@ def scan_annotations(gt_dir, writer, image_fns):
 
         texts = []
         bboxes = []
+        polygons = []
 
         full_path = os.path.join(gt_dir, gt_fn)
         with open(full_path, 'r') as fin:
@@ -103,6 +104,7 @@ def scan_annotations(gt_dir, writer, image_fns):
                 bb = np.array([cx, cy, h, w], dtype=np.float32)
 
                 bboxes.append(bb)
+                polygons.append(points)
                 texts.append(text)
 
         if len(bboxes) == 0:
@@ -116,6 +118,7 @@ def scan_annotations(gt_dir, writer, image_fns):
             continue
 
         bboxes = np.concatenate(bboxes, 0).astype(np.float32)
+        polygons = np.concatenate(polygons, 0).astype(np.float32)
         texts = '<SEP>'.join(texts)
 
         example = tf.train.Example(features=tf.train.Features(feature={
@@ -123,6 +126,7 @@ def scan_annotations(gt_dir, writer, image_fns):
             'image': _bytes_feature(image_data),
             'filename': _bytes_feature(bytes(image_filename, 'UTF-8')),
             'true_bboxes': _bytes_feature(bboxes.tobytes()),
+            'word_poly': _bytes_feature(polygons.tobytes()),
             'true_labels': _bytes_feature(bytes(texts, 'UTF-8')),
             }))
 
