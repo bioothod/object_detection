@@ -136,14 +136,19 @@ def preprocess_for_train(image, word_poly, image_size, disable_rotation_augmenta
     new_poly *= image_size
     word_poly = new_poly
 
+    reverse_text_labels = False
+
     if not disable_rotation_augmentation and tf.random.uniform([]) >= 0.5:
         wx = word_poly[..., 0]
         wy = word_poly[..., 1]
 
+        image = tf.expand_dims(image, 0)
+
         if tf.random.uniform([]) >= 0.5:
             image = tf.image.flip_left_right(image)
             wx = image_size - wx
-        elif False and tf.random.uniform([]) >= 0.5:
+            reverse_text_labels = True
+        elif tf.random.uniform([]) >= 0.5:
             image = tf.image.flip_up_down(image)
             wy = image_size - wy
         elif tf.random.uniform([]) >= 0.5:
@@ -162,13 +167,16 @@ def preprocess_for_train(image, word_poly, image_size, disable_rotation_augmenta
             if k == 2:
                 wx, wy = rot180(wx, wy)
             if k == 1:
+                reverse_text_labels = True
                 wx, wy = rot270(wx, wy)
 
-            image = tf.image.rot90(image, k)
+            if k > 0:
+                image = tf.image.rot90(image, k)
 
         word_poly = tf.stack([wx, wy], -1)
+        image = tf.squeeze(image, 0)
 
-    return image, word_poly
+    return image, word_poly, reverse_text_labels
 
 def pad_resize_image(image, dims):
     h = tf.shape(image)[0]
