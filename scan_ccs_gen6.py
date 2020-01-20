@@ -58,6 +58,7 @@ def scan_tags(input_dir, writer):
 
                 char_poly = []
                 word_poly = []
+                word_bboxes = []
                 text_strings = []
                 chars = ''
 
@@ -68,6 +69,19 @@ def scan_tags(input_dir, writer):
                         wp = [s[0], e[1], e[2], s[3]]
                         word_poly.append(wp)
                         text_strings.append(word)
+
+                        wp = np.array(wp, dtype=np.float32)
+                        xmin = wp[0::2].min()
+                        xmax = wp[0::2].max()
+                        ymin = wp[1::2].min()
+                        ymax = wp[1::2].max()
+
+                        cx = (xmin + xmax) / 2
+                        cy = (ymin + ymax) / 2
+                        h = ymax - ymin
+                        w = xmax - xmin
+                        text_bbox = np.array([cx, cy, h, w], dtype=np.float32)
+                        word_bboxes.append(text_bbox)
 
                     return [], ''
 
@@ -106,6 +120,7 @@ def scan_tags(input_dir, writer):
 
                 char_poly = np.array(char_poly, dtype=np.float64)
                 word_poly = np.array(word_poly, dtype=np.float32)
+                word_bboxes = np.array(word_bboxes, dtype=np.float32)
 
                 #logger.info('{}: word_poly: {}, words: {}, char_poly: {}, chars: {}'.format(image_id, word_poly.shape, len(text_strings), char_poly.shape, len(chars)))
                 #exit(0)
@@ -117,6 +132,8 @@ def scan_tags(input_dir, writer):
                     'word_poly': _bytes_feature(word_poly.tobytes()),
                     'text': _bytes_feature(bytes(texts, 'UTF-8')),
                     'text_concat': _bytes_feature(bytes(chars, 'UTF-8')),
+                    'true_labels': _bytes_feature(bytes(texts, 'UTF-8')),
+                    'true_bboxes': _bytes_feature(word_bboxes.tobytes()),
                     }))
 
                 data = bytes(example.SerializeToString())
@@ -136,6 +153,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_images_per_tfrecord', default=10000, type=int, help='Maximum number of images per tfrecord')
     FLAGS = parser.parse_args()
 
+    os.makedirs(FLAGS.output_dir, exist_ok=True)
     writer = tfrecord_writer.tf_records_writer('{}/tfrecord'.format(FLAGS.output_dir), 0, FLAGS.num_images_per_tfrecord)
 
     processed = 0

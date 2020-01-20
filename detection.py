@@ -289,9 +289,9 @@ def train():
             true_lengths = tf.cast(true_lengths, tf.int64)
 
             logits, rnn_features = model(images, is_training)
-            rnn_logits = model.rnn_inference_from_true_values(rnn_features, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all, is_training)
+            rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(rnn_features, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all, is_training)
 
-            total_loss = metric.loss(true_values, logits, rnn_logits, current_max_sequence_len, is_training)
+            total_loss = metric.loss(true_values, logits, rnn_outputs, rnn_outputs_ar, current_max_sequence_len, is_training)
             return total_loss
 
         def eval_step(filenames, images, true_values):

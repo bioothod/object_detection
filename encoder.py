@@ -168,12 +168,15 @@ class ConcatFeatures(tf.keras.layers.Layer):
     def __init__(self, params, **kwargs):
         super().__init__(**kwargs)
 
+        self.s2_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
         self.s2_input = EncoderConvList(params, [512, 1024, 512, 1024, 512])
         self.up2 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
 
+        self.s1_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
         self.s1_input = EncoderConvList(params, [256, 512, 256, 512, 256])
         self.up1 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
 
+        self.s0_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
         self.s0_input = EncoderConvList(params, [128, 256, 128, 256, 128])
 
         self.pads = [None]
@@ -183,6 +186,7 @@ class ConcatFeatures(tf.keras.layers.Layer):
     def call(self, in0, in1, in2, training=True):
         x2 = self.s2_input(in2)
         up2 = self.up2(x2)
+        up2 = self.s2_dropout(up2, training=training)
 
         diff = up2.shape[1] - in1.shape[1]
         if diff > 0:
@@ -193,6 +197,7 @@ class ConcatFeatures(tf.keras.layers.Layer):
         x1 = tf.keras.layers.concatenate([up2, in1])
         x1 = self.s1_input(x1)
         up1 = self.up1(x1)
+        up1 = self.s1_dropout(up1, training=training)
 
         diff = up1.shape[1] - in0.shape[1]
         if diff > 0:
@@ -202,6 +207,7 @@ class ConcatFeatures(tf.keras.layers.Layer):
 
         x0 = tf.keras.layers.concatenate([up1, in0])
         x0 = self.s0_input(x0)
+        x0 = self.s0_dropout(x0, training=training)
 
         return x0
 
@@ -286,10 +292,8 @@ class Encoder(tf.keras.layers.Layer):
     def rnn_inference_from_picked_features(self, picked_features, true_words, true_lengths, training):
         cropped_features = picked_features.stack()
 
-        rnn_outputs = self.rnn_layer(cropped_features, true_words, true_lengths, training)
-
-        rnn_outputs = tf.concat(rnn_outputs, axis=-1)
-        return rnn_outputs
+        rnn_outputs, rnn_outputs_ar = self.rnn_layer(cropped_features, true_words, true_lengths, training)
+        return rnn_outputs, rnn_outputs_ar
 
     def rnn_inference(self, rnn_features, word_obj_mask, poly, true_words, true_lengths, anchors_all, training):
         picked_features = tf.TensorArray(tf.float32, size=0, dynamic_size=True)
@@ -319,8 +323,8 @@ class Encoder(tf.keras.layers.Layer):
             poly_single_image = poly_single_image * self.rnn_features_scale
             picked_features, written = self.pick_features_for_single_image(features, picked_features, written, poly_single_image)
 
-        rnn_outputs = self.rnn_inference_from_picked_features(picked_features, true_words, true_lengths, training)
-        return rnn_outputs
+        rnn_outputs, rnn_outputs_ar = self.rnn_inference_from_picked_features(picked_features, true_words, true_lengths, training)
+        return rnn_outputs, rnn_outputs_ar
 
     def rnn_inference_from_true_values(self, rnn_features, word_obj_mask, true_word_poly, true_words, true_lengths, anchors_all, training):
         #poly = class_outputs[..., 1 : 1 + 4*2]
@@ -331,8 +335,8 @@ class Encoder(tf.keras.layers.Layer):
 
         poly = tf.reshape(poly, [-1, tf.shape(poly)[1], 4, 2])
 
-        rnn_outputs = self.rnn_inference(rnn_features, word_obj_mask, poly, true_words_flat, true_lens_flat, anchors_all, training)
-        return rnn_outputs
+        rnn_outputs, rnn_outputs_ar = self.rnn_inference(rnn_features, word_obj_mask, poly, true_words_flat, true_lens_flat, anchors_all, training)
+        return rnn_outputs, rnn_outputs_ar
 
     # word mask is per anchor, i.e. this is true word_obj
     def call(self, inputs, training):
