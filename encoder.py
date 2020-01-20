@@ -168,13 +168,13 @@ class ConcatFeatures(tf.keras.layers.Layer):
     def __init__(self, params, **kwargs):
         super().__init__(**kwargs)
 
-        self.s2_input = EncoderConv(params, 512)
+        self.s2_input = EncoderConvList(params, [512, 1024, 512, 1024, 512])
         self.up2 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
 
-        self.s1_input = EncoderConv(params, 256)
+        self.s1_input = EncoderConvList(params, [256, 512, 256, 512, 256])
         self.up1 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
 
-        self.s0_input = EncoderConv(params, 128)
+        self.s0_input = EncoderConvList(params, [128, 256, 128, 256, 128])
 
         self.pads = [None]
         for pad in [1, 2, 3, 4, 5, 6]:
@@ -216,7 +216,7 @@ def run_crop_and_rotation(features, x, y, xmin, ymin, xmax, ymax):
     ry = (y[1] + y[2]) / 2
 
     angle = tf.math.atan2(ry - ly, rx - lx)
-    features_for_one_crop = tfa.image.rotate(features_for_one_crop, -angle, interpolation='BILINEAR')
+    #features_for_one_crop = tfa.image.rotate(features_for_one_crop, -angle, interpolation='BILINEAR')
     return features_for_one_crop
 
 class Encoder(tf.keras.layers.Layer):
