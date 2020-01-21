@@ -291,9 +291,7 @@ class Encoder(tf.keras.layers.Layer):
 
     def rnn_inference_from_picked_features(self, picked_features, true_words, true_lengths, training):
         cropped_features = picked_features.stack()
-
-        rnn_outputs, rnn_outputs_ar = self.rnn_layer(cropped_features, true_words, true_lengths, training)
-        return rnn_outputs, rnn_outputs_ar
+        return self.rnn_layer(cropped_features, true_words, true_lengths, training)
 
     def rnn_inference(self, rnn_features, word_obj_mask, poly, true_words, true_lengths, anchors_all, training):
         picked_features = tf.TensorArray(tf.float32, size=0, dynamic_size=True)
