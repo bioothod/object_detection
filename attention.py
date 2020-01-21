@@ -73,56 +73,41 @@ class AttentionBlock(tf.keras.layers.Layer):
     def __init__(self, params, attention_feature_dim, num_heads, **kwargs):
         super().__init__(**kwargs)
 
-        self.mha = MultiHeadAttention(attention_feature_dim, num_heads)
-        self.dropout = tf.keras.layers.Dropout(rate=params.spatial_dropout)
         self.norm = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        self.dropout = tf.keras.layers.Dropout(rate=params.spatial_dropout)
+        self.mha = MultiHeadAttention(attention_feature_dim, num_heads)
 
-<<<<<<< HEAD
-        self.dense0 = tf.keras.layers.Dense(units=attention_feature_dim)
-        self.dense1 = tf.keras.layers.Dense(units=attention_feature_dim)
-        self.dense_dropout = tf.keras.layers.Dropout(rate=params.spatial_dropout)
-        self.dense_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-=======
         if False:
             self.dense0 = tf.keras.layers.Dense(units=attention_feature_dim)
             self.dense1 = tf.keras.layers.Dense(units=attention_feature_dim)
             self.dense_dropout = tf.keras.layers.Dropout(rate=params.spatial_dropout)
             self.dense_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6)
->>>>>>> 8b153855cb79db0e7351ff487026abf698934e14
 
         self.relu_fn = params.relu_fn
 
     def call(self, features, state, training):
-        x = self.mha(features, state, training)
+        x = self.norm(features, training=training)
         x = self.dropout(x, training=training)
-        x += features
-        attention_out = self.norm(x, training=training)
-<<<<<<< HEAD
-
-        x = self.dense0(attention_out)
-        x = self.relu_fn(x)
-        x = self.dense1(x)
-        x = self.dense_dropout(x, training=training)
-        x += attention_out
-        x = self.dense_norm(x, training=training)
-=======
+        x = self.mha(x, state, training)
+        attention_out = x + features
         return attention_out
 
         if False:
+            x = self.dense_norm(x, training=training)
+            x = self.dense_dropout(x, training=training)
+
             x = self.dense0(attention_out)
             x = self.relu_fn(x)
             x = self.dense1(x)
-            x = self.dense_dropout(x, training=training)
-            x += attention_out
-            x = self.dense_norm(x, training=training)
->>>>>>> 8b153855cb79db0e7351ff487026abf698934e14
+
+            dense_out = x + attention_out
 
         #logger.info('attention_block: attention_out: {}, x: {}'.format(attention_out.shape, x.shape))
 
-        return x
+        return dense_out
 
 class AttentionCell(tf.keras.layers.Layer):
-    def __init__(self, params, num_units, dictionary_size, cell='lstm', **kwargs):
+    def __init__(self, params, num_units, attention_feature_dim, num_heads, dictionary_size, cell='lstm', **kwargs):
         super(AttentionCell, self).__init__(self, **kwargs)
 
         self.dictionary_size = dictionary_size
@@ -142,11 +127,6 @@ class AttentionCell(tf.keras.layers.Layer):
 
         self.cell_clip = 10.
 
-        attention_feature_dim = 256
-        num_heads = 16
-
-        self.dense_features = tf.keras.layers.Dense(units=attention_feature_dim)
-
         self.attention_layer = AttentionBlock(params, attention_feature_dim, num_heads)
         self.attention_pooling = tf.keras.layers.GlobalAveragePooling1D()
 
@@ -159,8 +139,6 @@ class AttentionCell(tf.keras.layers.Layer):
         state_concat = tf.concat(state, -1)
         state_with_time = tf.expand_dims(state_concat, 1)
 
-        features = self.dense_features(features)
-
         weighted_features = self.attention_layer(features, state_with_time, training)
         weighted_pooled_features = self.attention_pooling(weighted_features)
 
@@ -172,7 +150,7 @@ class AttentionCell(tf.keras.layers.Layer):
         #    char_dist.shape, weighted_char_dist.shape, features.shape, weighted_features.shape, weighted_pooled_features.shape, rnn_input.shape, state_with_time.shape))
 
         rnn_out, new_state = self.cell(rnn_input, state, training=training)
-        #new_state = [tf.clip_by_value(s, -self.cell_clip, self.cell_clip) for s in new_state]
+        new_state = [tf.clip_by_value(s, -self.cell_clip, self.cell_clip) for s in new_state]
 
         output_char_dist = self.wo(rnn_out) + self.wu_pred(weighted_pooled_features)
         output_char_dist = tf.nn.softmax(output_char_dist, axis=1)
@@ -207,7 +185,11 @@ class RNNLayer(tf.keras.layers.Layer):
 
         self.num_rnn_units = num_rnn_units
 
-        self.attention_cell = AttentionCell(params, num_rnn_units, dictionary_size, cell=cell)
+        attention_feature_dim = 256
+        num_heads = 16
+
+        self.dense_features = tf.keras.layers.Dense(units=attention_feature_dim)
+        self.attention_cell = AttentionCell(params, num_rnn_units, attention_feature_dim, num_heads, dictionary_size, cell=cell)
 
     def call(self, image_features, gt_tokens, gt_lens, training):
         image_features = self.bn(image_features, training=training)
@@ -236,15 +218,17 @@ class RNNLayer(tf.keras.layers.Layer):
         state, char_dist, char_dists = init()
         state_ar, char_dist_ar, char_dists_ar = init()
 
+        features = self.dense_features(reshaped_features)
+
         for idx in range(self.max_sequence_len):
             if idx != 0:
                 if training:
                     char_dist = tf.one_hot(gt_tokens[:, idx-1], self.dictionary_size)
 
-            char_dist, state = self.attention_cell(char_dist, reshaped_features, state, training)
+            char_dist, state = self.attention_cell(char_dist, features, state, training)
             char_dists = char_dists.write(idx, char_dist)
 
-            char_dist_ar, state_ar = self.attention_cell(char_dist_ar, reshaped_features, state_ar, training)
+            char_dist_ar, state_ar = self.attention_cell(char_dist_ar, features, state_ar, training)
             char_dists_ar = char_dists_ar.write(idx, char_dist_ar)
 
         out = char_dists.stack()
