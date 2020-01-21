@@ -27,8 +27,8 @@ class FocalLoss(tf.keras.losses.Loss):
         p = tf.clip_by_value(sigmoid_p, 1e-10, 1)
         one_minus_p = tf.clip_by_value(1 - sigmoid_p, 1e-10, 1)
 
-        per_entry_cross_ent = - self.alpha * (pos_p_sub ** self.gamma) * tf.math.log(p) - \
-            (1 - self.alpha) * (neg_p_sub ** self.gamma) * tf.math.log(one_minus_p)
+        per_entry_cross_ent = -self.alpha * (pos_p_sub ** self.gamma) * tf.math.log(p) - \
+                (1 - self.alpha) * (neg_p_sub ** self.gamma) * tf.math.log(one_minus_p)
 
         if self.reduction == tf.keras.losses.Reduction.NONE:
             return per_entry_cross_ent
@@ -41,7 +41,10 @@ class TextMetric():
         self.dictionary_size = dictionary_size
         self.max_sequence_len = max_sequence_len
 
-        self.ce = tf.keras.losses.CategoricalCrossentropy(from_logits=from_logits, reduction=tf.keras.losses.Reduction.NONE, label_smoothing=label_smoothing)
+        self.from_logits = from_logits
+
+        #self.ce = tf.keras.losses.CategoricalCrossentropy(from_logits=from_logits, reduction=tf.keras.losses.Reduction.NONE, label_smoothing=label_smoothing)
+        self.ce = FocalLoss(from_logits=False, reduction=tf.keras.losses.Reduction.NONE, label_smoothing=label_smoothing)
 
         self.word_loss = tf.keras.metrics.Mean()
         self.full_loss = tf.keras.metrics.Mean()
@@ -61,6 +64,9 @@ class TextMetric():
         true_lengths = tf.tile(true_lengths, [1, self.max_sequence_len])
         #logger.info('true_texts: {}, true_texts_oh: {}, logits: {}, weights: {}'.format(true_texts.shape, true_texts_oh.shape, logits.shape, weights.shape))
         weights = tf.where(weights < true_lengths, tf.ones_like(weights), tf.zeros_like(weights))
+
+        if self.from_logits:
+            logits = tf.nn.softmax(logits, -1)
 
         word_loss = self.ce(y_true=true_texts_oh, y_pred=logits, sample_weight=weights)
         full_loss = self.ce(y_true=true_texts_oh, y_pred=logits)
