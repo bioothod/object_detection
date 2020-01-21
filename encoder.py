@@ -281,8 +281,8 @@ class Encoder(tf.keras.layers.Layer):
 
             features_for_one_crop = run_crop_and_rotation(features, x, y, xmin, ymin, xmax, ymax)
 
-            features_for_one_crop = preprocess.pad_resize_image(features_for_one_crop, [8, 8])
-            features_for_one_crop.set_shape([8, 8, channels])
+            features_for_one_crop = preprocess.pad_resize_image(features_for_one_crop, [6, 6])
+            features_for_one_crop.set_shape([6, 6, channels])
 
             picked_features = picked_features.write(written, features_for_one_crop)
             written += 1
