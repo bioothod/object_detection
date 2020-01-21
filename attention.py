@@ -125,7 +125,7 @@ class AttentionCell(tf.keras.layers.Layer):
         else:
             raise NameError('unsupported rnn cell type "{}"'.format(cell))
 
-        self.cell_clip = 10.
+        self.cell_clip = 1
 
         self.attention_layer = AttentionBlock(params, attention_feature_dim, num_heads)
         self.attention_pooling = tf.keras.layers.GlobalAveragePooling1D()
