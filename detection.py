@@ -279,6 +279,8 @@ def train():
         epoch_var = tf.Variable(0, dtype=tf.float32, name='epoch_number', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
         current_max_sequence_len = tf.Variable(FLAGS.min_sequence_len, dtype=tf.int32, name='current_max_sequence_len', trainable=False, aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
 
+        anchors_all_batched = tf.expand_dims(anchors_all, 0)
+        anchors_all_batched = tf.tile(anchors_all_batched, [FLAGS.batch_size // num_replicas, 1, 1])
 
         def calculate_metrics(images, is_training, true_values):
             true_word_obj = true_values[..., 0]
@@ -289,7 +291,7 @@ def train():
             true_lengths = tf.cast(true_lengths, tf.int64)
 
             logits, rnn_features = model(images, is_training)
-            rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(rnn_features, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all, is_training)
+            rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(rnn_features, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all_batched, is_training)
 
             total_loss = metric.loss(true_values, logits, rnn_outputs, rnn_outputs_ar, current_max_sequence_len, is_training)
             return total_loss

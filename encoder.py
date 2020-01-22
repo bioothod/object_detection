@@ -4,6 +4,7 @@ import logging
 import tensorflow as tf
 import tensorflow_addons as tfa
 
+import anchors_gen
 import attention
 import darknet
 import encoder_efficientnet as efn_encoder
@@ -211,20 +212,6 @@ class ConcatFeatures(tf.keras.layers.Layer):
 
         return x0
 
-@tf.function(experimental_relax_shapes=True)
-def run_crop_and_rotation(features, x, y, xmin, ymin, xmax, ymax):
-    features_for_one_crop = features[ymin : ymax + 1, xmin : xmax + 1, :]
-
-    lx = (x[0] + x[3]) / 2
-    ly = (y[0] + y[3]) / 2
-
-    rx = (x[1] + x[2]) / 2
-    ry = (y[1] + y[2]) / 2
-
-    angle = tf.math.atan2(ry - ly, rx - lx)
-    #features_for_one_crop = tfa.image.rotate(features_for_one_crop, -angle, interpolation='BILINEAR')
-    return features_for_one_crop
-
 class Encoder(tf.keras.layers.Layer):
     def __init__(self, params, **kwargs):
         super().__init__(**kwargs)
@@ -250,79 +237,32 @@ class Encoder(tf.keras.layers.Layer):
         self.output_sizes = None
         self.rnn_features_scale = None
 
-    def pick_features_for_single_image(self, features, picked_features, written, poly_single_image):
-        # channels_last only
-        channels = features.shape[-1]
-
-        feature_height = tf.shape(features)[0]
-        feature_width = tf.shape(features)[1]
-
-
-        for poly_single in poly_single_image:
-            # [4, 2] - > [4], [4]
-            x = poly_single[..., 0]
-            y = poly_single[..., 1]
-
-            x = tf.maximum(x, 0.)
-            y = tf.maximum(y, 0.)
-
-            xmin = tf.math.reduce_min(x, axis=0)
-            ymin = tf.math.reduce_min(y, axis=0)
-            xmax = tf.math.reduce_max(x, axis=0)
-            ymax = tf.math.reduce_max(y, axis=0)
-
-            xmin = tf.cast(xmin, tf.int32)
-            xmax = tf.cast(xmax, tf.int32)
-            ymin = tf.cast(ymin, tf.int32)
-            ymax = tf.cast(ymax, tf.int32)
-
-            xmax = tf.minimum(xmax, feature_width)
-            ymax = tf.minimum(ymax, feature_height)
-
-            features_for_one_crop = run_crop_and_rotation(features, x, y, xmin, ymin, xmax, ymax)
-
-            features_for_one_crop = preprocess.pad_resize_image(features_for_one_crop, [6, 6])
-            features_for_one_crop.set_shape([6, 6, channels])
-
-            picked_features = picked_features.write(written, features_for_one_crop)
-            written += 1
-
-        return picked_features, written
-
     def rnn_inference_from_picked_features(self, picked_features, true_words, true_lengths, training):
-        cropped_features = picked_features.stack()
-        return self.rnn_layer(cropped_features, true_words, true_lengths, training)
+        return self.rnn_layer(picked_features, true_words, true_lengths, training)
 
-    def rnn_inference(self, rnn_features, word_obj_mask, poly, true_words, true_lengths, anchors_all, training):
-        picked_features = tf.TensorArray(tf.float32, size=0, dynamic_size=True)
-        written = 0
+    def rnn_inference(self, rnn_features, word_obj_mask, poly, true_words, true_lengths, anchors_all_batched, training):
+        poly = tf.boolean_mask(poly, word_obj_mask)
 
-        batch_index = tf.range(tf.shape(rnn_features)[0])
-        for idx in batch_index:
-            # D = ~14k
-            # [B, D, 4, 2] -> [D, 4, 2]
-            poly_single_image = poly[idx, ...]
+        best_anchors = tf.boolean_mask(anchors_all_batched[..., :2], word_obj_mask)
+        best_anchors = tf.expand_dims(best_anchors, 1)
+        best_anchors = tf.tile(best_anchors, [1, 4, 1])
+        poly = poly + best_anchors
 
-            # [B, 60, 60, C] -> [60, 60, C]
-            features = rnn_features[idx, ...]
+        poly = poly * self.rnn_features_scale
 
-            # [B, D] -> [D]
-            word_mask_single = word_obj_mask[idx]
+        bboxes = anchors_gen.polygon2bbox(poly, want_yx=True)
+        bboxes /= tf.cast(tf.shape(rnn_features)[1], tf.float32)
 
-            # N = ~10
-            # [D, 4, 2] -> [N, 4, 2]
-            poly_single_image = tf.boolean_mask(poly_single_image, word_mask_single)
+        batch_size = tf.shape(rnn_features)[0]
+        feature_size = tf.shape(word_obj_mask)[1]
+        batch_index = tf.range(batch_size, dtype=tf.int32)
+        batch_index = tf.expand_dims(batch_index, 1)
+        batch_index = tf.tile(batch_index, [1, feature_size])
+        box_index = tf.boolean_mask(batch_index, word_obj_mask)
 
-            best_anchors = tf.boolean_mask(anchors_all[..., :2], word_mask_single)
-            best_anchors = tf.expand_dims(best_anchors, 1)
-            best_anchors = tf.tile(best_anchors, [1, 4, 1])
-            poly_single_image = poly_single_image + best_anchors
+        selected_features = tf.image.crop_and_resize(rnn_features, bboxes, box_index, [6, 6])
 
-            poly_single_image = poly_single_image * self.rnn_features_scale
-            picked_features, written = self.pick_features_for_single_image(features, picked_features, written, poly_single_image)
-
-        rnn_outputs, rnn_outputs_ar = self.rnn_inference_from_picked_features(picked_features, true_words, true_lengths, training)
-        return rnn_outputs, rnn_outputs_ar
+        return self.rnn_inference_from_picked_features(selected_features, true_words, true_lengths, training)
 
     def rnn_inference_from_true_values(self, rnn_features, word_obj_mask, true_word_poly, true_words, true_lengths, anchors_all, training):
         #poly = class_outputs[..., 1 : 1 + 4*2]
@@ -333,8 +273,7 @@ class Encoder(tf.keras.layers.Layer):
 
         poly = tf.reshape(poly, [-1, tf.shape(poly)[1], 4, 2])
 
-        rnn_outputs, rnn_outputs_ar = self.rnn_inference(rnn_features, word_obj_mask, poly, true_words_flat, true_lens_flat, anchors_all, training)
-        return rnn_outputs, rnn_outputs_ar
+        return self.rnn_inference(rnn_features, word_obj_mask, poly, true_words_flat, true_lens_flat, anchors_all, training)
 
     # word mask is per anchor, i.e. this is true word_obj
     def call(self, inputs, training):
