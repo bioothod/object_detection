@@ -6,6 +6,7 @@ import sys
 
 import numpy as np
 import tensorflow as tf
+import tensorflow_addons as tfa
 
 logger = logging.getLogger('detection')
 
@@ -185,7 +186,7 @@ def train():
         dictionary_size, dict_table, pad_value = anchors_gen.create_lookup_table(FLAGS.dictionary)
 
         image_size = FLAGS.image_size
-        model = encoder.create_model(FLAGS.model_name, FLAGS.max_sequence_len, dictionary_size, pad_value)
+        model = encoder.create_model(FLAGS.model_name, image_size, FLAGS.max_sequence_len, dictionary_size, pad_value)
         if model.output_sizes is None:
             dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
 
@@ -194,7 +195,6 @@ def train():
                     args=(model, dummy_input))
 
             logger.info('image_size: {}, model output sizes: {}'.format(image_size, model.output_sizes))
-            model.rnn_feature_scale_float = float(model.rnn_features_scale.numpy())
 
         anchors_all, output_xy_grids, output_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
 
@@ -253,7 +253,9 @@ def train():
         logger.info('steps_per_train_epoch: {}, steps_per_eval_epoch: {}, dictionary_size: {}'.format(
             steps_per_train_epoch, steps_per_eval_epoch, dictionary_size))
 
-        opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+        #opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+        opt = tfa.optimizers.RectifiedAdam(lr=learning_rate, min_lr=FLAGS.min_learning_rate)
+        opt = tfa.optimizers.Lookahead(opt, sync_period=6, slow_step_size=0.5)
 
         checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model)
         manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=20)
@@ -279,9 +281,6 @@ def train():
         epoch_var = tf.Variable(0, dtype=tf.float32, name='epoch_number', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
         current_max_sequence_len = tf.Variable(FLAGS.min_sequence_len, dtype=tf.int32, name='current_max_sequence_len', trainable=False, aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
 
-        anchors_all_batched = tf.expand_dims(anchors_all, 0)
-        anchors_all_batched = tf.tile(anchors_all_batched, [FLAGS.batch_size // num_replicas, 1, 1])
-
         def calculate_metrics(images, is_training, true_values):
             true_word_obj = true_values[..., 0]
             true_word_poly = true_values[..., 1 : 9]
@@ -291,7 +290,7 @@ def train():
             true_lengths = tf.cast(true_lengths, tf.int64)
 
             logits, rnn_features = model(images, is_training)
-            rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(rnn_features, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all_batched, is_training)
+            rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(rnn_features, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all, is_training)
 
             total_loss = metric.loss(true_values, logits, rnn_outputs, rnn_outputs_ar, current_max_sequence_len, is_training)
             return total_loss
@@ -316,8 +315,7 @@ def train():
                     #logger.info('no gradients for variable: {}'.format(v))
                 else:
                     #g += tf.random.normal(stddev=stddev, mean=0., shape=g.shape)
-                    #g = tf.clip_by_value(g, -5, 5)
-                    pass
+                    g = tf.clip_by_value(g, -5, 5)
 
                 clip_gradients.append(g)
             opt.apply_gradients(zip(clip_gradients, variables))
@@ -378,7 +376,7 @@ def train():
         best_metric = 0
         best_saved_path = None
         num_epochs_without_improvement = 0
-        initial_learning_rate_multiplier = 0.2
+        initial_learning_rate_multiplier = 0.5
         learning_rate_multiplier = initial_learning_rate_multiplier
 
         def validation_metric():
@@ -439,6 +437,9 @@ def train():
 
                 if learning_rate > FLAGS.min_learning_rate:
                     new_lr = learning_rate.numpy() * learning_rate_multiplier
+                    if new_lr < FLAGS.min_learning_rate:
+                        new_lr = FLAGS.min_learning_rate
+
                     logger.info('epoch: {}, epochs without metric improvement: {}, best metric: {:.5f}, updating learning rate: {:.2e} -> {:.2e}'.format(
                         epoch, num_epochs_without_improvement, best_metric, learning_rate.numpy(), new_lr))
                     num_epochs_without_improvement = 0
