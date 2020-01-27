@@ -73,7 +73,12 @@ class AttentionBlock(tf.keras.layers.Layer):
     def __init__(self, params, attention_feature_dim, num_heads, **kwargs):
         super().__init__(**kwargs)
 
-        self.norm = tf.keras.layers.LayerNormalization(epsilon=1e-6, dtype=params.dtype)
+        #self.norm = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        self.norm = tf.keras.layers.BatchNormalization(
+            axis=params.channel_axis,
+            momentum=params.batch_norm_momentum,
+            epsilon=params.batch_norm_epsilon)
+
         self.dropout = tf.keras.layers.Dropout(rate=params.spatial_dropout)
         self.mha = MultiHeadAttention(attention_feature_dim, num_heads)
 
@@ -81,7 +86,7 @@ class AttentionBlock(tf.keras.layers.Layer):
             self.dense0 = tf.keras.layers.Dense(units=attention_feature_dim)
             self.dense1 = tf.keras.layers.Dense(units=attention_feature_dim)
             self.dense_dropout = tf.keras.layers.Dropout(rate=params.spatial_dropout)
-            self.dense_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6, dtype=params.dtype)
+            self.dense_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6)
 
         self.relu_fn = params.relu_fn
 
