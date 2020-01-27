@@ -168,7 +168,7 @@ class Head(tf.keras.layers.Layer):
         raw0 = x0
         out0 = self.s0_output(x0, training=training)
 
-        return [out2, out1, out0], [raw2, raw1, raw0]
+        return [out2, out1, out0], raw0
 
 def gaussian_mask(mu, sigma, dim, dim_tile):
     r = tf.cast(tf.range(dim), tf.float32)
@@ -225,6 +225,7 @@ class Encoder(tf.keras.layers.Layer):
         classes = [1, 2*4]
         self.num_classes = sum(classes)
         self.max_word_len = params.max_word_len
+        self.dictionary_size = params.dictionary_size
         self.image_size = params.image_size
 
         if params.model_name.startswith('darknet'):
@@ -238,25 +239,20 @@ class Encoder(tf.keras.layers.Layer):
 
         self.head = Head(params, classes)
 
-        self.text_layers = []
-
-        # num scales
-        for i in range(3):
-            rnn_layer = attention.RNNLayer(params, 256, self.max_word_len, params.dictionary_size, params.pad_value, cell='lstm')
-            self.text_layers.append(rnn_layer)
+        self.rnn_layer = attention.RNNLayer(params, 256, self.max_word_len, params.dictionary_size, params.pad_value, cell='lstm')
 
         self.output_sizes = None
 
     def rnn_inference_from_picked_features(self, picked_features, true_words, true_lengths, training):
-        return self.text_layer(picked_features, training)
+        return self.rnn_layer(picked_features, training)
 
-    def rnn_inference_one_feature_block(self, text_layer, features, word_obj_mask, poly, true_words, true_lengths, anchors_all, training):
+    def rnn_inference(self, features, word_obj_mask, poly, true_words, true_lengths, anchors_all, training):
         poly = tf.boolean_mask(poly, word_obj_mask)
         true_words = tf.boolean_mask(true_words, word_obj_mask)
         true_lengths = tf.boolean_mask(true_lengths, word_obj_mask)
 
-        anchors_all = tf.expand_dims(anchors_all, 0)
-        anchors_all = tf.tile(anchors_all, [tf.shape(features)[0], 1, 1])
+        #anchors_all = tf.expand_dims(anchors_all, 0)
+        #anchors_all = tf.tile(anchors_all, [tf.shape(features)[0], 1, 1])
 
         best_anchors = tf.boolean_mask(anchors_all[..., :2], word_obj_mask)
         best_anchors = tf.expand_dims(best_anchors, 1)
@@ -265,9 +261,7 @@ class Encoder(tf.keras.layers.Layer):
 
         feature_size = tf.cast(tf.shape(features)[1], tf.float32)
         poly = poly * feature_size / self.image_size
-        crop_size = 64 / self.image_size * feature_size
-        crop_size = tf.cast(crop_size, tf.int32)
-        logger.info('features: {}, crop_size: {}, {}'.format(features.shape, crop_size.name, crop_size.device))
+        crop_size = 8
         crop_size = [crop_size, crop_size]
 
         bboxes = anchors_gen.polygon2bbox(poly, want_yx=True)
@@ -282,42 +276,47 @@ class Encoder(tf.keras.layers.Layer):
 
         selected_features = tf.image.crop_and_resize(features, bboxes, box_index, crop_size)
 
-        return text_layer(selected_features, true_words, true_lengths, training)
+        max_outputs = tf.shape(selected_features)[0]
+        num_outputs = 0
 
-    def rnn_inference(self, features_split, word_obj_mask, poly, true_words, true_lengths, anchors_all, training):
-        true_value_size_splits = []
-        for feature_size in self.output_sizes:
-            feature_size_squared = feature_size * feature_size * self.num_anchors
-            true_value_size_splits.append(feature_size_squared)
+        outputs = tf.TensorArray(features.dtype, size=0, dynamic_size=True, infer_shape=False)
+        outputs_ar = tf.TensorArray(features.dtype, size=0, dynamic_size=True, infer_shape=False)
+        written = 0
 
-        word_obj_mask_split = tf.split(word_obj_mask, true_value_size_splits, axis=1)
-        poly_split = tf.split(poly, true_value_size_splits, axis=1)
-        true_words_split = tf.split(true_words, true_value_size_splits, axis=1)
-        true_lengths_split = tf.split(true_lengths, true_value_size_splits, axis=1)
-        anchors_all_split = tf.split(anchors_all, true_value_size_splits, axis=0)
+        current_batch_size = 64
+        start = 0
 
-        outputs = []
-        outputs_ar = []
-        output_index = 0
+        while num_outputs < max_outputs:
+            end = tf.minimum(max_outputs - num_outputs, current_batch_size)
 
-        for idx in range(len(self.output_sizes)):
-            word_obj_mask = word_obj_mask_split[idx]
-            true_words = true_words_split[idx]
-            true_lengths = true_lengths_split[idx]
-            features = features_split[idx]
-            poly = poly_split[idx]
-            anchors_all = anchors_all_split[idx]
+            tw = true_words[start:end, ...]
+            tl = true_lengths[start:end, ...]
+            features = selected_features[start:end, ...]
 
-            word_obj_index_global = tf.range(tf.shape(word_obj_mask)[1])
+            out, out_ar = self.rnn_layer(features, tw, tl, training)
+            outputs = outputs.write(written, out)
+            outputs_ar = outputs_ar.write(written, out_ar)
+            written += 1
 
-            text_layer = self.text_layers[idx]
+            logger.info('features: {}, outputs: {}'.format(features.shape, out.shape))
 
-            output, output_ar = self.rnn_inference_one_feature_block(text_layer, features, word_obj_mask, poly, true_words, true_lengths, anchors_all, training)
-            outputs.append(output)
-            outputs_ar.append(output_ar)
+            num_outputs += tf.shape(features)[0]
+            start += tf.shape(features)[0]
 
-        outputs = tf.concat(outputs, 0)
-        outputs_ar = tf.concat(outputs_ar, 0)
+            if max_outputs - num_outputs >= current_batch_size:
+                continue
+            if max_outputs == num_outputs:
+                break
+
+            current_batch_size = tf.math.pow(2, tf.cast(tf.math.log(tf.cast(max_outputs - num_outputs, tf.float32)) / tf.math.log(2.), tf.int32))
+
+        outputs = outputs.concat()
+        outputs_ar = outputs_ar.concat()
+
+        expected_output_shape = tf.TensorShape([None, self.max_word_len, self.dictionary_size])
+        outputs.set_shape(expected_output_shape)
+        outputs_ar.set_shape(expected_output_shape)
+
         return outputs, outputs_ar
 
     def rnn_inference_from_true_values(self, rnn_features, word_obj_mask, true_word_poly, true_words, true_lengths, anchors_all, training):
@@ -339,7 +338,7 @@ class Encoder(tf.keras.layers.Layer):
 
         class_outputs = []
 
-        for head_output, raw_output in zip(head_outputs, raw_features):
+        for head_output in head_outputs:
             head_output_flat = tf.reshape(head_output, [batch_size, -1, self.num_classes])
             class_outputs.append(head_output_flat)
 
@@ -358,7 +357,7 @@ def create_params(model_name, image_size, max_word_len, dictionary_size, pad_val
         channel_axis = 1
         spatial_dims = [2, 3]
     else:
-        channel_axis = 3
+        channel_axis = -1
         spatial_dims = [1, 2]
 
     params = {

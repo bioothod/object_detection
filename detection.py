@@ -41,7 +41,7 @@ parser.add_argument('--image_size', type=int, required=True, help='Use this imag
 parser.add_argument('--steps_per_eval_epoch', default=30, type=int, help='Number of steps per evaluation run')
 parser.add_argument('--steps_per_train_epoch', default=200, type=int, help='Number of steps per train run')
 parser.add_argument('--save_examples', type=int, default=0, help='Number of example images to save and exit')
-parser.add_argument('--max_sequence_len', type=int, default=32, help='Maximum word length, also number of RNN attention timesteps')
+parser.add_argument('--max_sequence_len', type=int, default=64, help='Maximum word length, also number of RNN attention timesteps')
 parser.add_argument('--reset_on_lr_update', action='store_true', help='Whether to reset to the best model after learning rate update')
 parser.add_argument('--disable_rotation_augmentation', action='store_true', help='Whether to disable rotation/flipping augmentation')
 
@@ -289,6 +289,8 @@ def train():
         metric = loss.LossMetricAggregator(FLAGS.max_sequence_len, dictionary_size, FLAGS.batch_size)
 
         epoch_var = tf.Variable(0, dtype=tf.float32, name='epoch_number', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
+        anchors_all_batched = tf.expand_dims(anchors_all, 0)
+        anchors_all_batched = tf.tile(anchors_all_batched, [FLAGS.batch_size // num_replicas, 1, 1])
 
         def calculate_metrics(images, is_training, true_values):
             true_word_obj = true_values[..., 0]
@@ -299,7 +301,7 @@ def train():
             true_lengths = tf.cast(true_lengths, tf.int64)
 
             logits, rnn_features = model(images, is_training)
-            rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(rnn_features, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all, is_training)
+            rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(rnn_features, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all_batched, is_training)
 
             total_loss = metric.loss(true_values, logits, rnn_outputs, rnn_outputs_ar, is_training)
             return total_loss
@@ -326,8 +328,12 @@ def train():
                     pass
                     #logger.info('no gradients for variable: {}'.format(v))
                 else:
+                    if g.dtype == tf.float16:
+                        logger.info('grad: {}, var: {}'.format(g, v))
+
                     #g += tf.random.normal(stddev=stddev, mean=0., shape=g.shape)
                     g = tf.clip_by_value(g, -5, 5)
+
 
                 clip_gradients.append(g)
 
