@@ -19,7 +19,7 @@ GlobalParams = collections.namedtuple('GlobalParams', [
     'l2_reg_weight', 'spatial_dims', 'channel_axis', 'model_name',
     'obj_score_threshold', 'lstm_dropout', 'spatial_dropout',
     'dictionary_size', 'max_word_len', 'pad_value',
-    'image_size'
+    'image_size', 'num_anchors'
 ])
 
 GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
@@ -91,7 +91,7 @@ class HeadLayer(tf.keras.layers.Layer):
 
         self.outputs = []
         for n in num_outputs:
-            n *= 3
+            n *= params.num_anchors
 
             out = tf.keras.layers.Conv2D(
                 n,
@@ -219,6 +219,8 @@ class Encoder(tf.keras.layers.Layer):
     def __init__(self, params, **kwargs):
         super().__init__(**kwargs)
 
+        self.num_anchors = params.num_anchors
+
         classes = [1, 2*4]
         self.num_classes = sum(classes)
         self.max_word_len = params.max_word_len
@@ -236,6 +238,8 @@ class Encoder(tf.keras.layers.Layer):
         self.head = Head(params, classes)
 
         self.text_layers = []
+
+        # num scales
         for i in range(3):
             rnn_layer = attention.RNNLayer(params, 256, self.max_word_len, params.dictionary_size, params.pad_value, cell='lstm')
             self.text_layers.append(rnn_layer)
@@ -282,7 +286,7 @@ class Encoder(tf.keras.layers.Layer):
     def rnn_inference(self, features_split, word_obj_mask, poly, true_words, true_lengths, anchors_all, training):
         true_value_size_splits = []
         for feature_size in self.output_sizes:
-            feature_size_squared = feature_size * feature_size * 3
+            feature_size_squared = feature_size * feature_size * self.num_anchors
             true_value_size_splits.append(feature_size_squared)
 
         logger.info('1 anchors_all: {}'.format(anchors_all.shape))
@@ -296,7 +300,7 @@ class Encoder(tf.keras.layers.Layer):
         outputs_ar = []
         output_index = 0
 
-        for idx in range(3):
+        for idx in range(len(self.output_sizes)):
             word_obj_mask = word_obj_mask_split[idx]
             true_words = true_words_split[idx]
             true_lengths = true_lengths_split[idx]
@@ -372,6 +376,7 @@ def create_params(model_name, image_size, max_word_len, dictionary_size, pad_val
         'max_word_len': max_word_len,
         'pad_value': pad_value,
         'image_size': image_size,
+        'num_anchors': anchors_gen.num_anchors,
     }
 
     params = GlobalParams(**params)

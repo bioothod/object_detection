@@ -5,11 +5,12 @@ import tensorflow as tf
 
 logger = logging.getLogger('detection')
 
+num_scales = 3
+num_anchors = 1
 
 def create_anchors():
     anchors_dict = {
-        '0': [(10, 13), (16, 30), (33, 23), (30, 61), (62, 45), (59, 119), (116, 90), (156, 198), (373, 326)],
-        '1': [(17, 18), (28, 24), (36, 34), (42, 44), (56, 51), (72, 66), (90, 95), (92, 154), (139, 281)],
+        '0': [(10, 13), (30, 61), (116, 90)],
     }
 
     anchors = anchors_dict["0"]
@@ -30,12 +31,9 @@ def create_xy_grid(batch_size, output_size, anchors_per_scale):
     return xy_grid
 
 def generate_anchors(image_size, output_sizes):
-    num_scales = 3
-    num_boxes = 3
-
     np_anchor_boxes, np_anchor_areas = create_anchors()
 
-    anchors_reshaped = tf.reshape(np_anchor_boxes, [num_scales, num_boxes, 2])
+    anchors_reshaped = tf.reshape(np_anchor_boxes, [num_scales, num_anchors, 2])
     anchors_abs_coords = []
 
     output_xy_grids = []
@@ -48,10 +46,10 @@ def generate_anchors(image_size, output_sizes):
         anchors_wh_one = anchors_reshaped[num_scales - base_scale - 1, ...]
         anchors_wh = tf.expand_dims(anchors_wh_one, 0)
         anchors_wh = tf.tile(anchors_wh, [output_size * output_size, 1, 1])
-        anchors_wh = tf.reshape(anchors_wh, [output_size, output_size, num_boxes, 2]) # [13, 13, 3, 2]
+        anchors_wh = tf.reshape(anchors_wh, [output_size, output_size, num_anchors, 2]) # [13, 13, num_anchors, 2]
 
-        anchors_xy = create_xy_grid(1, output_size, num_boxes)
-        anchors_xy = tf.squeeze(anchors_xy, 0) # [13, 13, 3, 2]
+        anchors_xy = create_xy_grid(1, output_size, num_anchors)
+        anchors_xy = tf.squeeze(anchors_xy, 0) # [13, 13, num_anchors, 2]
         anchors_xy_flat = tf.reshape(anchors_xy, [-1, 2])
         output_xy_grids.append(anchors_xy_flat)
 
@@ -173,10 +171,11 @@ def generate_true_values_for_anchors(word_poly, anchors_all, text_labels, text_l
 
     word_idx = tf.expand_dims(word_index, 1)
 
+    # word_obj, word_poly, word, length
     output_dims = 1 + 2*4 + max_word_len + 1
 
-    num_anchors = anchors_all.shape[0]
-    output = tf.zeros((num_anchors, output_dims))
+    num_true_anchors = anchors_all.shape[0]
+    output = tf.zeros((num_true_anchors, output_dims))
 
     text_labels = tf.cast(text_labels, word_objs.dtype)
     text_lenghts = tf.cast(text_lenghts, word_objs.dtype)
