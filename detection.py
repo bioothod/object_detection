@@ -6,6 +6,8 @@ import sys
 
 import numpy as np
 import tensorflow as tf
+from tensorflow.keras.mixed_precision import experimental as mixed_precision
+
 import tensorflow_addons as tfa
 
 logger = logging.getLogger('detection')
@@ -21,7 +23,6 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch.')
 parser.add_argument('--num_epochs', type=int, default=1000, help='Number of epochs to run.')
 parser.add_argument('--epoch', type=int, default=0, help='Initial epoch\'s number')
-parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel preprocessing jobs.')
 parser.add_argument('--train_dir', type=str, required=True, help='Path to train directory, where graph will be stored.')
 parser.add_argument('--base_checkpoint', type=str, help='Load base model weights from this file')
 parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='Model name')
@@ -41,14 +42,13 @@ parser.add_argument('--steps_per_eval_epoch', default=30, type=int, help='Number
 parser.add_argument('--steps_per_train_epoch', default=200, type=int, help='Number of steps per train run')
 parser.add_argument('--save_examples', type=int, default=0, help='Number of example images to save and exit')
 parser.add_argument('--max_sequence_len', type=int, default=32, help='Maximum word length, also number of RNN attention timesteps')
-parser.add_argument('--min_sequence_len', type=int, default=32, help='Minimum number of time steps in training')
 parser.add_argument('--reset_on_lr_update', action='store_true', help='Whether to reset to the best model after learning rate update')
 parser.add_argument('--disable_rotation_augmentation', action='store_true', help='Whether to disable rotation/flipping augmentation')
 
 default_char_dictionary="!\"#&\'\\()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 parser.add_argument('--dictionary', type=str, default=default_char_dictionary, help='Dictionary to use')
 
-def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_table, pad_value, is_training, data_format):
+def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_table, pad_value, is_training, data_format, dtype):
     features = tf.io.parse_single_example(record,
             features={
                 'filename': tf.io.FixedLenFeature([], tf.string),
@@ -98,7 +98,7 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
     scale = image_size / mx
     word_poly *= scale
 
-    image = tf.cast(image, tf.float32)
+    image = tf.cast(image, dtype)
     image -= 128
     image /= 128
 
@@ -170,6 +170,12 @@ def train():
     handler.setFormatter(__fmt)
     logger.addHandler(handler)
 
+    dtype = tf.float32
+    if FLAGS.use_fp16:
+        dtype = tf.float16
+        policy = mixed_precision.Policy('mixed_float16')
+        mixed_precision.set_policy(policy)
+
     dstrategy = tf.distribute.MirroredStrategy()
     num_replicas = dstrategy.num_replicas_in_sync
     with dstrategy.scope():
@@ -179,14 +185,13 @@ def train():
         logdir = os.path.join(FLAGS.train_dir, 'logs')
         writer = tf.summary.create_file_writer(logdir)
 
-        dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
         global_step = tf.Variable(1, dtype=tf.int64, name='global_step', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
         learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
 
         dictionary_size, dict_table, pad_value = anchors_gen.create_lookup_table(FLAGS.dictionary)
 
         image_size = FLAGS.image_size
-        model = encoder.create_model(FLAGS.model_name, image_size, FLAGS.max_sequence_len, dictionary_size, pad_value)
+        model = encoder.create_model(FLAGS.model_name, image_size, FLAGS.max_sequence_len, dictionary_size, pad_value, dtype)
         if model.output_sizes is None:
             dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
 
@@ -194,7 +199,7 @@ def train():
                     lambda m, inp: m(inp, training=True),
                     args=(model, dummy_input))
 
-            logger.info('image_size: {}, model output sizes: {}'.format(image_size, model.output_sizes))
+            logger.info('image_size: {}, model output sizes: {}'.format(image_size, [s.numpy() for s in model.output_sizes]))
 
         anchors_all, output_xy_grids, output_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
 
@@ -208,11 +213,11 @@ def train():
 
             np.random.shuffle(filenames)
 
-            ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=FLAGS.num_cpus)
+            ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=6)
             ds = ds.map(lambda record: unpack_tfrecord(record, anchors_all,
                             image_size, FLAGS.max_sequence_len, dict_table, pad_value,
-                            is_training, FLAGS.data_format),
-                    num_parallel_calls=FLAGS.num_cpus)
+                            is_training, FLAGS.data_format, dtype),
+                    num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
             def filter_fn(filename, image, true_values):
                 true_word_obj = true_values[..., 0]
@@ -231,8 +236,9 @@ def train():
             ds = ds.filter(filter_fn)
 
             ds = ds.repeat()
-            ds = ds.batch(FLAGS.batch_size)
             ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+            ds = ds.batch(FLAGS.batch_size)
+
             if FLAGS.save_examples <= 0:
                 ds = dstrategy.experimental_distribute_dataset(ds)
 
@@ -257,6 +263,9 @@ def train():
         #opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
         opt = tfa.optimizers.RectifiedAdam(lr=learning_rate, min_lr=FLAGS.min_learning_rate)
         opt = tfa.optimizers.Lookahead(opt, sync_period=6, slow_step_size=0.5)
+        if FLAGS.use_fp16:
+            opt = mixed_precision.LossScaleOptimizer(opt, loss_scale='dynamic')
+
 
         checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model)
         manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=20)
@@ -280,7 +289,6 @@ def train():
         metric = loss.LossMetricAggregator(FLAGS.max_sequence_len, dictionary_size, FLAGS.batch_size)
 
         epoch_var = tf.Variable(0, dtype=tf.float32, name='epoch_number', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
-        current_max_sequence_len = tf.Variable(FLAGS.min_sequence_len, dtype=tf.int32, name='current_max_sequence_len', trainable=False, aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
 
         def calculate_metrics(images, is_training, true_values):
             true_word_obj = true_values[..., 0]
@@ -293,7 +301,7 @@ def train():
             logits, rnn_features = model(images, is_training)
             rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(rnn_features, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all, is_training)
 
-            total_loss = metric.loss(true_values, logits, rnn_outputs, rnn_outputs_ar, current_max_sequence_len, is_training)
+            total_loss = metric.loss(true_values, logits, rnn_outputs, rnn_outputs_ar, is_training)
             return total_loss
 
         def eval_step(filenames, images, true_values):
@@ -303,9 +311,12 @@ def train():
         def train_step(filenames, images, true_values):
             with tf.GradientTape() as tape:
                 total_loss = calculate_metrics(images, True, true_values)
+                scaled_loss = opt.get_scaled_loss(total_loss)
 
             variables = model.trainable_variables
-            gradients = tape.gradient(total_loss, variables)
+            scaled_gradients = tape.gradient(total_loss, variables)
+            gradients = opt.get_unscaled_gradients(scaled_gradients)
+
 
             stddev = 1 / ((1 + epoch_var)**0.55)
 
@@ -319,6 +330,7 @@ def train():
                     g = tf.clip_by_value(g, -5, 5)
 
                 clip_gradients.append(g)
+
             opt.apply_gradients(zip(clip_gradients, variables))
 
             global_step.assign_add(1)

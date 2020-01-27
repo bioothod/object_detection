@@ -19,7 +19,8 @@ GlobalParams = collections.namedtuple('GlobalParams', [
     'l2_reg_weight', 'spatial_dims', 'channel_axis', 'model_name',
     'obj_score_threshold', 'lstm_dropout', 'spatial_dropout',
     'dictionary_size', 'max_word_len', 'pad_value',
-    'image_size', 'num_anchors'
+    'image_size', 'num_anchors',
+    'dtype'
 ])
 
 GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
@@ -289,7 +290,6 @@ class Encoder(tf.keras.layers.Layer):
             feature_size_squared = feature_size * feature_size * self.num_anchors
             true_value_size_splits.append(feature_size_squared)
 
-        logger.info('1 anchors_all: {}'.format(anchors_all.shape))
         word_obj_mask_split = tf.split(word_obj_mask, true_value_size_splits, axis=1)
         poly_split = tf.split(poly, true_value_size_splits, axis=1)
         true_words_split = tf.split(true_words, true_value_size_splits, axis=1)
@@ -349,7 +349,7 @@ class Encoder(tf.keras.layers.Layer):
 
         return class_outputs_concat, raw_features
 
-def create_params(model_name, image_size, max_word_len, dictionary_size, pad_value):
+def create_params(model_name, image_size, max_word_len, dictionary_size, pad_value, dtype):
     data_format='channels_last'
 
     if data_format == 'channels_first':
@@ -377,6 +377,7 @@ def create_params(model_name, image_size, max_word_len, dictionary_size, pad_val
         'pad_value': pad_value,
         'image_size': image_size,
         'num_anchors': anchors_gen.num_anchors,
+        'dtype': dtype,
     }
 
     params = GlobalParams(**params)
@@ -384,7 +385,7 @@ def create_params(model_name, image_size, max_word_len, dictionary_size, pad_val
     return params
 
 
-def create_model(model_name, image_size, max_word_len, dictionary_size, pad_value):
-    params = create_params(model_name, image_size, max_word_len, dictionary_size, pad_value)
+def create_model(model_name, image_size, max_word_len, dictionary_size, pad_value, dtype):
+    params = create_params(model_name, image_size, max_word_len, dictionary_size, pad_value, dtype)
     model = Encoder(params)
     return model

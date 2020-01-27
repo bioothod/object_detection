@@ -9,7 +9,7 @@ def scaled_dot_product_attention(query, key, value, mask):
     matmul_qk = tf.matmul(query, key, transpose_b=True)
 
     # scale matmul_qk
-    depth = tf.cast(tf.shape(key)[-1], tf.float32, name='cast_scaled_attention')
+    depth = tf.cast(tf.shape(key)[-1], value.dtype, name='cast_scaled_attention')
     logits = matmul_qk / tf.math.sqrt(depth)
 
     # add the mask to zero out padding tokens
@@ -73,7 +73,7 @@ class AttentionBlock(tf.keras.layers.Layer):
     def __init__(self, params, attention_feature_dim, num_heads, **kwargs):
         super().__init__(**kwargs)
 
-        self.norm = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        self.norm = tf.keras.layers.LayerNormalization(epsilon=1e-6, dtype=params.dtype)
         self.dropout = tf.keras.layers.Dropout(rate=params.spatial_dropout)
         self.mha = MultiHeadAttention(attention_feature_dim, num_heads)
 
@@ -81,7 +81,7 @@ class AttentionBlock(tf.keras.layers.Layer):
             self.dense0 = tf.keras.layers.Dense(units=attention_feature_dim)
             self.dense1 = tf.keras.layers.Dense(units=attention_feature_dim)
             self.dense_dropout = tf.keras.layers.Dropout(rate=params.spatial_dropout)
-            self.dense_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+            self.dense_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6, dtype=params.dtype)
 
         self.relu_fn = params.relu_fn
 
@@ -125,7 +125,7 @@ class AttentionCell(tf.keras.layers.Layer):
         else:
             raise NameError('unsupported rnn cell type "{}"'.format(cell))
 
-        self.cell_clip = 1
+        self.cell_clip = 10
 
         self.attention_layer = AttentionBlock(params, attention_feature_dim, num_heads)
         self.attention_pooling = tf.keras.layers.GlobalAveragePooling1D()
@@ -163,8 +163,8 @@ def add_spatial_encoding(features):
 
     x, y = tf.meshgrid(tf.range(w), tf.range(h))
 
-    w_loc = tf.one_hot(x, w, on_value=1.0, off_value=0.0)
-    h_loc = tf.one_hot(y, h, on_value=1.0, off_value=0.0)
+    w_loc = tf.one_hot(x, w, dtype=features.dtype)
+    h_loc = tf.one_hot(y, h, dtype=features.dtype)
     loc = tf.concat([h_loc, w_loc], 2)
     loc = tf.tile(tf.expand_dims(loc, 0), [batch_size, 1, 1, 1])
 
@@ -186,7 +186,7 @@ class RNNLayer(tf.keras.layers.Layer):
         self.num_rnn_units = num_rnn_units
 
         attention_feature_dim = 256
-        num_heads = 16
+        num_heads = 8
 
         self.dense_features = tf.keras.layers.Dense(units=attention_feature_dim)
         self.attention_cell = AttentionCell(params, num_rnn_units, attention_feature_dim, num_heads, dictionary_size, cell=cell)
@@ -203,14 +203,14 @@ class RNNLayer(tf.keras.layers.Layer):
 
         null_token = tf.tile([self.start_token], [batch_size])
         def init():
-            state_h = tf.zeros((batch_size, self.num_rnn_units))
-            state_c = tf.zeros((batch_size, self.num_rnn_units))
+            state_h = tf.zeros((batch_size, self.num_rnn_units), dtype=image_features.dtype)
+            state_c = tf.zeros((batch_size, self.num_rnn_units), dtype=image_features.dtype)
             state = [state_h, state_c]
 
 
-            char_dists = tf.TensorArray(tf.float32, size=self.max_sequence_len)
+            char_dists = tf.TensorArray(image_features.dtype, size=self.max_sequence_len)
 
-            char_dist = tf.one_hot(null_token, self.dictionary_size)
+            char_dist = tf.one_hot(null_token, self.dictionary_size, dtype=image_features.dtype)
 
             return state, char_dist, char_dists
 
@@ -223,7 +223,7 @@ class RNNLayer(tf.keras.layers.Layer):
         for idx in range(self.max_sequence_len):
             if idx != 0:
                 if training:
-                    char_dist = tf.one_hot(gt_tokens[:, idx-1], self.dictionary_size)
+                    char_dist = tf.one_hot(gt_tokens[:, idx-1], self.dictionary_size, dtype=image_features.dtype)
 
             char_dist, state = self.attention_cell(char_dist, features, state, training)
             char_dists = char_dists.write(idx, char_dist)

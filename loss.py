@@ -14,12 +14,16 @@ class FocalLoss(tf.keras.losses.Loss):
     def call(self, y_true, y_pred, weights=None):
         y_true = tf.clip_by_value(y_true, 0, 1)
 
+        dtype = tf.float32
+
         if self.from_logits:
             sigmoid_p = tf.nn.sigmoid(y_pred)
         else:
             sigmoid_p = y_pred
 
-        zeros = tf.zeros_like(sigmoid_p, dtype=sigmoid_p.dtype)
+        sigmoid_p = tf.cast(y_pred, dtype)
+
+        zeros = tf.zeros_like(sigmoid_p, dtype=dtype)
 
         pos_p_sub = tf.where(y_true > zeros, y_true - sigmoid_p, zeros)
         neg_p_sub = tf.where(y_true > zeros, zeros, sigmoid_p)
@@ -49,7 +53,11 @@ class TextMetric():
         self.word_acc = tf.keras.metrics.CategoricalAccuracy()
         self.full_acc = tf.keras.metrics.CategoricalAccuracy()
 
-    def update_state(self, true_texts, true_lengths, logits, cur_max_sequence_len):
+    def update_state(self, true_texts, true_lengths, logits):
+        dtype = tf.float32
+        true_lengths = tf.cast(true_lengths, dtype)
+        logits = tf.cast(logits, dtype)
+
         true_texts_oh = tf.one_hot(true_texts, self.dictionary_size)
 
         batch_size = tf.shape(logits)[0]
@@ -206,7 +214,7 @@ class LossMetricAggregator:
         focal_loss = alpha * tf.pow(tf.abs(y_true - y_pred), gamma)
         return focal_loss
 
-    def loss(self, y_true, y_pred, y_pred_rnn, y_pred_rnn_ar, current_max_sequence_len, training):
+    def loss(self, y_true, y_pred, y_pred_rnn, y_pred_rnn_ar, training):
         # predicted tensors
         pred_word_obj = y_pred[..., 0]
         pred_word_poly = y_pred[..., 1 : 9]
@@ -229,11 +237,16 @@ class LossMetricAggregator:
         pred_word_obj = tf.boolean_mask(pred_word_obj, word_object_mask)
         pred_word_poly = tf.boolean_mask(pred_word_poly, word_object_mask)
 
+        pred_word_obj = tf.cast(pred_word_obj, tf.float32)
+        pred_word_poly = tf.cast(pred_word_poly, tf.float32)
 
         true_word_obj = tf.boolean_mask(true_word_obj, word_object_mask)
         true_word_poly = tf.boolean_mask(true_word_poly, word_object_mask)
         true_words = tf.boolean_mask(true_words, word_object_mask)
         true_lengths = tf.boolean_mask(true_lengths, word_object_mask)
+
+        true_word_obj = tf.cast(true_word_obj, tf.float32)
+        true_word_poly = tf.cast(true_word_poly, tf.float32)
 
         m = self.train_metric
         if not training:
@@ -271,13 +284,13 @@ class LossMetricAggregator:
 
         # text CE loss
         if training:
-            word_ce_loss, full_ce_loss = m.text_metric.update_state(true_words, true_lengths, y_pred_rnn, current_max_sequence_len)
+            word_ce_loss, full_ce_loss = m.text_metric.update_state(true_words, true_lengths, y_pred_rnn)
             text_ce_loss = word_ce_loss*10 + full_ce_loss
             text_ce_loss = tf.nn.compute_average_loss(text_ce_loss, global_batch_size=self.global_batch_size)
         else:
             text_ce_loss = 0
 
-        word_ce_loss_ar, full_ce_loss_ar = m.text_metric_ar.update_state(true_words, true_lengths, y_pred_rnn_ar, current_max_sequence_len)
+        word_ce_loss_ar, full_ce_loss_ar = m.text_metric_ar.update_state(true_words, true_lengths, y_pred_rnn_ar)
         text_ce_loss_ar = word_ce_loss_ar*10 + full_ce_loss_ar
         text_ce_loss_ar = tf.nn.compute_average_loss(text_ce_loss_ar, global_batch_size=self.global_batch_size)
 
