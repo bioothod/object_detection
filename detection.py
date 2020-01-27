@@ -230,8 +230,9 @@ def train():
 
             ds = ds.filter(filter_fn)
 
+            ds = ds.repeat()
             ds = ds.batch(FLAGS.batch_size)
-            ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
+            ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
             if FLAGS.save_examples <= 0:
                 ds = dstrategy.experimental_distribute_dataset(ds)
 
