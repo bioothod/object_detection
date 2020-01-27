@@ -225,8 +225,17 @@ class LossMetricAggregator:
         true_words = y_true[..., 9 : 9 + self.max_sequence_len]
         true_lengths = y_true[..., 9 + self.max_sequence_len]
 
+
         true_words = tf.cast(true_words, tf.int64)
         true_lengths = tf.cast(true_lengths, tf.int64)
+
+        pred_word_obj = tf.cast(pred_word_obj, tf.float32)
+        pred_word_poly = tf.cast(pred_word_poly, tf.float32)
+
+        true_word_obj = tf.cast(true_word_obj, tf.float32)
+        true_word_poly = tf.cast(true_word_poly, tf.float32)
+
+
 
         true_word_obj_whole = true_word_obj
         pred_word_obj_whole = pred_word_obj
@@ -237,16 +246,10 @@ class LossMetricAggregator:
         pred_word_obj = tf.boolean_mask(pred_word_obj, word_object_mask)
         pred_word_poly = tf.boolean_mask(pred_word_poly, word_object_mask)
 
-        pred_word_obj = tf.cast(pred_word_obj, tf.float32)
-        pred_word_poly = tf.cast(pred_word_poly, tf.float32)
-
         true_word_obj = tf.boolean_mask(true_word_obj, word_object_mask)
         true_word_poly = tf.boolean_mask(true_word_poly, word_object_mask)
         true_words = tf.boolean_mask(true_words, word_object_mask)
         true_lengths = tf.boolean_mask(true_lengths, word_object_mask)
-
-        true_word_obj = tf.cast(true_word_obj, tf.float32)
-        true_word_poly = tf.cast(true_word_poly, tf.float32)
 
         m = self.train_metric
         if not training:
