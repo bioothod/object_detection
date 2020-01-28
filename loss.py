@@ -140,7 +140,7 @@ class Metric:
 
     def str_result(self):
         if self.training:
-            return 'total_loss: {:.3f}, dist: {:.3f}, text ce: {}, acc: {}, AR text ce: {}, acc: {}, word_obj_acc: {:.4f}'.format(
+            return 'total_loss: {:.3e}, dist: {:.3f}, text ce: {}, acc: {}, AR text ce: {}, acc: {}, word_obj_acc: {:.4f}'.format(
                     self.total_loss.result(),
                     self.word_dist_loss.result(),
 
@@ -153,7 +153,7 @@ class Metric:
                     self.word_obj_accuracy.result(),
                     )
         else:
-            return 'total_loss: {:.3f}, dist: {:.3f}, AR text ce: {}, acc: {}, word_obj_acc: {:.4f}'.format(
+            return 'total_loss: {:.3e}, dist: {:.3f}, AR text ce: {}, acc: {}, word_obj_acc: {:.4f}'.format(
                     self.total_loss.result(),
                     self.word_dist_loss.result(),
 
@@ -267,6 +267,7 @@ class LossMetricAggregator:
         word_obj_loss = self.obj_loss(y_true=true_word_obj, y_pred=pred_word_obj)
         m.word_obj_loss.update_state(word_obj_loss)
         word_obj_loss = tf.nn.compute_average_loss(word_obj_loss, global_batch_size=self.global_batch_size)
+
         obj_loss = word_obj_loss + word_obj_whole_loss
 
         # for accuracy metric, only check true object matches
@@ -279,7 +280,7 @@ class LossMetricAggregator:
             tf.print('pred_word_obj:', pred_word_obj)
             tf.print('pred_obj_nans:', pred_obj_nans)
 
-        return dist_loss + obj_loss*10
+        return dist_loss + obj_loss
 
     def text_recognition_loss(self, y_true, y_pred_rnn, y_pred_rnn_ar, training):
         true_word_obj = y_true[..., 0]
