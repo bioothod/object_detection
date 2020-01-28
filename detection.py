@@ -2,6 +2,7 @@ import argparse
 import cv2
 import logging
 import os
+import random
 import sys
 
 import numpy as np
@@ -162,7 +163,6 @@ def draw_bboxes(image_size, train_dataset, num_examples, all_anchors, dictionary
             new_anns.append((None, poly, None))
 
         image_draw.draw_im(image, new_anns, dst, {})
-
 def train():
     checkpoint_dir = os.path.join(FLAGS.train_dir, 'checkpoints')
     good_checkpoint_dir = os.path.join(checkpoint_dir, 'good')
@@ -245,16 +245,16 @@ def train():
         ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
         ds = ds.batch(FLAGS.batch_size)
 
-        logger.info('{} dataset has been created, tfrecords: {}'.format(name, len(filenames)))
+        logger.info('{} object detection dataset has been created, tfrecords: {}'.format(name, len(filenames)))
 
         return ds
 
     if FLAGS.dataset_type == 'tfrecords':
-        train_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir, is_training=True)
-        eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, is_training=False)
+        train_objdet_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir, is_training=True)
+        eval_objdet_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, is_training=False)
 
     if FLAGS.save_examples > 0:
-        draw_bboxes(image_size, train_dataset, FLAGS.save_examples, anchors_all, FLAGS.dictionary, FLAGS.max_sequence_len)
+        draw_bboxes(image_size, train_objdet_dataset, FLAGS.save_examples, anchors_all, FLAGS.dictionary, FLAGS.max_sequence_len)
         exit(0)
 
     steps_per_train_epoch = FLAGS.steps_per_train_epoch
@@ -289,13 +289,45 @@ def train():
             logger.info("Restored base model from external checkpoint {} and saved object-based checkpoint {}".format(FLAGS.base_checkpoint, saved_path))
             exit(0)
 
-    metric = loss.LossMetricAggregator(FLAGS.max_sequence_len, dictionary_size, FLAGS.batch_size)
+    metric = loss.LossMetricAggregator(FLAGS.max_sequence_len, dictionary_size, FLAGS.batch_size * num_replicas)
 
     epoch_var = tf.Variable(0, dtype=tf.float32, name='epoch_number', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
     anchors_all_batched = tf.expand_dims(anchors_all, 0)
     anchors_all_batched = tf.tile(anchors_all_batched, [FLAGS.batch_size, 1, 1])
 
-    def calculate_metrics(images, is_training, true_values):
+    def gen(dataset, is_training):
+        for filenames, images, true_values in dataset:
+            if FLAGS.data_format == 'channels_first':
+                images = tf.transpose(images, [0, 3, 1, 2])
+
+            true_word_obj = true_values[..., 0]
+            true_word_poly = true_values[..., 1 : 9]
+            true_words = true_values[..., 9 : 9 + FLAGS.max_sequence_len]
+            true_lengths = true_values[..., 9 + FLAGS.max_sequence_len]
+            true_words = tf.cast(true_words, tf.int64)
+            true_lengths = tf.cast(true_lengths, tf.int64)
+
+            logits, rnn_features = model(images, is_training)
+
+            yield filenames, images, true_values, logits, rnn_features
+
+
+    def create_text_recognition_dataset(name, objdet_dataset, is_training):
+        ds = tf.data.Dataset.from_generator(lambda: gen(objdet_dataset, is_training),
+                                            (tf.string, dtype, tf.float32, dtype, dtype))
+        ds = ds.unbatch()
+        ds = ds.repeat()
+        ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+        ds = ds.batch(FLAGS.batch_size)
+
+        logger.info('{} text recognition dataset has been created'.format(name))
+
+        return ds
+
+    train_rec_dataset = create_text_recognition_dataset('train', train_objdet_dataset, is_training=True)
+    eval_rec_dataset = create_text_recognition_dataset('eval', eval_objdet_dataset, is_training=False)
+
+    def calculate_metrics(images, is_training, true_values, logits, rnn_features):
         true_word_obj = true_values[..., 0]
         true_word_poly = true_values[..., 1 : 9]
         true_words = true_values[..., 9 : 9 + FLAGS.max_sequence_len]
@@ -303,27 +335,38 @@ def train():
         true_words = tf.cast(true_words, tf.int64)
         true_lengths = tf.cast(true_lengths, tf.int64)
 
-        logits, rnn_features = model(images, is_training)
+        logits_new, rnn_features_new = model(images, is_training)
+        objdet_loss = metric.object_detection_loss(true_values, logits_new, is_training)
+
         rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(rnn_features, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all_batched, is_training)
 
-        total_loss = metric.loss(true_values, logits, rnn_outputs, rnn_outputs_ar, is_training)
+        text_loss = metric.text_recognition_loss(true_values, rnn_outputs, rnn_outputs_ar, is_training)
+
+        m = metric.train_metric
+        if not is_training:
+            m = metric.eval_metric
+
+        total_loss = objdet_loss + text_loss
+
+        m.total_loss.update_state(total_loss)
+        return total_loss
+
+
+    @tf.function
+    def eval_step(filenames, images, true_values, logits, rnn_features):
+        total_loss = calculate_metrics(images, False, true_values, logits, rnn_features)
         return total_loss
 
     @tf.function
-    def eval_step(filenames, images, true_values):
-        total_loss = calculate_metrics(images, False, true_values)
-        return total_loss
-
-    @tf.function
-    def train_step(filenames, images, true_values):
+    def train_step(filenames, images, true_values, logits, rnn_features):
         with tf.GradientTape() as tape:
-            total_loss = calculate_metrics(images, True, true_values)
+            total_loss = calculate_metrics(images, True, true_values, logits, rnn_features)
             scaled_loss = opt.get_scaled_loss(total_loss)
 
         tape = hvd.DistributedGradientTape(tape)
 
         variables = model.trainable_variables
-        scaled_gradients = tape.gradient(total_loss, variables)
+        scaled_gradients = tape.gradient(scaled_loss, variables)
         gradients = opt.get_unscaled_gradients(scaled_gradients)
 
 
@@ -339,7 +382,7 @@ def train():
                     logger.info('grad: {}, var: {}'.format(g, v))
 
                 #g += tf.random.normal(stddev=stddev, mean=0., shape=g.shape)
-                g = tf.clip_by_value(g, -5, 5)
+                g = tf.clip_by_value(g, -10, 10)
 
 
             clip_gradients.append(g)
@@ -355,24 +398,21 @@ def train():
         accs = []
 
         step = 0
-        def log_progress():
+        def log_progress(loss):
             if name == 'train':
-                logger.info('{}: {}: step: {}/{}, {}'.format(
+                loss_str = ''
+                if loss is not None:
+                    loss_str = ' batch_loss: {:.3f},'.format(loss.numpy())
+
+                logger.info('{}: {}: step: {}/{},{} {}'.format(
                     name, int(epoch_var.numpy()), step, max_steps,
+                    loss_str,
                     metric.str_result(True),
                     ))
 
         first_batch = True
-        for filenames, images, true_values in dataset:
-            # In most cases, the default data format NCHW instead of NHWC should be
-            # used for a significant performance boost on GPU/TPU. NHWC should be used
-            # only if the network needs to be run on CPU since the pooling operations
-            # are only supported on NHWC.
-            if FLAGS.data_format == 'channels_first':
-                images = tf.transpose(images, [0, 3, 1, 2])
-
-
-            total_loss = step_func(filenames, images, true_values)
+        for filenames, images, true_values, logits, rnn_features in dataset:
+            total_loss = step_func(filenames, images, true_values, logits, rnn_features)
             if name == 'train' and first_batch:
                 logger.info('broadcasting initial variables')
                 hvd.broadcast_variables(model.variables, root_rank=0)
@@ -380,7 +420,7 @@ def train():
                 first_batch = False
 
             if (name == 'train' and step % FLAGS.print_per_train_steps == 0) or np.isnan(total_loss.numpy()):
-                log_progress()
+                log_progress(total_loss)
 
                 if np.isnan(total_loss.numpy()):
                     exit(-1)
@@ -390,7 +430,7 @@ def train():
             if step >= max_steps:
                 break
 
-        log_progress()
+        log_progress(None)
 
         return step
 
@@ -403,17 +443,18 @@ def train():
     def validation_metric():
         return metric.evaluation_result()
 
-    if manager.latest_checkpoint:
-        metric.reset_states()
-        logger.info('there is a checkpoint {}, running initial validation'.format(manager.latest_checkpoint))
+    if hvd.rank() == 0:
+        if manager.latest_checkpoint:
+            metric.reset_states()
+            logger.info('there is a checkpoint {}, running initial validation'.format(manager.latest_checkpoint))
 
-        eval_steps = run_epoch('eval', eval_dataset, eval_step, steps_per_eval_epoch)
-        best_metric = validation_metric()
-        logger.info('initial validation: {}, metric: {:.3f}'.format(metric.str_result(False), best_metric))
+            eval_steps = run_epoch('eval', eval_rec_dataset, eval_step, steps_per_eval_epoch)
+            best_metric = validation_metric()
+            logger.info('initial validation: {}, metric: {:.3f}'.format(metric.str_result(False), best_metric))
 
-    if best_metric < FLAGS.min_eval_metric:
-        logger.info('setting minimal evaluation metric {:.3f} -> {} from command line arguments'.format(best_metric, FLAGS.min_eval_metric))
-        best_metric = FLAGS.min_eval_metric
+        if best_metric < FLAGS.min_eval_metric:
+            logger.info('setting minimal evaluation metric {:.3f} -> {} from command line arguments'.format(best_metric, FLAGS.min_eval_metric))
+            best_metric = FLAGS.min_eval_metric
 
     num_vars = len(model.trainable_variables)
     num_params = np.sum([np.prod(v.shape) for v in model.trainable_variables])
@@ -428,8 +469,8 @@ def train():
 
         metric.reset_states()
 
-        train_steps = run_epoch('train', train_dataset, train_step, steps_per_train_epoch)
-        eval_steps = run_epoch('eval', eval_dataset, eval_step, steps_per_eval_epoch)
+        train_steps = run_epoch('train', train_rec_dataset, train_step, steps_per_train_epoch)
+        eval_steps = run_epoch('eval', eval_rec_dataset, eval_step, steps_per_eval_epoch)
 
         if hvd.rank() != 0:
             continue
@@ -491,6 +532,12 @@ def train():
 
 if __name__ == '__main__':
     hvd.init()
+
+    random_seed = int.from_bytes(os.urandom(4), 'big')
+
+    random.seed(random_seed)
+    tf.random.set_seed(random_seed)
+    np.random.seed(random_seed)
 
     np.set_printoptions(formatter={'float': '{:0.4f}'.format, 'int': '{:4d}'.format}, linewidth=250, suppress=True, threshold=np.inf)
 
