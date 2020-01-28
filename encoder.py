@@ -275,6 +275,7 @@ class Encoder(tf.keras.layers.Layer):
         box_index = tf.boolean_mask(batch_index, word_obj_mask)
 
         selected_features = tf.image.crop_and_resize(features, bboxes, box_index, crop_size)
+        return self.rnn_layer(selected_features, true_words, true_lengths, training)
 
         max_outputs = tf.shape(selected_features)[0]
         num_outputs = 0
@@ -283,7 +284,7 @@ class Encoder(tf.keras.layers.Layer):
         outputs_ar = tf.TensorArray(features.dtype, size=0, dynamic_size=True, infer_shape=False)
         written = 0
 
-        current_batch_size = 64
+        current_batch_size = 32
         start = 0
 
         while num_outputs < max_outputs:
