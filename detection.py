@@ -29,6 +29,7 @@ parser.add_argument('--num_epochs', type=int, default=1000, help='Number of epoc
 parser.add_argument('--epoch', type=int, default=0, help='Initial epoch\'s number')
 parser.add_argument('--train_dir', type=str, required=True, help='Path to train directory, where graph will be stored.')
 parser.add_argument('--base_checkpoint', type=str, help='Load base model weights from this file')
+parser.add_argument('--use_good_checkpoint', action='store_true', help='Recover from the last good checkpoint when present')
 parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='Model name')
 parser.add_argument('--data_format', type=str, default='channels_last', choices=['channels_first', 'channels_last'], help='Data format: [channels_first, channels_last]')
 parser.add_argument('--initial_learning_rate', default=1e-3, type=float, help='Initial learning rate (will be multiplied by the number of nodes in the distributed strategy)')
@@ -273,21 +274,33 @@ def train():
     checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model)
     manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=20)
 
-    status = checkpoint.restore(manager.latest_checkpoint)
+    restored_path = None
 
-    if manager.latest_checkpoint:
-        logger.info("Restored from {}, global step: {}".format(manager.latest_checkpoint, global_step.numpy()))
-    else:
-        logger.info("Initializing from scratch, no latest checkpoint")
+    if FLAGS.use_good_checkpoint:
+        good_checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model)
+        good_manager = tf.train.CheckpointManager(good_checkpoint, good_checkpoint_dir, max_to_keep=20)
+        if good_manager.latest_checkpoint:
+            status = good_checkpoint.restore(good_manager.latest_checkpoint)
+            logger.info("Restored from good checkpoint {}, global step: {}".format(good_manager.latest_checkpoint, global_step.numpy()))
+            restored_path = good_manager.latest_checkpoint
 
-        if FLAGS.base_checkpoint:
-            base_checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model.body)
-            status = base_checkpoint.restore(FLAGS.base_checkpoint)
-            status.expect_partial()
+    if not restored_path:
+        status = checkpoint.restore(manager.latest_checkpoint)
 
-            saved_path = manager.save()
-            logger.info("Restored base model from external checkpoint {} and saved object-based checkpoint {}".format(FLAGS.base_checkpoint, saved_path))
-            exit(0)
+        if manager.latest_checkpoint:
+            logger.info("Restored from {}, global step: {}".format(manager.latest_checkpoint, global_step.numpy()))
+            restored_path = manager.latest_checkpoint
+        else:
+            logger.info("Initializing from scratch, no latest checkpoint")
+
+            if FLAGS.base_checkpoint:
+                base_checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model.body)
+                status = base_checkpoint.restore(FLAGS.base_checkpoint)
+                status.expect_partial()
+
+                saved_path = manager.save()
+                logger.info("Restored base model from external checkpoint {} and saved object-based checkpoint {}".format(FLAGS.base_checkpoint, saved_path))
+                exit(0)
 
     metric = loss.LossMetricAggregator(FLAGS.max_sequence_len, dictionary_size, FLAGS.batch_size * num_replicas)
 
@@ -316,7 +329,6 @@ def train():
         ds = tf.data.Dataset.from_generator(lambda: gen(objdet_dataset, is_training),
                                             (tf.string, dtype, tf.float32, dtype, dtype))
         ds = ds.unbatch()
-        ds = ds.repeat()
         ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
         ds = ds.batch(FLAGS.batch_size)
 
@@ -361,13 +373,17 @@ def train():
     def train_step(filenames, images, true_values, logits, rnn_features):
         with tf.GradientTape() as tape:
             total_loss = calculate_metrics(images, True, true_values, logits, rnn_features)
-            scaled_loss = opt.get_scaled_loss(total_loss)
+            if FLAGS.use_fp16:
+                scaled_loss = opt.get_scaled_loss(total_loss)
 
         tape = hvd.DistributedGradientTape(tape)
 
         variables = model.trainable_variables
-        scaled_gradients = tape.gradient(scaled_loss, variables)
-        gradients = opt.get_unscaled_gradients(scaled_gradients)
+        if FLAGS.use_fp16:
+            scaled_gradients = tape.gradient(scaled_loss, variables)
+            gradients = opt.get_unscaled_gradients(scaled_gradients)
+        else:
+            gradients = tape.gradient(total_loss, variables)
 
 
         stddev = 1 / ((1 + epoch_var)**0.55)
@@ -393,34 +409,29 @@ def train():
 
         return total_loss
 
-    def run_epoch(name, dataset, step_func, max_steps):
+    def run_epoch(name, dataset, step_func, max_steps, first_epoch=False):
         losses = []
         accs = []
 
         step = 0
-        def log_progress(loss):
+        def log_progress():
             if name == 'train':
-                loss_str = ''
-                if loss is not None:
-                    loss_str = ' batch_loss: {:.3f},'.format(loss.numpy())
-
-                logger.info('{}: {}: step: {}/{},{} {}'.format(
+                logger.info('{}: {}: step: {}/{}: {}'.format(
                     name, int(epoch_var.numpy()), step, max_steps,
-                    loss_str,
                     metric.str_result(True),
                     ))
 
         first_batch = True
         for filenames, images, true_values, logits, rnn_features in dataset:
             total_loss = step_func(filenames, images, true_values, logits, rnn_features)
-            if name == 'train' and first_batch:
+            if name == 'train' and first_batch and first_epoch:
                 logger.info('broadcasting initial variables')
                 hvd.broadcast_variables(model.variables, root_rank=0)
                 hvd.broadcast_variables(opt.variables(), root_rank=0)
                 first_batch = False
 
             if (name == 'train' and step % FLAGS.print_per_train_steps == 0) or np.isnan(total_loss.numpy()):
-                log_progress(total_loss)
+                log_progress()
 
                 if np.isnan(total_loss.numpy()):
                     exit(-1)
@@ -430,7 +441,7 @@ def train():
             if step >= max_steps:
                 break
 
-        log_progress(None)
+        log_progress()
 
         return step
 
@@ -444,11 +455,11 @@ def train():
         return metric.evaluation_result()
 
     if hvd.rank() == 0:
-        if manager.latest_checkpoint:
+        if restored_path:
             metric.reset_states()
-            logger.info('there is a checkpoint {}, running initial validation'.format(manager.latest_checkpoint))
+            logger.info('there is a checkpoint {}, running initial validation'.format(restored_path))
 
-            eval_steps = run_epoch('eval', eval_rec_dataset, eval_step, steps_per_eval_epoch)
+            eval_steps = run_epoch('eval', eval_rec_dataset, eval_step, steps_per_eval_epoch, False)
             best_metric = validation_metric()
             logger.info('initial validation: {}, metric: {:.3f}'.format(metric.str_result(False), best_metric))
 
@@ -469,8 +480,8 @@ def train():
 
         metric.reset_states()
 
-        train_steps = run_epoch('train', train_rec_dataset, train_step, steps_per_train_epoch)
-        eval_steps = run_epoch('eval', eval_rec_dataset, eval_step, steps_per_eval_epoch)
+        train_steps = run_epoch('train', train_rec_dataset, train_step, steps_per_train_epoch, epoch == FLAGS.epoch)
+        eval_steps = run_epoch('eval', eval_rec_dataset, eval_step, steps_per_eval_epoch, False)
 
         if hvd.rank() != 0:
             continue
