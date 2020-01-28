@@ -260,7 +260,7 @@ def per_image_supression(y_pred, image_size, anchors_all, model, pad_value):
     word_poly_sorted, word_obj_sorted, word_index_sort = sort_and_pad_for_poly(word_poly, word_obj, tf.squeeze(word_obj, 1))
 
     if tf.shape(word_obj)[0] > 0:
-        feature_poly = word_poly * model.rnn_feature_scale_float
+        feature_poly = word_poly * tf.cast(tf.shape(features)[1], tf.float32) / image_size
         picked_features = tf.TensorArray(tf.float32, size=0, dynamic_size=True)
         picked_features, written = model.pick_features_for_single_image(features, picked_features, 0, feature_poly)
         rnn_outputs = model.rnn_inference_from_picked_features(picked_features, 0, 0, training=False)
@@ -433,12 +433,11 @@ def run_inference():
 
     dictionary_size, dict_table, pad_value = anchors_gen.create_lookup_table(FLAGS.dictionary)
 
-    model = encoder.create_model(FLAGS.model_name, FLAGS.max_sequence_len, dictionary_size, pad_value)
+    model = encoder.create_model(FLAGS.model_name, image_size, FLAGS.max_sequence_len, dictionary_size, pad_value, dtype)
     if model.output_sizes is None:
         dummy_input = tf.ones((int(FLAGS.batch_size), image_size, image_size, 3), dtype=dtype)
         model(dummy_input, training=False)
         logger.info('image_size: {}, model output sizes: {}'.format(image_size, model.output_sizes))
-        model.rnn_feature_scale_float = float(model.rnn_features_scale.numpy())
 
     anchors_all, all_grid_xy, all_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
 
