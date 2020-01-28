@@ -8,6 +8,9 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras.mixed_precision import experimental as mixed_precision
 
+import horovod.tensorflow as hvd
+
+
 import tensorflow_addons as tfa
 
 logger = logging.getLogger('detection')
@@ -166,9 +169,17 @@ def train():
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(good_checkpoint_dir, exist_ok=True)
 
-    handler = logging.FileHandler(os.path.join(checkpoint_dir, 'train.log'), 'a')
+    handler = logging.FileHandler(os.path.join(checkpoint_dir, 'train.log.{}'.format(hvd.rank())), 'a')
     handler.setFormatter(__fmt)
     logger.addHandler(handler)
+
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
+    if gpus:
+        tf.config.experimental.set_visible_devices(gpus[hvd.local_rank()], 'GPU')
+
+    num_replicas = hvd.size()
 
     dtype = tf.float32
     if FLAGS.use_fp16:
@@ -176,323 +187,320 @@ def train():
         policy = mixed_precision.Policy('mixed_float16')
         mixed_precision.set_policy(policy)
 
-    dstrategy = tf.distribute.MirroredStrategy()
-    num_replicas = dstrategy.num_replicas_in_sync
-    with dstrategy.scope():
-        FLAGS.initial_learning_rate *= num_replicas
-        FLAGS.batch_size *= num_replicas
 
-        logdir = os.path.join(FLAGS.train_dir, 'logs')
-        writer = tf.summary.create_file_writer(logdir)
+    FLAGS.initial_learning_rate *= num_replicas
 
-        global_step = tf.Variable(1, dtype=tf.int64, name='global_step', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
-        learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
+    #logdir = os.path.join(FLAGS.train_dir, 'logs')
+    #writer = tf.summary.create_file_writer(logdir)
 
-        dictionary_size, dict_table, pad_value = anchors_gen.create_lookup_table(FLAGS.dictionary)
+    global_step = tf.Variable(1, dtype=tf.int64, name='global_step', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
+    learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
 
-        image_size = FLAGS.image_size
-        model = encoder.create_model(FLAGS.model_name, image_size, FLAGS.max_sequence_len, dictionary_size, pad_value, dtype)
-        if model.output_sizes is None:
-            dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
+    dictionary_size, dict_table, pad_value = anchors_gen.create_lookup_table(FLAGS.dictionary)
 
-            dstrategy.experimental_run_v2(
-                    lambda m, inp: m(inp, training=True),
-                    args=(model, dummy_input))
+    image_size = FLAGS.image_size
+    model = encoder.create_model(FLAGS.model_name, image_size, FLAGS.max_sequence_len, dictionary_size, pad_value, dtype)
+    if model.output_sizes is None:
+        dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
 
-            logger.info('image_size: {}, model output sizes: {}'.format(image_size, [s.numpy() for s in model.output_sizes]))
+        model(dummy_input, training=True)
 
-        anchors_all, output_xy_grids, output_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
+        logger.info('image_size: {}, model output sizes: {}'.format(image_size, [s.numpy() for s in model.output_sizes]))
 
-        def create_dataset_from_tfrecord(name, dataset_dirs, is_training):
-            filenames = []
-            for dirname in dataset_dirs:
-                for fn in os.listdir(dirname):
-                    fn = os.path.join(dirname, fn)
-                    if os.path.isfile(fn):
-                        filenames.append(fn)
+    anchors_all, output_xy_grids, output_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
 
-            np.random.shuffle(filenames)
+    def create_dataset_from_tfrecord(name, dataset_dirs, is_training):
+        filenames = []
+        for dirname in dataset_dirs:
+            for fn in os.listdir(dirname):
+                fn = os.path.join(dirname, fn)
+                if os.path.isfile(fn):
+                    filenames.append(fn)
 
-            ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=6)
-            ds = ds.map(lambda record: unpack_tfrecord(record, anchors_all,
-                            image_size, FLAGS.max_sequence_len, dict_table, pad_value,
-                            is_training, FLAGS.data_format, dtype),
-                    num_parallel_calls=tf.data.experimental.AUTOTUNE)
+        np.random.shuffle(filenames)
 
-            def filter_fn(filename, image, true_values):
-                true_word_obj = true_values[..., 0]
-                true_word_poly = true_values[..., 1 : 9]
-                true_words = true_values[..., 9 : 9 + FLAGS.max_sequence_len]
-                true_lengths = true_values[..., 9 + FLAGS.max_sequence_len]
-                true_lengths = tf.cast(true_lengths, tf.int64)
+        ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=6)
+        ds = ds.map(lambda record: unpack_tfrecord(record, anchors_all,
+                        image_size, FLAGS.max_sequence_len, dict_table, pad_value,
+                        is_training, FLAGS.data_format, dtype),
+                num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
-                index = tf.logical_and(tf.math.not_equal(true_lengths, 0),
-                                       tf.math.not_equal(true_word_obj, 0))
-                index = tf.cast(index, tf.int32)
-                index_sum = tf.reduce_sum(index)
-
-                return tf.math.not_equal(index_sum, 0)
-
-            ds = ds.filter(filter_fn)
-
-            ds = ds.repeat()
-            ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
-            ds = ds.batch(FLAGS.batch_size)
-
-            if FLAGS.save_examples <= 0:
-                ds = dstrategy.experimental_distribute_dataset(ds)
-
-            logger.info('{} dataset has been created, tfrecords: {}'.format(name, len(filenames)))
-
-            return ds
-
-        if FLAGS.dataset_type == 'tfrecords':
-            train_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir, is_training=True)
-            eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, is_training=False)
-
-        if FLAGS.save_examples > 0:
-            draw_bboxes(image_size, train_dataset, FLAGS.save_examples, anchors_all, FLAGS.dictionary, FLAGS.max_sequence_len)
-            exit(0)
-
-        steps_per_train_epoch = FLAGS.steps_per_train_epoch
-        steps_per_eval_epoch = FLAGS.steps_per_eval_epoch
-
-        logger.info('steps_per_train_epoch: {}, steps_per_eval_epoch: {}, dictionary_size: {}'.format(
-            steps_per_train_epoch, steps_per_eval_epoch, dictionary_size))
-
-        #opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
-        opt = tfa.optimizers.RectifiedAdam(lr=learning_rate, min_lr=FLAGS.min_learning_rate)
-        opt = tfa.optimizers.Lookahead(opt, sync_period=6, slow_step_size=0.5)
-        if FLAGS.use_fp16:
-            opt = mixed_precision.LossScaleOptimizer(opt, loss_scale='dynamic')
-
-
-        checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model)
-        manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=20)
-
-        status = checkpoint.restore(manager.latest_checkpoint)
-
-        if manager.latest_checkpoint:
-            logger.info("Restored from {}, global step: {}".format(manager.latest_checkpoint, global_step.numpy()))
-        else:
-            logger.info("Initializing from scratch, no latest checkpoint")
-
-            if FLAGS.base_checkpoint:
-                base_checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model.body)
-                status = base_checkpoint.restore(FLAGS.base_checkpoint)
-                status.expect_partial()
-
-                saved_path = manager.save()
-                logger.info("Restored base model from external checkpoint {} and saved object-based checkpoint {}".format(FLAGS.base_checkpoint, saved_path))
-                exit(0)
-
-        metric = loss.LossMetricAggregator(FLAGS.max_sequence_len, dictionary_size, FLAGS.batch_size)
-
-        epoch_var = tf.Variable(0, dtype=tf.float32, name='epoch_number', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
-        anchors_all_batched = tf.expand_dims(anchors_all, 0)
-        anchors_all_batched = tf.tile(anchors_all_batched, [FLAGS.batch_size // num_replicas, 1, 1])
-
-        def calculate_metrics(images, is_training, true_values):
+        def filter_fn(filename, image, true_values):
             true_word_obj = true_values[..., 0]
             true_word_poly = true_values[..., 1 : 9]
             true_words = true_values[..., 9 : 9 + FLAGS.max_sequence_len]
             true_lengths = true_values[..., 9 + FLAGS.max_sequence_len]
-            true_words = tf.cast(true_words, tf.int64)
             true_lengths = tf.cast(true_lengths, tf.int64)
 
-            logits, rnn_features = model(images, is_training)
-            rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(rnn_features, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all_batched, is_training)
+            index = tf.logical_and(tf.math.not_equal(true_lengths, 0),
+                                   tf.math.not_equal(true_word_obj, 0))
+            index = tf.cast(index, tf.int32)
+            index_sum = tf.reduce_sum(index)
 
-            total_loss = metric.loss(true_values, logits, rnn_outputs, rnn_outputs_ar, is_training)
-            return total_loss
+            return tf.math.not_equal(index_sum, 0)
 
-        def eval_step(filenames, images, true_values):
-            total_loss = calculate_metrics(images, False, true_values)
-            return total_loss
+        ds = ds.filter(filter_fn)
 
-        def train_step(filenames, images, true_values):
-            with tf.GradientTape() as tape:
-                total_loss = calculate_metrics(images, True, true_values)
-                scaled_loss = opt.get_scaled_loss(total_loss)
+        ds = ds.repeat()
+        ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+        ds = ds.batch(FLAGS.batch_size)
 
-            variables = model.trainable_variables
-            scaled_gradients = tape.gradient(total_loss, variables)
-            gradients = opt.get_unscaled_gradients(scaled_gradients)
+        logger.info('{} dataset has been created, tfrecords: {}'.format(name, len(filenames)))
 
+        return ds
 
-            stddev = 1 / ((1 + epoch_var)**0.55)
+    if FLAGS.dataset_type == 'tfrecords':
+        train_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir, is_training=True)
+        eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, is_training=False)
 
-            clip_gradients = []
-            for g, v in zip(gradients, variables):
-                if g is None:
-                    pass
-                    #logger.info('no gradients for variable: {}'.format(v))
-                else:
-                    if g.dtype == tf.float16:
-                        logger.info('grad: {}, var: {}'.format(g, v))
+    if FLAGS.save_examples > 0:
+        draw_bboxes(image_size, train_dataset, FLAGS.save_examples, anchors_all, FLAGS.dictionary, FLAGS.max_sequence_len)
+        exit(0)
 
-                    #g += tf.random.normal(stddev=stddev, mean=0., shape=g.shape)
-                    g = tf.clip_by_value(g, -5, 5)
+    steps_per_train_epoch = FLAGS.steps_per_train_epoch
+    steps_per_eval_epoch = FLAGS.steps_per_eval_epoch
 
+    logger.info('steps_per_train_epoch: {}, steps_per_eval_epoch: {}, dictionary_size: {}'.format(
+        steps_per_train_epoch, steps_per_eval_epoch, dictionary_size))
 
-                clip_gradients.append(g)
-
-            opt.apply_gradients(zip(clip_gradients, variables))
-
-            global_step.assign_add(1)
-
-            return total_loss
-
-        @tf.function
-        def distributed_train_step(args):
-            total_loss = dstrategy.experimental_run_v2(train_step, args=args)
-            total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, total_loss, axis=None)
-            return total_loss
-
-        @tf.function
-        def distributed_eval_step(args):
-            total_loss = dstrategy.experimental_run_v2(eval_step, args=args)
-            total_loss = dstrategy.reduce(tf.distribute.ReduceOp.SUM, total_loss, axis=None)
-            return total_loss
-
-        def run_epoch(name, dataset, step_func, max_steps):
-            losses = []
-            accs = []
-
-            step = 0
-            def log_progress():
-                if name == 'train':
-                    logger.info('{}: {}: step: {}/{}, {}'.format(
-                        name, int(epoch_var.numpy()), step, max_steps,
-                        metric.str_result(True),
-                        ))
-
-            for filenames, images, true_values in dataset:
-                # In most cases, the default data format NCHW instead of NHWC should be
-                # used for a significant performance boost on GPU/TPU. NHWC should be used
-                # only if the network needs to be run on CPU since the pooling operations
-                # are only supported on NHWC.
-                if FLAGS.data_format == 'channels_first':
-                    images = tf.transpose(images, [0, 3, 1, 2])
+    #opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    opt = tfa.optimizers.RectifiedAdam(lr=learning_rate, min_lr=FLAGS.min_learning_rate)
+    opt = tfa.optimizers.Lookahead(opt, sync_period=6, slow_step_size=0.5)
+    if FLAGS.use_fp16:
+        opt = mixed_precision.LossScaleOptimizer(opt, loss_scale='dynamic')
 
 
-                total_loss = step_func(args=(filenames, images, true_values))
-                if (name == 'train' and step % FLAGS.print_per_train_steps == 0) or np.isnan(total_loss.numpy()):
-                    log_progress()
+    checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model)
+    manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=20)
 
-                    if np.isnan(total_loss.numpy()):
-                        exit(-1)
+    status = checkpoint.restore(manager.latest_checkpoint)
 
+    if manager.latest_checkpoint:
+        logger.info("Restored from {}, global step: {}".format(manager.latest_checkpoint, global_step.numpy()))
+    else:
+        logger.info("Initializing from scratch, no latest checkpoint")
 
-                step += 1
-                if step >= max_steps:
-                    break
-
-            log_progress()
-
-            return step
-
-        best_metric = 0
-        best_saved_path = None
-        num_epochs_without_improvement = 0
-        initial_learning_rate_multiplier = 0.5
-        learning_rate_multiplier = initial_learning_rate_multiplier
-
-        def validation_metric():
-            return metric.evaluation_result()
-
-        if manager.latest_checkpoint:
-            metric.reset_states()
-            logger.info('there is a checkpoint {}, running initial validation'.format(manager.latest_checkpoint))
-
-            eval_steps = run_epoch('eval', eval_dataset, distributed_eval_step, steps_per_eval_epoch)
-            best_metric = validation_metric()
-            logger.info('initial validation: {}, metric: {:.3f}'.format(metric.str_result(False), best_metric))
-
-        if best_metric < FLAGS.min_eval_metric:
-            logger.info('setting minimal evaluation metric {:.3f} -> {} from command line arguments'.format(best_metric, FLAGS.min_eval_metric))
-            best_metric = FLAGS.min_eval_metric
-
-        num_vars = len(model.trainable_variables)
-        num_params = np.sum([np.prod(v.shape) for v in model.trainable_variables])
-
-        logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, model trainable variables/params: {}/{}'.format(
-            num_replicas, checkpoint_dir, FLAGS.model_name, image_size,
-            num_vars, int(num_params)))
-
-        learning_rate.assign(FLAGS.initial_learning_rate)
-        for epoch in range(FLAGS.epoch, FLAGS.num_epochs):
-            epoch_var.assign(epoch)
-
-            metric.reset_states()
-
-            train_steps = run_epoch('train', train_dataset, distributed_train_step, steps_per_train_epoch)
-            eval_steps = run_epoch('eval', eval_dataset, distributed_eval_step, steps_per_eval_epoch)
-
-            new_metric = validation_metric()
-
-            logger.info('epoch: {}, train: steps: {}, lr: {:.2e}, train: {}, eval: {}, val_metric: {:.4f}/{:.4f}'.format(
-                epoch, global_step.numpy(),
-                learning_rate.numpy(),
-                metric.str_result(True), metric.str_result(False),
-                new_metric, best_metric))
+        if FLAGS.base_checkpoint:
+            base_checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model.body)
+            status = base_checkpoint.restore(FLAGS.base_checkpoint)
+            status.expect_partial()
 
             saved_path = manager.save()
+            logger.info("Restored base model from external checkpoint {} and saved object-based checkpoint {}".format(FLAGS.base_checkpoint, saved_path))
+            exit(0)
 
-            if new_metric > best_metric:
-                best_saved_path = checkpoint.save(file_prefix='{}/ckpt-{:.4f}'.format(good_checkpoint_dir, new_metric))
+    metric = loss.LossMetricAggregator(FLAGS.max_sequence_len, dictionary_size, FLAGS.batch_size)
 
-                logger.info("epoch: {}, saved checkpoint: {}, eval metric: {:.4f} -> {:.4f}: {}".format(
-                    epoch, best_saved_path, best_metric, new_metric, metric.str_result(False)))
-                best_metric = new_metric
-                num_epochs_without_improvement = 0
-                learning_rate_multiplier = initial_learning_rate_multiplier
+    epoch_var = tf.Variable(0, dtype=tf.float32, name='epoch_number', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
+    anchors_all_batched = tf.expand_dims(anchors_all, 0)
+    anchors_all_batched = tf.tile(anchors_all_batched, [FLAGS.batch_size, 1, 1])
+
+    def calculate_metrics(images, is_training, true_values):
+        true_word_obj = true_values[..., 0]
+        true_word_poly = true_values[..., 1 : 9]
+        true_words = true_values[..., 9 : 9 + FLAGS.max_sequence_len]
+        true_lengths = true_values[..., 9 + FLAGS.max_sequence_len]
+        true_words = tf.cast(true_words, tf.int64)
+        true_lengths = tf.cast(true_lengths, tf.int64)
+
+        logits, rnn_features = model(images, is_training)
+        rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(rnn_features, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all_batched, is_training)
+
+        total_loss = metric.loss(true_values, logits, rnn_outputs, rnn_outputs_ar, is_training)
+        return total_loss
+
+    @tf.function
+    def eval_step(filenames, images, true_values):
+        total_loss = calculate_metrics(images, False, true_values)
+        return total_loss
+
+    @tf.function
+    def train_step(filenames, images, true_values):
+        with tf.GradientTape() as tape:
+            total_loss = calculate_metrics(images, True, true_values)
+            scaled_loss = opt.get_scaled_loss(total_loss)
+
+        tape = hvd.DistributedGradientTape(tape)
+
+        variables = model.trainable_variables
+        scaled_gradients = tape.gradient(total_loss, variables)
+        gradients = opt.get_unscaled_gradients(scaled_gradients)
+
+
+        stddev = 1 / ((1 + epoch_var)**0.55)
+
+        clip_gradients = []
+        for g, v in zip(gradients, variables):
+            if g is None:
+                pass
+                #logger.info('no gradients for variable: {}'.format(v))
             else:
-                num_epochs_without_improvement += 1
+                if g.dtype == tf.float16:
+                    logger.info('grad: {}, var: {}'.format(g, v))
 
-            if num_epochs_without_improvement >= FLAGS.epochs_lr_update:
-                want_reset = False
-                new_lr = learning_rate.numpy()
+                #g += tf.random.normal(stddev=stddev, mean=0., shape=g.shape)
+                g = tf.clip_by_value(g, -5, 5)
 
-                if learning_rate > FLAGS.min_learning_rate:
-                    new_lr = learning_rate.numpy() * learning_rate_multiplier
-                    if new_lr < FLAGS.min_learning_rate:
-                        new_lr = FLAGS.min_learning_rate
 
-                    logger.info('epoch: {}, epochs without metric improvement: {}, best metric: {:.5f}, updating learning rate: {:.2e} -> {:.2e}'.format(
-                        epoch, num_epochs_without_improvement, best_metric, learning_rate.numpy(), new_lr))
-                    num_epochs_without_improvement = 0
-                    if learning_rate_multiplier > 0.1:
-                        learning_rate_multiplier /= 2
+            clip_gradients.append(g)
 
-                    if FLAGS.reset_on_lr_update:
-                        want_reset = True
-                elif num_epochs_without_improvement >= FLAGS.epochs_lr_update:
-                    new_lr = FLAGS.initial_learning_rate
-                    logger.info('epoch: {}, epochs without metric improvement: {}, best metric: {:.5f}, resetting learning rate: {:.2e} -> {:.2e}'.format(
-                        epoch, num_epochs_without_improvement, best_metric, learning_rate.numpy(), new_lr))
-                    num_epochs_without_improvement = 0
+        opt.apply_gradients(zip(clip_gradients, variables))
+
+        global_step.assign_add(1)
+
+        return total_loss
+
+    def run_epoch(name, dataset, step_func, max_steps):
+        losses = []
+        accs = []
+
+        step = 0
+        def log_progress():
+            if name == 'train':
+                logger.info('{}: {}: step: {}/{}, {}'.format(
+                    name, int(epoch_var.numpy()), step, max_steps,
+                    metric.str_result(True),
+                    ))
+
+        first_batch = True
+        for filenames, images, true_values in dataset:
+            # In most cases, the default data format NCHW instead of NHWC should be
+            # used for a significant performance boost on GPU/TPU. NHWC should be used
+            # only if the network needs to be run on CPU since the pooling operations
+            # are only supported on NHWC.
+            if FLAGS.data_format == 'channels_first':
+                images = tf.transpose(images, [0, 3, 1, 2])
+
+
+            total_loss = step_func(filenames, images, true_values)
+            if name == 'train' and first_batch:
+                logger.info('broadcasting initial variables')
+                hvd.broadcast_variables(model.variables, root_rank=0)
+                hvd.broadcast_variables(opt.variables(), root_rank=0)
+                first_batch = False
+
+            if (name == 'train' and step % FLAGS.print_per_train_steps == 0) or np.isnan(total_loss.numpy()):
+                log_progress()
+
+                if np.isnan(total_loss.numpy()):
+                    exit(-1)
+
+
+            step += 1
+            if step >= max_steps:
+                break
+
+        log_progress()
+
+        return step
+
+    best_metric = 0
+    best_saved_path = None
+    num_epochs_without_improvement = 0
+    initial_learning_rate_multiplier = 0.5
+    learning_rate_multiplier = initial_learning_rate_multiplier
+
+    def validation_metric():
+        return metric.evaluation_result()
+
+    if manager.latest_checkpoint:
+        metric.reset_states()
+        logger.info('there is a checkpoint {}, running initial validation'.format(manager.latest_checkpoint))
+
+        eval_steps = run_epoch('eval', eval_dataset, eval_step, steps_per_eval_epoch)
+        best_metric = validation_metric()
+        logger.info('initial validation: {}, metric: {:.3f}'.format(metric.str_result(False), best_metric))
+
+    if best_metric < FLAGS.min_eval_metric:
+        logger.info('setting minimal evaluation metric {:.3f} -> {} from command line arguments'.format(best_metric, FLAGS.min_eval_metric))
+        best_metric = FLAGS.min_eval_metric
+
+    num_vars = len(model.trainable_variables)
+    num_params = np.sum([np.prod(v.shape) for v in model.trainable_variables])
+
+    logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, model trainable variables/params: {}/{}'.format(
+        num_replicas, checkpoint_dir, FLAGS.model_name, image_size,
+        num_vars, int(num_params)))
+
+    learning_rate.assign(FLAGS.initial_learning_rate)
+    for epoch in range(FLAGS.epoch, FLAGS.num_epochs):
+        epoch_var.assign(epoch)
+
+        metric.reset_states()
+
+        train_steps = run_epoch('train', train_dataset, train_step, steps_per_train_epoch)
+        eval_steps = run_epoch('eval', eval_dataset, eval_step, steps_per_eval_epoch)
+
+        if hvd.rank() != 0:
+            continue
+
+        new_metric = validation_metric()
+
+        logger.info('epoch: {}, train: steps: {}, lr: {:.2e}, train: {}, eval: {}, val_metric: {:.4f}/{:.4f}'.format(
+            epoch, global_step.numpy(),
+            learning_rate.numpy(),
+            metric.str_result(True), metric.str_result(False),
+            new_metric, best_metric))
+
+        saved_path = manager.save()
+
+        if new_metric > best_metric:
+            best_saved_path = checkpoint.save(file_prefix='{}/ckpt-{:.4f}'.format(good_checkpoint_dir, new_metric))
+
+            logger.info("epoch: {}, saved checkpoint: {}, eval metric: {:.4f} -> {:.4f}: {}".format(
+                epoch, best_saved_path, best_metric, new_metric, metric.str_result(False)))
+            best_metric = new_metric
+            num_epochs_without_improvement = 0
+            learning_rate_multiplier = initial_learning_rate_multiplier
+        else:
+            num_epochs_without_improvement += 1
+
+        if num_epochs_without_improvement >= FLAGS.epochs_lr_update:
+            want_reset = False
+            new_lr = learning_rate.numpy()
+
+            if learning_rate > FLAGS.min_learning_rate:
+                new_lr = learning_rate.numpy() * learning_rate_multiplier
+                if new_lr < FLAGS.min_learning_rate:
+                    new_lr = FLAGS.min_learning_rate
+
+                logger.info('epoch: {}, epochs without metric improvement: {}, best metric: {:.5f}, updating learning rate: {:.2e} -> {:.2e}'.format(
+                    epoch, num_epochs_without_improvement, best_metric, learning_rate.numpy(), new_lr))
+                num_epochs_without_improvement = 0
+                if learning_rate_multiplier > 0.1:
+                    learning_rate_multiplier /= 2
+
+                if FLAGS.reset_on_lr_update:
                     want_reset = True
-                    learning_rate_multiplier = initial_learning_rate_multiplier
+            elif num_epochs_without_improvement >= FLAGS.epochs_lr_update:
+                new_lr = FLAGS.initial_learning_rate
+                logger.info('epoch: {}, epochs without metric improvement: {}, best metric: {:.5f}, resetting learning rate: {:.2e} -> {:.2e}'.format(
+                    epoch, num_epochs_without_improvement, best_metric, learning_rate.numpy(), new_lr))
+                num_epochs_without_improvement = 0
+                want_reset = True
+                learning_rate_multiplier = initial_learning_rate_multiplier
 
-                if want_reset and best_saved_path:
-                    logger.info('epoch: {}, best metric: {:.5f}, learning rate: {:.2e} -> {:.2e}, restoring best checkpoint: {}'.format(
-                        epoch, best_metric, learning_rate.numpy(), new_lr, best_saved_path))
+            if want_reset and best_saved_path:
+                logger.info('epoch: {}, best metric: {:.5f}, learning rate: {:.2e} -> {:.2e}, restoring best checkpoint: {}'.format(
+                    epoch, best_metric, learning_rate.numpy(), new_lr, best_saved_path))
 
-                    checkpoint.restore(best_saved_path)
+                checkpoint.restore(best_saved_path)
 
-                learning_rate.assign(new_lr)
+            learning_rate.assign(new_lr)
 
 
 if __name__ == '__main__':
+    hvd.init()
+
     np.set_printoptions(formatter={'float': '{:0.4f}'.format, 'int': '{:4d}'.format}, linewidth=250, suppress=True, threshold=np.inf)
 
     logger.propagate = False
     logger.setLevel(logging.INFO)
     __fmt = logging.Formatter(fmt='%(asctime)s.%(msecs)03d: %(message)s', datefmt='%d/%m/%y %H:%M:%S')
-    __handler = logging.StreamHandler()
-    __handler.setFormatter(__fmt)
-    logger.addHandler(__handler)
+    if hvd.rank() == 0:
+        __handler = logging.StreamHandler()
+        __handler.setFormatter(__fmt)
+        logger.addHandler(__handler)
 
     FLAGS = parser.parse_args()
 
