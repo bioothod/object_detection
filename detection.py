@@ -36,7 +36,6 @@ parser.add_argument('--initial_learning_rate', default=1e-3, type=float, help='I
 parser.add_argument('--min_learning_rate', default=1e-6, type=float, help='Minimal learning rate')
 parser.add_argument('--print_per_train_steps', default=100, type=int, help='Print train stats per this number of steps(batches)')
 parser.add_argument('--min_eval_metric', default=0.2, type=float, help='Minimal evaluation metric to start saving models')
-parser.add_argument('--negative_positive_rate', default=2, type=float, help='Negative to positive anchors ratio')
 parser.add_argument('--epochs_lr_update', default=10, type=int, help='Maximum number of epochs without improvement used to reset or decrease learning rate')
 parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16 training/inference')
 parser.add_argument('--dataset_type', type=str, choices=['tfrecords'], default='tfrecords', help='Dataset type')
@@ -164,6 +163,7 @@ def draw_bboxes(image_size, train_dataset, num_examples, all_anchors, dictionary
             new_anns.append((None, poly, None))
 
         image_draw.draw_im(image, new_anns, dst, {})
+
 def train():
     checkpoint_dir = os.path.join(FLAGS.train_dir, 'checkpoints')
     good_checkpoint_dir = os.path.join(checkpoint_dir, 'good')
@@ -410,14 +410,11 @@ def train():
         return total_loss
 
     def run_epoch(name, dataset, step_func, max_steps, first_epoch=False):
-        losses = []
-        accs = []
-
         step = 0
         def log_progress():
             if name == 'train':
-                logger.info('{}: {}: step: {}/{}: {}'.format(
-                    name, int(epoch_var.numpy()), step, max_steps,
+                logger.info('{}: step: {}/{}: {}'.format(
+                    int(epoch_var.numpy()), step, max_steps,
                     metric.str_result(True),
                     ))
 
