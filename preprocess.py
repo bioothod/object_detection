@@ -61,11 +61,11 @@ def distort_color(image, color_ordering=0, fast_mode=True, scope='distort_color'
       ValueError: if color_ordering not in [0, 3]
     """
     with tf.name_scope(scope):
-        saturation_lower = 0.9
-        saturation_upper = 1.3
-        brightness_max_delta = 8. / 255
-        hue_max_delta = 0.05
-        contrast_lower = 0.9
+        saturation_lower = 0.7
+        saturation_upper = 1.5
+        brightness_max_delta = 16. / 255
+        hue_max_delta = 0.2
+        contrast_lower = 0.7
         contrast_upper = 1.5
         if fast_mode:
             if color_ordering == 0:
@@ -99,7 +99,7 @@ def distort_color(image, color_ordering=0, fast_mode=True, scope='distort_color'
                 raise ValueError('color_ordering must be in [0, 3]')
 
         # The random_* ops do not necessarily clamp.
-        return tf.clip_by_value(image, 0.0, 1.0)
+        return tf.clip_by_value(image, -1.0, 1.0)
 
 def random_expand(image, polys, ratio=2):
     height, width, depth = _ImageDimensions(image, rank=3)
