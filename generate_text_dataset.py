@@ -67,6 +67,8 @@ def do_work(worker_id, step, num_images, image_size):
         except coco.ProcessingError as e:
             continue
 
+        # there should be no <SKIP> labels anymore
+
         processed += 1
         bboxes += true_bboxes.shape[0]
 
@@ -79,8 +81,6 @@ def do_work(worker_id, step, num_images, image_size):
         data_dir = FLAGS.coco_train_data_dir
         if not FLAGS.is_training:
             data_dir = FLAGS.coco_eval_data_dir
-        with open(os.path.join(data_dir, filename), 'rb') as fin:
-            image_enc = fin.read()
 
         if processed <= 10:
             new_anns = []
@@ -106,7 +106,24 @@ def do_work(worker_id, step, num_images, image_size):
             except:
                 pass
 
+        polygons = []
+        for bb, text in zip(true_bboxes, true_labels):
+            cx, cy, h, w = bb
+            x0 = cx - w/2
+            x1 = cx + w/2
+            y0 = cy - h/2
+            y1 = cy + h/2
+
+            wp = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+            polygons.append(wp)
+
+        true_bboxes = true_bboxes.astype(np.float32)
+        polygons = np.array(polygons, dtype=np.float32)
         true_labels = '<SEP>'.join(true_labels)
+
+        with open(os.path.join(data_dir, filename), 'rb') as fin:
+            image_enc = fin.read()
+
 
         example = tf.train.Example(features=tf.train.Features(feature={
             'image_id': _int64_feature(image_id),

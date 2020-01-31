@@ -10,6 +10,8 @@ import multiprocessing as mp
 import numpy as np
 import tensorflow as tf
 
+from shapely.geometry import Polygon
+
 logger = logging.getLogger('generate')
 logger.propagate = False
 logger.setLevel(logging.INFO)
@@ -87,10 +89,21 @@ def scan_annotations(gt_dir, writer, image_fns):
                 text = [t.strip() for t in text.split()]
                 text = ''.join(text)
 
-                points = np.array(points, dtype=np.float32)
+                if text == '###':
+                    continue
 
+                points = np.array(points, dtype=np.float32)
                 x = points[..., 0::2]
                 y = points[..., 1::2]
+
+                points_xy = np.array([[x, y] for x, y in zip(x, y)])
+                if points_xy.shape == (4, 2):
+                    wp = points_xy
+                else:
+                    polygon = Polygon(points_xy)
+                    wp_xy = polygon.minimum_rotated_rectangle.exterior.coords.xy
+                    wp = np.array([[x, y] for x, y in zip(*wp_xy)])[1:, :]
+
                 xmin = x.min()
                 xmax = x.max()
                 ymin = y.min()
@@ -104,8 +117,8 @@ def scan_annotations(gt_dir, writer, image_fns):
                 bb = np.array([cx, cy, h, w], dtype=np.float32)
 
                 bboxes.append(bb)
-                polygons.append(points)
                 texts.append(text)
+                polygons.append(wp)
 
         if len(bboxes) == 0:
             continue

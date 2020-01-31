@@ -9,7 +9,6 @@ import time
 import multiprocessing as mp
 import numpy as np
 import tensorflow as tf
-import scipy.io as sio
 
 from shapely.geometry import Polygon
 
@@ -24,8 +23,8 @@ logger.addHandler(__handler)
 import tfrecord_writer
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--gt_dir', type=str, help='Path to TotalText ground truth directory')
-parser.add_argument('--image_dir', type=str, help='Path to TotalText image directory')
+parser.add_argument('--icdar_annotations', type=str, help='Path to ICDAR ArT dataset: annotations json file')
+parser.add_argument('--icdar_data_dir', type=str, help='Path to ICDAR ArT dataset: data directory, this directory and its subdirs will be scanned for images')
 parser.add_argument('--num_images_per_tfrecord', type=int, default=10000, help='Number of images in single tfsecord')
 parser.add_argument('--output_dir', type=str, required=True, help='Directory to save tfrecords')
 parser.add_argument('--logfile', type=str, help='Logfile')
@@ -50,7 +49,7 @@ def scan_dir(dirname):
             filenames.update(other)
             continue
 
-        spl = os.path.splitext(fn.lower())
+        spl = os.path.splitext(fn)
         if len(spl) != 2:
             continue
 
@@ -62,41 +61,45 @@ def scan_dir(dirname):
     logger.info('{}: images: {}'.format(dirname, len(filenames)))
     return filenames
 
-def scan_annotations(gt_dir, writer, image_fns):
+def scan_annotations(json_ann, writer, image_fns):
+    logger.info('opening {}'.format(json_ann))
+    with open(json_ann, 'r') as fin:
+        js = json.load(fin)
+
+    logger.info('json has been opened, starting ')
     start_time = time.time()
     processed = 0
 
-    for gt_fn in os.listdir(gt_dir):
-        gt_id = gt_fn[3:-4]
+    for gt_id, gt in js.items():
         image_id = int(gt_id[3:])
 
         texts = []
         bboxes = []
         polygons = []
 
-        full_path = os.path.join(gt_dir, gt_fn)
-        m = sio.loadmat(full_path)
-        gt = m['gt']
-
         for obj in gt:
-            x = obj[1].astype(np.float32)
-            y = obj[3].astype(np.float32)
-            orient = obj[5][0]
-
-            if orient == '#':
+            text = obj['transcription']
+            lang = obj['language']
+            if lang != 'Latin':
+                continue
+            illegibility = obj['illegibility']
+            if illegibility:
                 continue
 
-            points = np.array([[x, y] for x, y in zip(x[0], y[0])])
+            text = [t.strip() for t in text.split()]
+            text = ''.join(text)
+
+            points = obj['points']
+            points = np.array(points, dtype=np.float32)
+            x = points[..., 0::1]
+            y = points[..., 1::1]
+
             if points.shape == (4, 2):
                 wp = points
             else:
                 polygon = Polygon(points)
                 wp_xy = polygon.minimum_rotated_rectangle.exterior.coords.xy
-                wp = np.array([[x, y] for x, y in zip(*wp_xy)])[1:]
-
-            text = obj[4][0]
-            text = [t.strip() for t in text.split()]
-            text = ''.join(text)
+                wp = np.array([[x, y] for x, y in zip(*wp_xy)])[1:, :]
 
             xmin = x.min()
             xmax = x.max()
@@ -130,8 +133,8 @@ def scan_annotations(gt_dir, writer, image_fns):
             'image': _bytes_feature(image_data),
             'filename': _bytes_feature(bytes(image_filename, 'UTF-8')),
             'true_bboxes': _bytes_feature(bboxes.tobytes()),
-            'word_poly': _bytes_feature(polygons.tobytes()),
             'true_labels': _bytes_feature(bytes(texts, 'UTF-8')),
+            'word_poly': _bytes_feature(polygons.tobytes()),
             }))
 
         data = bytes(example.SerializeToString())
@@ -151,9 +154,9 @@ def main():
     os.makedirs(FLAGS.output_dir, exist_ok=True)
     writer = tfrecord_writer.tf_records_writer('{}/tfrecord'.format(FLAGS.output_dir), 0, FLAGS.num_images_per_tfrecord)
 
-    image_fns = scan_dir(FLAGS.image_dir)
+    image_fns = scan_dir(FLAGS.icdar_data_dir)
 
-    scan_annotations(FLAGS.gt_dir, writer, image_fns)
+    scan_annotations(FLAGS.icdar_annotations, writer, image_fns)
 
     writer.close()
 
