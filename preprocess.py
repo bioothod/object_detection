@@ -1,6 +1,8 @@
 import tensorflow as tf
 from tensorflow.python.ops import control_flow_ops
 
+import tensorflow_addons as tfa
+
 def _ImageDimensions(image, rank = 3):
     """Returns the dimensions of an image tensor.
 
@@ -59,34 +61,40 @@ def distort_color(image, color_ordering=0, fast_mode=True, scope='distort_color'
       ValueError: if color_ordering not in [0, 3]
     """
     with tf.name_scope(scope):
+        saturation_lower = 0.9
+        saturation_upper = 1.3
+        brightness_max_delta = 8. / 255
+        hue_max_delta = 0.05
+        contrast_lower = 0.9
+        contrast_upper = 1.5
         if fast_mode:
             if color_ordering == 0:
-                image = tf.image.random_brightness(image, max_delta=32. / 255.)
-                image = tf.image.random_saturation(image, lower=0.5, upper=1.5)
+                image = tf.image.random_brightness(image, max_delta=brightness_max_delta)
+                image = tf.image.random_saturation(image, lower=saturation_lower, upper=saturation_upper)
             else:
-                image = tf.image.random_saturation(image, lower=0.5, upper=1.5)
-                image = tf.image.random_brightness(image, max_delta=32. / 255.)
+                image = tf.image.random_saturation(image, lower=saturation_lower, upper=saturation_upper)
+                image = tf.image.random_brightness(image, max_delta=brightness_max_delta)
         else:
             if color_ordering == 0:
-                image = tf.image.random_brightness(image, max_delta=32. / 255.)
-                image = tf.image.random_saturation(image, lower=0.5, upper=1.5)
-                image = tf.image.random_hue(image, max_delta=0.2)
-                image = tf.image.random_contrast(image, lower=0.5, upper=1.5)
+                image = tf.image.random_brightness(image, max_delta=brightness_max_delta)
+                image = tf.image.random_saturation(image, lower=saturation_lower, upper=saturation_upper)
+                image = tf.image.random_hue(image, max_delta=hue_max_delta)
+                image = tf.image.random_contrast(image, lower=contrast_lower, upper=contrast_upper)
             elif color_ordering == 1:
-                image = tf.image.random_saturation(image, lower=0.5, upper=1.5)
-                image = tf.image.random_brightness(image, max_delta=32. / 255.)
-                image = tf.image.random_contrast(image, lower=0.5, upper=1.5)
-                image = tf.image.random_hue(image, max_delta=0.2)
+                image = tf.image.random_saturation(image, lower=saturation_lower, upper=saturation_upper)
+                image = tf.image.random_brightness(image, max_delta=brightness_max_delta)
+                image = tf.image.random_contrast(image, lower=contrast_lower, upper=contrast_upper)
+                image = tf.image.random_hue(image, max_delta=hue_max_delta)
             elif color_ordering == 2:
-                image = tf.image.random_contrast(image, lower=0.5, upper=1.5)
-                image = tf.image.random_hue(image, max_delta=0.2)
-                image = tf.image.random_brightness(image, max_delta=32. / 255.)
-                image = tf.image.random_saturation(image, lower=0.5, upper=1.5)
+                image = tf.image.random_contrast(image, lower=contrast_lower, upper=contrast_upper)
+                image = tf.image.random_hue(image, max_delta=hue_max_delta)
+                image = tf.image.random_brightness(image, max_delta=brightness_max_delta)
+                image = tf.image.random_saturation(image, lower=saturation_lower, upper=saturation_upper)
             elif color_ordering == 3:
-                image = tf.image.random_hue(image, max_delta=0.2)
-                image = tf.image.random_saturation(image, lower=0.5, upper=1.5)
-                image = tf.image.random_contrast(image, lower=0.5, upper=1.5)
-                image = tf.image.random_brightness(image, max_delta=32. / 255.)
+                image = tf.image.random_hue(image, max_delta=hue_max_delta)
+                image = tf.image.random_saturation(image, lower=saturation_lower, upper=saturation_upper)
+                image = tf.image.random_contrast(image, lower=contrast_lower, upper=contrast_upper)
+                image = tf.image.random_brightness(image, max_delta=brightness_max_delta)
             else:
                 raise ValueError('color_ordering must be in [0, 3]')
 
@@ -120,63 +128,41 @@ def random_expand(image, polys, ratio=2):
 
     return big_canvas, polys
 
+def rotate_points(points, theta):
+    rotation_matrix = tf.stack([tf.cos(theta), -tf.sin(theta), tf.sin(theta), tf.cos(theta)], axis=0)
+    rotation_matrix = tf.reshape(rotation_matrix, (2, 2))
+    return tf.matmul(points, rotation_matrix)
+
 def preprocess_for_train(image, word_poly, image_size, disable_rotation_augmentation):
-    if tf.random.uniform([], 0, 1) > 0.5:
+    if False and tf.random.uniform([], 0, 1) > 0.5:
         image = apply_with_random_selector(image,
                 lambda x, ordering: distort_color(x, ordering, True),
                 num_cases=4)
 
-    poly_rel = word_poly / image_size
+    if False and tf.random.uniform([], 0, 1) > 0.5:
+        ratio = tf.random.uniform([], minval=1.01, maxval=1.3, dtype=tf.float32)
 
-    ratio = tf.random.uniform([], minval=1.2, maxval=2.5, dtype=tf.float32)
+        poly_rel = word_poly / image_size
+        image, new_poly = random_expand(image, poly_rel, ratio)
+        image = tf.image.resize(image, [image_size, image_size])
+        word_poly = new_poly * image_size
 
-    image, new_poly = random_expand(image, poly_rel, ratio)
-    image = tf.image.resize(image, [image_size, image_size])
+    if tf.random.uniform([], 0, 1) > 0.5:
+        angle_min = -20. / 180 * 3.1415
+        angle_max = 20. / 180 * 3.1415
 
-    new_poly *= image_size
-    word_poly = new_poly
+        angle = tf.random.uniform([], minval=angle_min, maxval=angle_max, dtype=tf.float32)
 
-    reverse_text_labels = False
+        image = tfa.image.rotate(image, angle, interpolation='BILINEAR')
 
-    if not disable_rotation_augmentation and tf.random.uniform([]) >= 0.5:
-        wx = word_poly[..., 0]
-        wy = word_poly[..., 1]
+        word_poly -= [image_size/2, image_size/2]
+        word_poly = rotate_points(word_poly, angle)
+        word_poly += [image_size/2, image_size/2]
 
-        image = tf.expand_dims(image, 0)
+    #wx = word_poly[..., 0]
+    #wy = word_poly[..., 1]
 
-        if tf.random.uniform([]) >= 0.5:
-            image = tf.image.flip_left_right(image)
-            wx = image_size - wx
-            reverse_text_labels = True
-        elif tf.random.uniform([]) >= 0.5:
-            image = tf.image.flip_up_down(image)
-            wy = image_size - wy
-        elif tf.random.uniform([]) >= 0.5:
-            k = tf.random.uniform([], minval=0, maxval=4, dtype=tf.int32)
-            angle = k * 90
-
-            def rot90(x, y):
-                return -y + image_size, x
-            def rot180(x, y):
-                return -x + image_size, -y + image_size
-            def rot270(x, y):
-                return y, -x + image_size
-
-            if k == 3:
-                wx, wy = rot90(wx, wy)
-            if k == 2:
-                wx, wy = rot180(wx, wy)
-            if k == 1:
-                reverse_text_labels = True
-                wx, wy = rot270(wx, wy)
-
-            if k > 0:
-                image = tf.image.rot90(image, k)
-
-        word_poly = tf.stack([wx, wy], -1)
-        image = tf.squeeze(image, 0)
-
-    return image, word_poly, reverse_text_labels
+    return image, word_poly
 
 def pad_resize_image(image, dims):
     h = tf.shape(image)[0]

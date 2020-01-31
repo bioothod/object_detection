@@ -59,6 +59,7 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
                 'image': tf.io.FixedLenFeature([], tf.string),
                 'true_labels': tf.io.FixedLenFeature([], tf.string),
                 'true_bboxes': tf.io.FixedLenFeature([], tf.string),
+                'word_poly': tf.io.FixedLenFeature([], tf.string),
             })
 
     filename = features['filename']
@@ -66,19 +67,8 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
     image = features['image']
     image = tf.image.decode_jpeg(image, channels=3)
 
-    orig_bboxes = tf.io.decode_raw(features['true_bboxes'], tf.float32)
-    orig_bboxes = tf.reshape(orig_bboxes, [-1, 4])
-    cx, cy, h, w = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
-    xmin = cx - w / 2
-    ymin = cy - h / 2
-
-    # return bboxes in the original format without scaling it to square
-    p0 = tf.concat([xmin, ymin], axis=1)
-    p1 = tf.concat([xmin + w, ymin], axis=1)
-    p2 = tf.concat([xmin + w, ymin + h], axis=1)
-    p3 = tf.concat([xmin, ymin + h], axis=1)
-
-    word_poly = tf.stack([p0, p1, p2, p3], axis=1)
+    word_poly = tf.io.decode_raw(features['word_poly'], tf.float32)
+    word_poly = tf.reshape(word_poly, [-1, 4, 2])
 
     orig_image_height = tf.cast(tf.shape(image)[0], tf.float32)
     orig_image_width = tf.cast(tf.shape(image)[1], tf.float32)
@@ -106,14 +96,11 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
     image -= 128
     image /= 128
 
-
     if is_training:
-        image, word_poly, reverse_text_labels = preprocess.preprocess_for_train(image, word_poly, image_size, FLAGS.disable_rotation_augmentation)
+        image, word_poly = preprocess.preprocess_for_train(image, word_poly, image_size, FLAGS.disable_rotation_augmentation)
 
     text_labels = tf.strings.split(features['true_labels'], '<SEP>')
     text_split = tf.strings.unicode_split(text_labels, 'UTF-8')
-    if reverse_text_labels:
-        text_split = tf.reverse(text_split, [1])
 
     text_lenghts = text_split.row_lengths()
     text_lenghts = tf.expand_dims(text_lenghts, 1)
@@ -141,8 +128,9 @@ def draw_bboxes(image_size, train_dataset, num_examples, all_anchors, dictionary
     for filename, image, true_values in train_dataset.unbatch().take(num_examples):
         filename = str(filename.numpy(), 'utf8')
         filename_base = os.path.basename(filename)
+        filename_base = os.path.splitext(filename_base)[0]
 
-        dst = os.path.join(data_dir, filename_base)
+        dst = os.path.join(data_dir, filename_base) + '.png'
 
         image_filename = '/shared2/object_detection/datasets/text/synth_text/SynthText/{}'.format(filename)
         if False:
