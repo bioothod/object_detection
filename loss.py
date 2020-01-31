@@ -40,7 +40,7 @@ class FocalLoss(tf.keras.losses.Loss):
         raise "qwe"
 
 
-class TextMetric():
+class TextMetric:
     def __init__(self, max_sequence_len, dictionary_size, label_smoothing=0, from_logits=False, **kwargs):
         self.dictionary_size = dictionary_size
         self.max_sequence_len = max_sequence_len
@@ -183,8 +183,8 @@ class LossMetricAggregator:
         self.mae = tf.keras.losses.MeanAbsoluteError(reduction=tf.keras.losses.Reduction.NONE)
         self.obj_loss = FocalLoss(label_smoothing=label_smoothing, from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
 
-        self.train_metric = Metric(max_sequence_len, dictionary_size, from_logits=True, label_smoothing=label_smoothing, name='train_metric', training=True)
-        self.eval_metric = Metric(max_sequence_len, dictionary_size, from_logits=True, label_smoothing=label_smoothing, name='eval_metric', training=False)
+        self.train_metric = Metric(max_sequence_len, dictionary_size, from_logits=False, label_smoothing=label_smoothing, name='train_metric', training=True)
+        self.eval_metric = Metric(max_sequence_len, dictionary_size, from_logits=False, label_smoothing=label_smoothing, name='eval_metric', training=False)
 
     def str_result(self, training):
         m = self.train_metric
@@ -309,13 +309,13 @@ class LossMetricAggregator:
         # text CE loss
         if training:
             word_ce_loss, full_ce_loss = m.text_metric.update_state(true_words, true_lengths, y_pred_rnn)
-            text_ce_loss = word_ce_loss*10 + full_ce_loss
+            text_ce_loss = word_ce_loss + full_ce_loss
             text_ce_loss = tf.nn.compute_average_loss(text_ce_loss, global_batch_size=self.global_batch_size)
         else:
             text_ce_loss = 0
 
         word_ce_loss_ar, full_ce_loss_ar = m.text_metric_ar.update_state(true_words, true_lengths, y_pred_rnn_ar)
-        text_ce_loss_ar = word_ce_loss_ar*10 + full_ce_loss_ar
+        text_ce_loss_ar = word_ce_loss_ar + full_ce_loss_ar
         text_ce_loss_ar = tf.nn.compute_average_loss(text_ce_loss_ar, global_batch_size=self.global_batch_size)
 
         total_loss = text_ce_loss + text_ce_loss_ar
