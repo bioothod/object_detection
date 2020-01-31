@@ -20,6 +20,7 @@ class DarknetConv(tf.keras.layers.Layer):
         self.kernel_size = kernel_size
         self.strides = strides
         self.padding = padding
+        self.relu_fn = params.relu_fn
 
     def build(self, input_shape):
         self.conv = tf.keras.layers.Conv2D(
@@ -38,9 +39,9 @@ class DarknetConv(tf.keras.layers.Layer):
             epsilon=self.params.batch_norm_epsilon)
 
     def call(self, inputs, training):
-        x = self.conv(inputs)
-        x = self.bn(x, training)
-        x = tf.nn.leaky_relu(x, alpha=0.1)
+        x = self.bn(inputs, training)
+        x = self.conv(x)
+        x = self.relu_fn(x)
         return x
 
 class DarknetConvPool(tf.keras.layers.Layer):
