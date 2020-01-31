@@ -159,9 +159,6 @@ def preprocess_for_train(image, word_poly, image_size, disable_rotation_augmenta
         word_poly = rotate_points(word_poly, angle)
         word_poly += [image_size/2, image_size/2]
 
-    #wx = word_poly[..., 0]
-    #wy = word_poly[..., 1]
-
     return image, word_poly
 
 def pad_resize_image(image, dims):
