@@ -154,8 +154,6 @@ def main():
 
     os.makedirs(FLAGS.output_dir, exist_ok=True)
 
-    logger.info('image_size: {}'.format(FLAGS.image_size))
-
     mp.set_start_method('spawn')
 
     processes = []
