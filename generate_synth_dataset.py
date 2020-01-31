@@ -27,11 +27,8 @@ parser.add_argument('--synth_text_annotations', type=str, default='/shared2/obje
 parser.add_argument('--synt_text_data_dir', type=str, default='/shared2/object_detection/datasets/text/synth_text/SynthText/', help='Path to SynthText dataset: image directory')
 parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel preprocessing jobs')
 parser.add_argument('--num_images_per_tfrecord', type=int, default=10000, help='Number of images in single tfsecord')
-parser.add_argument('--num_images', type=int, default=0, help='Total number of images to generate')
 parser.add_argument('--output_dir', type=str, required=True, help='Directory to save tfrecords')
 parser.add_argument('--logfile', type=str, help='Logfile')
-parser.add_argument('--do_augmentation', action='store_true', help='Whether to store original images or augmented')
-parser.add_argument('--is_training', action='store_true', help='Training/evaluation augmentation')
 FLAGS = parser.parse_args()
 
 logger = logging.getLogger('detection')
@@ -46,9 +43,6 @@ def do_work(worker_id, tup):
     filenames, char_polys, word_polys, texts = tup
 
     logger.info('{}: started processing {} examples'.format(worker_id, len(filenames)))
-
-    if not FLAGS.is_training or FLAGS.num_images == 0:
-        num_images = len(filenames)
 
     images_dir = os.path.join(FLAGS.output_dir, 'images')
     os.makedirs(images_dir, exist_ok=True)
@@ -95,8 +89,17 @@ def do_work(worker_id, tup):
         text_concat = ''.join(text)
         texts = '<SEP>'.join(text)
 
-        char_poly = char_poly.astype(np.float64)
+        char_poly = char_poly.astype(np.float32)
         word_poly = word_poly.astype(np.float32)
+
+        x = word_poly[..., 0]
+        y = word_poly[..., 1]
+
+        xmin = x.min(axis=1)
+        ymin = y.min(axis=1)
+        xmax = x.max(axis=1)
+        ymax = y.max(axis=1)
+        bboxes = np.stack([(xmax + xmin) / 2, (ymax + ymin) / 2, xmax - xmin, ymax - ymin], axis=1)
 
         example = tf.train.Example(features=tf.train.Features(feature={
             'image': _bytes_feature(image_data),
@@ -105,7 +108,9 @@ def do_work(worker_id, tup):
             'word_poly': _bytes_feature(word_poly.tobytes()),
             'text': _bytes_feature(bytes(texts, 'UTF-8')),
             'text_concat': _bytes_feature(bytes(text_concat, 'UTF-8')),
-            }))
+            'true_bboxes': _bytes_feature(bboxes.tobytes()),
+            'true_labels': _bytes_feature(bytes(texts, 'UTF-8')),
+        }))
 
         data = bytes(example.SerializeToString())
         writer.write(data)
