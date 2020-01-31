@@ -130,6 +130,7 @@ def do_work(worker_id, step, num_images, image_size):
             'image': _bytes_feature(image_enc),
             'filename': _bytes_feature(bytes(filename, 'utf8')),
             'true_bboxes': _bytes_feature(true_bboxes.tobytes()),
+            'word_poly': _bytes_feature(polygons.tobytes()),
             'true_labels': _bytes_feature(bytes(true_labels, 'utf8')),
             }))
 
