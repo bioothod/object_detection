@@ -58,7 +58,6 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
                 'filename': tf.io.FixedLenFeature([], tf.string),
                 'image': tf.io.FixedLenFeature([], tf.string),
                 'true_labels': tf.io.FixedLenFeature([], tf.string),
-                'true_bboxes': tf.io.FixedLenFeature([], tf.string),
                 'word_poly': tf.io.FixedLenFeature([], tf.string),
             })
 
@@ -296,38 +295,7 @@ def train():
     anchors_all_batched = tf.expand_dims(anchors_all, 0)
     anchors_all_batched = tf.tile(anchors_all_batched, [FLAGS.batch_size, 1, 1])
 
-    def gen(dataset, is_training):
-        for filenames, images, true_values in dataset:
-            if FLAGS.data_format == 'channels_first':
-                images = tf.transpose(images, [0, 3, 1, 2])
-
-            true_word_obj = true_values[..., 0]
-            true_word_poly = true_values[..., 1 : 9]
-            true_words = true_values[..., 9 : 9 + FLAGS.max_sequence_len]
-            true_lengths = true_values[..., 9 + FLAGS.max_sequence_len]
-            true_words = tf.cast(true_words, tf.int64)
-            true_lengths = tf.cast(true_lengths, tf.int64)
-
-            logits, rnn_features = model(images, is_training)
-
-            yield filenames, images, true_values, logits, rnn_features
-
-
-    def create_text_recognition_dataset(name, objdet_dataset, is_training):
-        ds = tf.data.Dataset.from_generator(lambda: gen(objdet_dataset, is_training),
-                                            (tf.string, dtype, tf.float32, dtype, dtype))
-        ds = ds.unbatch()
-        ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
-        ds = ds.batch(FLAGS.batch_size)
-
-        logger.info('{} text recognition dataset has been created'.format(name))
-
-        return ds
-
-    train_rec_dataset = create_text_recognition_dataset('train', train_objdet_dataset, is_training=True)
-    eval_rec_dataset = create_text_recognition_dataset('eval', eval_objdet_dataset, is_training=False)
-
-    def calculate_metrics(images, is_training, true_values, logits, rnn_features):
+    def calculate_metrics(images, is_training, true_values):
         true_word_obj = true_values[..., 0]
         true_word_poly = true_values[..., 1 : 9]
         true_words = true_values[..., 9 : 9 + FLAGS.max_sequence_len]
@@ -335,8 +303,8 @@ def train():
         true_words = tf.cast(true_words, tf.int64)
         true_lengths = tf.cast(true_lengths, tf.int64)
 
-        logits_new, rnn_features_new = model(images, is_training)
-        objdet_loss = metric.object_detection_loss(true_values, logits_new, is_training)
+        logits, rnn_features = model(images, is_training)
+        objdet_loss = metric.object_detection_loss(true_values, logits, is_training)
 
         rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(rnn_features, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all_batched, is_training)
 
@@ -346,21 +314,26 @@ def train():
         if not is_training:
             m = metric.eval_metric
 
-        total_loss = objdet_loss + text_loss
+        if epoch_var < 100:
+            total_loss = text_loss
+        elif epoch_var < 200:
+            total_loss = objdet_loss * (epoch_var - 100) / 100. + text_loss
+        else:
+            total_loss = objdet_loss + text_loss
 
         m.total_loss.update_state(total_loss)
         return total_loss
 
 
     @tf.function
-    def eval_step(filenames, images, true_values, logits, rnn_features):
-        total_loss = calculate_metrics(images, False, true_values, logits, rnn_features)
+    def eval_step(filenames, images, true_values):
+        total_loss = calculate_metrics(images, False, true_values)
         return total_loss
 
     @tf.function
-    def train_step(filenames, images, true_values, logits, rnn_features):
+    def train_step(filenames, images, true_values):
         with tf.GradientTape() as tape:
-            total_loss = calculate_metrics(images, True, true_values, logits, rnn_features)
+            total_loss = calculate_metrics(images, True, true_values)
             if FLAGS.use_fp16:
                 scaled_loss = opt.get_scaled_loss(total_loss)
 
@@ -407,8 +380,8 @@ def train():
                     ))
 
         first_batch = True
-        for filenames, images, true_values, logits, rnn_features in dataset:
-            total_loss = step_func(filenames, images, true_values, logits, rnn_features)
+        for filenames, images, true_values in dataset:
+            total_loss = step_func(filenames, images, true_values)
             if name == 'train' and first_batch and first_epoch:
                 logger.info('broadcasting initial variables')
                 hvd.broadcast_variables(model.variables, root_rank=0)
@@ -444,7 +417,7 @@ def train():
             metric.reset_states()
             logger.info('there is a checkpoint {}, running initial validation'.format(restored_path))
 
-            eval_steps = run_epoch('eval', eval_rec_dataset, eval_step, steps_per_eval_epoch, False)
+            eval_steps = run_epoch('eval', eval_objdet_dataset, eval_step, steps_per_eval_epoch, False)
             best_metric = validation_metric()
             logger.info('initial validation: {}, metric: {:.3f}'.format(metric.str_result(False), best_metric))
 
@@ -465,8 +438,8 @@ def train():
 
         metric.reset_states()
 
-        train_steps = run_epoch('train', train_rec_dataset, train_step, steps_per_train_epoch, epoch == FLAGS.epoch)
-        eval_steps = run_epoch('eval', eval_rec_dataset, eval_step, steps_per_eval_epoch, False)
+        train_steps = run_epoch('train', train_objdet_dataset, train_step, steps_per_train_epoch, epoch == FLAGS.epoch)
+        eval_steps = run_epoch('eval', eval_objdet_dataset, eval_step, steps_per_eval_epoch, False)
 
         if hvd.rank() != 0:
             continue
