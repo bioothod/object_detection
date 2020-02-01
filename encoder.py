@@ -141,9 +141,9 @@ class Head(tf.keras.layers.Layer):
 
     def call(self, in0, in1, in2, training=True):
         x2 = self.s2_input(in2)
+        x2 = self.s2_dropout(x2, training=training)
         raw2 = x2
         up2 = self.up2(x2)
-        x2 = self.s2_dropout(x2, training=training)
         out2 = self.s2_output(x2, training=training)
 
         diff = up2.shape[1] - in1.shape[1]
@@ -154,9 +154,9 @@ class Head(tf.keras.layers.Layer):
 
         x1 = tf.keras.layers.concatenate([up2, in1])
         x1 = self.s1_input(x1)
+        x1 = self.s1_dropout(x1, training=training)
         raw1 = x1
         up1 = self.up1(x1)
-        x1 = self.s1_dropout(x1, training=training)
         out1 = self.s1_output(x1, training=training)
 
         diff = up1.shape[1] - in0.shape[1]
@@ -167,8 +167,8 @@ class Head(tf.keras.layers.Layer):
 
         x0 = tf.keras.layers.concatenate([up1, in0])
         x0 = self.s0_input(x0)
-        raw0 = x0
         x0 = self.s1_dropout(x0, training=training)
+        raw0 = x0
         out0 = self.s0_output(x0, training=training)
 
 

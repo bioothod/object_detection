@@ -57,10 +57,12 @@ class DarknetConvPool(tf.keras.layers.Layer):
                 kernel_size=(3, 3),
                 strides=(2, 2),
                 padding='VALID')
+        self.dropout = tf.keras.layers.Dropout(rate=self.params.spatial_dropout)
 
     def call(self, inputs, training):
         x = self.pad(inputs)
         x = self.conv(x, training)
+        x = self.dropout(x, training)
         return x
 
 class DarknetResidual(tf.keras.layers.Layer):

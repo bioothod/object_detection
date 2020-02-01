@@ -198,6 +198,7 @@ class RNNLayer(tf.keras.layers.Layer):
         attention_feature_dim = 256
         num_heads = 8
 
+        self.dense_dropout = tf.keras.layers.SpatialDropout1D(rate=params.spatial_dropout)
         self.dense_features = tf.keras.layers.Dense(units=attention_feature_dim)
         self.attention_cell = AttentionCell(params, num_rnn_units, attention_feature_dim, num_heads, dictionary_size, cell=cell)
 
@@ -235,11 +236,12 @@ class RNNLayer(tf.keras.layers.Layer):
                 if training:
                     char_dist = tf.one_hot(gt_tokens[:, idx-1], self.dictionary_size, dtype=image_features.dtype)
 
+            dropout_features = self.dense_dropout(features, training=training)
             if training:
-                char_dist, state = self.attention_cell(char_dist, features, state, training)
+                char_dist, state = self.attention_cell(char_dist, dropout_features, state, training)
                 char_dists = char_dists.write(idx, char_dist)
 
-            char_dist_ar, state_ar = self.attention_cell(char_dist_ar, features, state_ar, training)
+            char_dist_ar, state_ar = self.attention_cell(char_dist_ar, dropout_features, state_ar, training)
             char_dists_ar = char_dists_ar.write(idx, char_dist_ar)
 
         out_ar = char_dists_ar.stack()
