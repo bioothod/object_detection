@@ -8,7 +8,7 @@ import anchors_gen
 import attention
 import darknet
 import encoder_efficientnet as efn_encoder
-import feature_gated_conv as gated_features
+import feature_gated_conv as gated_conv
 import preprocess
 
 logger = logging.getLogger('detection')
@@ -195,7 +195,7 @@ class Encoder(tf.keras.layers.Layer):
         if params.model_name.startswith('darknet'):
             self.body = darknet.DarknetBody(params)
         elif params.model_name.startswith('gated_conv'):
-            self.body = features.FeatureExtractor(params)
+            self.body = gated_conv.FeatureExtractor(params)
         elif params.model_name.startswith('efficientnet-'):
             self.body = efn_encoder.EfnBody(params)
         else:
