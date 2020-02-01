@@ -314,12 +314,7 @@ def train():
         if not is_training:
             m = metric.eval_metric
 
-        if epoch_var < 100:
-            total_loss = text_loss
-        elif epoch_var < 200:
-            total_loss = objdet_loss * (epoch_var - 100) / 100. + text_loss
-        else:
-            total_loss = objdet_loss + text_loss
+        total_loss = objdet_loss + text_loss
 
         m.total_loss.update_state(total_loss)
         return total_loss
