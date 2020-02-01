@@ -218,7 +218,7 @@ class Encoder(tf.keras.layers.Layer):
 
         feature_size = tf.cast(tf.shape(features)[1], tf.float32)
         poly = poly * feature_size / self.image_size
-        crop_size = 8
+        crop_size = 16
         crop_size = [crop_size, crop_size]
 
         bboxes = anchors_gen.polygon2bbox(poly, want_yx=True)

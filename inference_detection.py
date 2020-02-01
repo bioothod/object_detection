@@ -263,7 +263,7 @@ def per_image_supression(y_pred, image_size, anchors_all, model, pad_value):
         features = tf.expand_dims(features, 0)
         feature_size = tf.cast(tf.shape(features)[1], tf.float32)
         feature_poly = word_poly * feature_size / image_size
-        crop_size = 8
+        crop_size = 16
         crop_size = [crop_size, crop_size]
 
         bboxes = anchors_gen.polygon2bbox(feature_poly, want_yx=True)
