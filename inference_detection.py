@@ -260,14 +260,21 @@ def per_image_supression(y_pred, image_size, anchors_all, model, pad_value):
     word_poly_sorted, word_obj_sorted, word_index_sort = sort_and_pad_for_poly(word_poly, word_obj, tf.squeeze(word_obj, 1))
 
     if tf.shape(word_obj)[0] > 0:
-        feature_poly = word_poly * tf.cast(tf.shape(features)[1], tf.float32) / image_size
-        picked_features = tf.TensorArray(tf.float32, size=0, dynamic_size=True)
-        picked_features, written = model.pick_features_for_single_image(features, picked_features, 0, feature_poly)
-        rnn_outputs = model.rnn_inference_from_picked_features(picked_features, 0, 0, training=False)
+        features = tf.expand_dims(features, 0)
+        feature_size = tf.cast(tf.shape(features)[1], tf.float32)
+        feature_poly = word_poly * feature_size / image_size
+        crop_size = 8
+        crop_size = [crop_size, crop_size]
 
-        rnn_outputs = tf.gather(rnn_outputs, word_index_sort)
+        bboxes = anchors_gen.polygon2bbox(feature_poly, want_yx=True)
+        bboxes /= feature_size
 
-        texts = tf.argmax(rnn_outputs, 2)
+        box_index = tf.tile([0], [tf.shape(bboxes)[0]])
+
+        selected_features = tf.image.crop_and_resize(features, bboxes, box_index, crop_size)
+        _, rnn_outputs_ar = model.rnn_layer(selected_features, 0, 0, False)
+
+        texts = tf.argmax(rnn_outputs_ar, -1)
         texts = tf.pad(texts, [[0, FLAGS.max_ret - tf.shape(texts)[0]], [0, 0]], mode='CONSTANT', constant_values=pad_value)
     else:
         texts = tf.ones((FLAGS.max_ret, FLAGS.max_sequence_len), dtype=tf.int64) * pad_value
