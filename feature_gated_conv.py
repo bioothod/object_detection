@@ -66,61 +66,54 @@ class GatedTextConv(tf.keras.layers.Layer):
         x = x0 * x1
         return x
 
+class GatedBlock(tf.keras.layers.Layer):
+    def __init__(self, params, num_features, kernel_size, strides, dropout_rate=0, upsampling=None, **kwargs):
+        super().__init__(**kwargs)
+
+        self.conv = TextConv(params, num_features, kernel_size=kernel_size, strides=strides)
+        self.gate = GatedTextConv(params, num_features, kernel_size=3, strides=1)
+
+        self.dropout = None
+        if dropout_rate and dropout_rate > 0:
+            self.dropout = tf.keras.layers.Dropout(params.spatial_dropout)
+
+        self.upsampling = None
+        if upsampling and upsampling != 0 and upsampling != (0, 0):
+            self.upsampling = tf.keras.layers.UpSampling2D(upsampling)
+
+    def call(self, inputs, training):
+        x = self.conv(inputs, training=training)
+        x = self.gate(x)
+        if self.dropout:
+            x = self.dropout(x, training=training)
+
+        if self.upsampling:
+            x = self.upsampling(x)
+
+        return x
+
+
 class FeatureExtractor(tf.keras.layers.Layer):
     def __init__(self, params, **kwargs):
         super(FeatureExtractor, self).__init__(self, **kwargs)
 
-        self.c0 = TextConv(params, 32, kernel_size=(3, 3), strides=(2, 2))
-        self.g0 = GatedTextConv(params, 32, kernel_size=(3, 3), strides=1)
+        num_features = 32
+        mult_step = 8
 
-        self.c1 = TextConv(params, 40, kernel_size=(3, 3), strides=(1, 1))
-        self.g1 = GatedTextConv(params, 40, kernel_size=3, strides=1)
+        self.blocks = []
 
-        self.c2 = TextConv(params, 48, kernel_size=(2, 4), strides=(2, 2))
-        self.g2 = GatedTextConv(params, 48, kernel_size=3, strides=1)
-
-        self.c3 = TextConv(params, 56, kernel_size=(3, 3), strides=(1, 1))
-        self.g3 = GatedTextConv(params, 56, kernel_size=3, strides=1)
-
-        self.c4 = TextConv(params, 64, kernel_size=(2, 4), strides=(2, 2))
-        self.g4 = GatedTextConv(params, 64, kernel_size=3, strides=1)
-
-        self.c5 = TextConv(params, 72, kernel_size=(3, 3), strides=(1, 1))
-        self.g5 = GatedTextConv(params, 72, kernel_size=3, strides=1)
-
-        self.c6 = TextConv(params, 80, kernel_size=(3, 3), strides=(2, 2))
-        self.g6 = GatedTextConv(params, 80, kernel_size=3, strides=1)
-
-        self.c7 = TextConv(params, 88, kernel_size=(3, 3), strides=(1, 1))
-
-        self.max_pooling = tf.keras.layers.MaxPooling2D((2, 2))
+        self.blocks.append(GatedBlock(params, num_features, kernel_size=(3, 3), strides=(1, 1), dropout_rate=0))
+        self.blocks.append(GatedBlock(params, num_features*2, kernel_size=(3, 3), strides=(1, 1), dropout_rate=0))
+        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2)))
+        self.blocks.append(GatedBlock(params, num_features*4, kernel_size=(3, 3), strides=(1, 1), dropout_rate=params.spatial_dropout))
+        self.blocks.append(GatedBlock(params, num_features*8, kernel_size=(1, 1), strides=(1, 1), dropout_rate=params.spatial_dropout))
+        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2)))
+        self.blocks.append(GatedBlock(params, num_features*16, kernel_size=(3, 3), strides=(1, 1), dropout_rate=params.spatial_dropout))
+        self.blocks.append(GatedBlock(params, num_features*32, kernel_size=(1, 1), strides=(1, 1), dropout_rate=params.spatial_dropout))
+        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2)))
 
     def call(self, x, training):
-        x = self.c0(x, training=training)
-        x = self.g0(x, training=training)
+        for block in self.blocks:
+            x = block(x, training=training)
 
-        x = self.c1(x, training=training)
-        x = self.g1(x, training=training)
-
-        x = self.c2(x, training=training)
-        x = self.g2(x, training=training)
-
-        x = self.c3(x, training=training)
-        x = self.g3(x, training=training)
-
-        x = self.c4(x, training=training)
-        x = self.g4(x, training=training)
-
-        x = self.c5(x, training=training)
-        x = self.g5(x, training=training)
-        out0 = x
-
-        x = self.c6(x, training=training)
-        x = self.g6(x, training=training)
-        out1 = x
-
-        x = self.c7(x, training=training)
-        x = self.max_pooling(x, training=training)
-        out2 = x
-
-        return [out0, out1, out2]
+        return x
