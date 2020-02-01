@@ -104,16 +104,19 @@ class FeatureExtractor(tf.keras.layers.Layer):
 
         self.blocks.append(GatedBlock(params, num_features, kernel_size=(3, 3), strides=(1, 1), dropout_rate=0))
         self.blocks.append(GatedBlock(params, num_features*2, kernel_size=(3, 3), strides=(1, 1), dropout_rate=0))
-        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2)))
+        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2), name='output0'))
         self.blocks.append(GatedBlock(params, num_features*4, kernel_size=(3, 3), strides=(1, 1), dropout_rate=params.spatial_dropout))
         self.blocks.append(GatedBlock(params, num_features*8, kernel_size=(1, 1), strides=(1, 1), dropout_rate=params.spatial_dropout))
-        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2)))
+        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2), name='output1'))
         self.blocks.append(GatedBlock(params, num_features*16, kernel_size=(3, 3), strides=(1, 1), dropout_rate=params.spatial_dropout))
         self.blocks.append(GatedBlock(params, num_features*32, kernel_size=(1, 1), strides=(1, 1), dropout_rate=params.spatial_dropout))
-        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2)))
+        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2), name='output2'))
 
     def call(self, x, training):
+        outputs = []
         for block in self.blocks:
             x = block(x, training=training)
+            if 'output' in block.name:
+                outputs.append(x)
 
-        return x
+        return outputs
