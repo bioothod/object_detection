@@ -127,7 +127,13 @@ class DarknetBody(tf.keras.layers.Layer):
         self.l5c = DarknetResidual(params, [512, 1024], name="l5c")
         self.l5d = DarknetResidual(params, [512, 1024], name="l5d")
         
+        self.raw1_upsample = DarknetUpsampling(params, 256)
+        self.raw2_upsample = DarknetUpsampling(params, 256)
+        self.raw3_upsample = DarknetUpsampling(params, 512)
+
     def call(self, inputs, training):
+        raw = []
+
         x = self.l0a(inputs, training)
         x = self.l0_pool(x, training)
 
@@ -136,6 +142,7 @@ class DarknetBody(tf.keras.layers.Layer):
 
         x = self.l2a(x, training)
         x = self.l2b(x, training)
+        raw.append(x)
         x = self.l2_pool(x, training)
 
         x = self.l3a(x, training)
@@ -146,6 +153,7 @@ class DarknetBody(tf.keras.layers.Layer):
         x = self.l3f(x, training)
         x = self.l3g(x, training)
         x = self.l3h(x, training)
+        raw.append(x)
         output_l3 = x
         x = self.l3_pool(x, training)
 
@@ -157,6 +165,7 @@ class DarknetBody(tf.keras.layers.Layer):
         x = self.l4f(x, training)
         x = self.l4g(x, training)
         x = self.l4h(x, training)
+        raw.append(x)
         output_l4 = x
         x = self.l4_pool(x, training)
 
@@ -164,8 +173,23 @@ class DarknetBody(tf.keras.layers.Layer):
         x = self.l5b(x, training)
         x = self.l5c(x, training)
         x = self.l5d(x, training)
+        raw.append(x)
         output_l5 = x
-        return output_l3, output_l4, output_l5
+
+        outputs = [output_l3, output_l4, output_l5]
+
+        x = self.raw3_upsample(raw[3], training=training)
+        x = tf.concat([raw[2], x], -1)
+
+        #x = raw[2]
+
+        x = self.raw2_upsample(x, training=training)
+        x = tf.concat([raw[1], x], -1)
+
+        x = self.raw1_upsample(x, training=training)
+        x = tf.concat([raw[0], x], -1)
+
+        return outputs, x
 
 class DarknetConv5(tf.keras.layers.Layer):
     def __init__(self, params, filters, **kwargs):
