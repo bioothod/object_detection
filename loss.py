@@ -277,12 +277,18 @@ class LossMetricAggregator:
         m.word_obj_accuracy02.update_state(true_word_obj, pred_word_obj)
         m.word_obj_accuracy05.update_state(true_word_obj, pred_word_obj)
 
-        pred_obj_nan = tf.math.is_nan(pred_word_obj)
-        pred_obj_nan = tf.cast(pred_obj_nan, tf.int32)
-        pred_obj_nans = tf.reduce_sum(pred_obj_nan)
+        def nans(p):
+            pred_obj_nan = tf.math.is_nan(p)
+            pred_obj_nan = tf.cast(pred_obj_nan, tf.int32)
+            pred_obj_nans = tf.reduce_sum(pred_obj_nan)
+            return pred_obj_nans
+
+        pred_obj_nans = nans(pred_word_obj)
+        pred_word_poly_nans = nans(pred_word_poly)
+        pred_obj_whole_nans = nans(pred_word_obj_whole)
         if pred_obj_nans > 0:
             tf.print('pred_word_obj:', pred_word_obj)
-            tf.print('pred_obj_nans:', pred_obj_nans)
+            tf.print('pred_obj_nans:', pred_obj_nans, 'pred_obj_whole_nans:', pred_obj_whole_nans, 'pred_word_poly_nans:', pred_word_poly_nans)
 
         return dist_loss + obj_loss
 
