@@ -24,10 +24,11 @@ import loss
 import preprocess
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch.')
-parser.add_argument('--num_epochs', type=int, default=1000, help='Number of epochs to run.')
+parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch')
+parser.add_argument('--num_epochs', type=int, default=1000, help='Number of epochs to run')
+parser.add_argument('--skip_saving_epochs', type=int, default=4, help='Do not save good checkpoint and update best metric for this number of the first epochs')
 parser.add_argument('--epoch', type=int, default=0, help='Initial epoch\'s number')
-parser.add_argument('--train_dir', type=str, required=True, help='Path to train directory, where graph will be stored.')
+parser.add_argument('--train_dir', type=str, required=True, help='Path to train directory, where graph will be stored')
 parser.add_argument('--base_checkpoint', type=str, help='Load base model weights from this file')
 parser.add_argument('--use_good_checkpoint', action='store_true', help='Recover from the last good checkpoint when present')
 parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='Model name')
@@ -304,7 +305,6 @@ def train():
         true_lengths = tf.cast(true_lengths, tf.int64)
 
         logits, rnn_features = model(images, is_training)
-        objdet_loss = metric.object_detection_loss(true_values, logits, is_training)
 
         rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(rnn_features, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all_batched, is_training)
 
@@ -314,7 +314,15 @@ def train():
         if not is_training:
             m = metric.eval_metric
 
-        total_loss = objdet_loss + text_loss
+        objdet_loss = metric.object_detection_loss(true_values, logits, is_training)
+        obj_scale = 1.
+        num_warmup_epochs = 4
+        if epoch_var < num_warmup_epochs:
+            obj_scale = (epoch_var + 1) / (num_warmup_epochs + 1)
+        total_loss = objdet_loss*obj_scale + text_loss
+
+        #reg_loss = tf.math.add_n(model.losses)
+        #total_loss += reg_loss
 
         m.total_loss.update_state(total_loss)
         return total_loss
@@ -353,7 +361,9 @@ def train():
                 if g.dtype == tf.float16:
                     logger.info('grad: {}, var: {}'.format(g, v))
 
-                #g += tf.random.normal(stddev=stddev, mean=0., shape=g.shape)
+                #if epoch_var < 10:
+                #    g += tf.random.normal(stddev=stddev, mean=0., shape=g.shape)
+
                 g = tf.clip_by_value(g, -10, 10)
 
 
@@ -450,11 +460,14 @@ def train():
         saved_path = manager.save()
 
         if new_metric > best_metric:
-            best_saved_path = checkpoint.save(file_prefix='{}/ckpt-{:.4f}'.format(good_checkpoint_dir, new_metric))
+            if epoch > FLAGS.epoch + FLAGS.skip_saving_epochs:
+                best_saved_path = checkpoint.save(file_prefix='{}/ckpt-{:.4f}'.format(good_checkpoint_dir, new_metric))
 
-            logger.info("epoch: {}, saved checkpoint: {}, eval metric: {:.4f} -> {:.4f}: {}".format(
-                epoch, best_saved_path, best_metric, new_metric, metric.str_result(False)))
-            best_metric = new_metric
+                logger.info("epoch: {}, saved checkpoint: {}, eval metric: {:.4f} -> {:.4f}: {}".format(
+                    epoch, best_saved_path, best_metric, new_metric, metric.str_result(False)))
+
+                best_metric = new_metric
+
             num_epochs_without_improvement = 0
             learning_rate_multiplier = initial_learning_rate_multiplier
         else:
