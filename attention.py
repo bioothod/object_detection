@@ -202,7 +202,7 @@ class RNNLayer(tf.keras.layers.Layer):
         self.dense_features = tf.keras.layers.Dense(units=attention_feature_dim)
         self.attention_cell = AttentionCell(params, num_rnn_units, attention_feature_dim, num_heads, dictionary_size, cell=cell)
 
-    def call(self, image_features, gt_tokens, gt_lens, training):
+    def call(self, image_features, gt_tokens, gt_lens, initial_state, training):
         image_features = self.bn(image_features, training=training)
         spatial_features = add_spatial_encoding(image_features)
 
@@ -214,16 +214,11 @@ class RNNLayer(tf.keras.layers.Layer):
 
         null_token = tf.tile([self.start_token], [batch_size])
         def init():
-            state_h = tf.zeros((batch_size, self.num_rnn_units), dtype=image_features.dtype)
-            state_c = tf.zeros((batch_size, self.num_rnn_units), dtype=image_features.dtype)
-            state = [state_h, state_c]
-
-
             char_dists = tf.TensorArray(image_features.dtype, size=self.max_sequence_len)
 
             char_dist = tf.one_hot(null_token, self.dictionary_size, dtype=image_features.dtype)
 
-            return state, char_dist, char_dists
+            return initial_state, char_dist, char_dists
 
 
         state, char_dist, char_dists = init()

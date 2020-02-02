@@ -272,7 +272,13 @@ def per_image_supression(y_pred, image_size, anchors_all, model, pad_value):
         box_index = tf.tile([0], [tf.shape(bboxes)[0]])
 
         selected_features = tf.image.crop_and_resize(features, bboxes, box_index, crop_size)
-        _, rnn_outputs_ar = model.rnn_layer(selected_features, 0, 0, False)
+
+        batch_size = tf.shape(selected_features)[0]
+        states_h = tf.zeros((batch_size, self.num_rnn_units), dtype=selected_features.dtype)
+        states_c = tf.zeros((batch_size, self.num_rnn_units), dtype=selected_features.dtype)
+        states = [states_h, states_c]
+
+        _, rnn_outputs_ar = model.rnn_layer(selected_features, 0, 0, states, False)
 
         texts = tf.argmax(rnn_outputs_ar, -1)
         texts = tf.pad(texts, [[0, FLAGS.max_ret - tf.shape(texts)[0]], [0, 0]], mode='CONSTANT', constant_values=pad_value)

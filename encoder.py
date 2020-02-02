@@ -56,8 +56,8 @@ class EncoderConv(tf.keras.layers.Layer):
             self.max_pool = tf.keras.layers.MaxPool2D((2, 2), data_format=params.data_format)
 
     def call(self, inputs, training):
-        x = self.conv(inputs)
-        x = self.bn(x, training)
+        x = self.bn(inputs, training)
+        x = self.conv(x)
         x = self.relu_fn(x)
 
         if self.max_pool is not None:
@@ -99,7 +99,7 @@ class ObjectDetectionLayer(tf.keras.layers.Layer):
                 kernel_size=(1, 1),
                 strides=(1, 1),
                 data_format=params.data_format,
-                use_bias=True,
+                use_bias=False,
                 padding='SAME',
                 kernel_initializer='glorot_uniform')
 
@@ -136,13 +136,9 @@ class Head(tf.keras.layers.Layer):
         for pad in [1, 2, 3, 4, 5, 6]:
             self.pads.append(tf.keras.layers.ZeroPadding2D(((0, pad), (0, pad))))
 
-        self.raw1_upsample = darknet.DarknetUpsampling(params, 256)
-        self.raw2_upsample = darknet.DarknetUpsampling(params, 512)
-
     def call(self, in0, in1, in2, training=True):
         x2 = self.s2_input(in2)
         x2 = self.s2_dropout(x2, training=training)
-        raw2 = x2
         up2 = self.up2(x2)
         out2 = self.s2_output(x2, training=training)
 
@@ -152,10 +148,9 @@ class Head(tf.keras.layers.Layer):
         if diff < 0:
             up2 = self.pads[-diff](up2)
 
-        x1 = tf.keras.layers.concatenate([up2, in1])
+        x1 = tf.concat([up2, in1], -1)
         x1 = self.s1_input(x1)
         x1 = self.s1_dropout(x1, training=training)
-        raw1 = x1
         up1 = self.up1(x1)
         out1 = self.s1_output(x1, training=training)
 
@@ -165,20 +160,12 @@ class Head(tf.keras.layers.Layer):
         if diff < 0:
             up1 = self.pads[-diff](up1)
 
-        x0 = tf.keras.layers.concatenate([up1, in0])
+        x0 = tf.concat([up1, in0], -1)
         x0 = self.s0_input(x0)
         x0 = self.s1_dropout(x0, training=training)
-        raw0 = x0
         out0 = self.s0_output(x0, training=training)
 
-
-        x = self.raw2_upsample(raw2, training=training)
-        x = tf.concat([raw1, x], -1)
-
-        x = self.raw1_upsample(x, training=training)
-        x = tf.concat([raw0, x], -1)
-
-        return [out2, out1, out0], x
+        return [out2, out1, out0]
 
 class Encoder(tf.keras.layers.Layer):
     def __init__(self, params, **kwargs):
@@ -201,10 +188,55 @@ class Encoder(tf.keras.layers.Layer):
         else:
             raise NameError('unsupported model name {}'.format(params.model_name))
 
-        self.rnn_layer = attention.RNNLayer(params, 256, self.max_sequence_len, params.dictionary_size, params.pad_value, cell='lstm')
+        self.num_rnn_units = 256
+
+        self.rnn_layer = attention.RNNLayer(params, self.num_rnn_units, self.max_sequence_len, params.dictionary_size, params.pad_value, cell='lstm')
+        #self.state_conv = EncoderConv(params, self.num_rnn_units)
         self.head = Head(params, classes)
 
         self.output_sizes = None
+
+    def rnn_inference1(self, features, word_obj_mask, poly, true_words, true_lengths, anchors_all, training):
+        poly = tf.boolean_mask(poly, word_obj_mask)
+        true_words = tf.boolean_mask(true_words, word_obj_mask)
+        true_lengths = tf.boolean_mask(true_lengths, word_obj_mask)
+
+        best_anchors = tf.boolean_mask(anchors_all[..., :2], word_obj_mask)
+        best_anchors = tf.expand_dims(best_anchors, 1)
+        best_anchors = tf.tile(best_anchors, [1, 4, 1])
+        poly = poly + best_anchors
+
+        feature_size = tf.cast(tf.shape(features)[1], tf.float32)
+        poly = poly * feature_size / self.image_size
+
+        x = poly[..., 0]
+        y = poly[..., 1]
+
+        xmin = tf.math.reduce_min(x, axis=1, keepdims=True)
+        ymin = tf.math.reduce_min(y, axis=1, keepdims=True)
+        xmax = xmin + 1
+        ymax = ymin + 1
+
+        bboxes = tf.concat([ymin, xmin, ymax, xmax], 1)
+        bboxes /= feature_size
+
+        batch_size = tf.shape(features)[0]
+        feature_size = tf.shape(word_obj_mask)[1]
+        batch_index = tf.range(batch_size, dtype=tf.int32)
+        batch_index = tf.expand_dims(batch_index, 1)
+        batch_index = tf.tile(batch_index, [1, feature_size])
+        box_index = tf.boolean_mask(batch_index, word_obj_mask)
+
+        selected_features = tf.image.crop_and_resize(features, bboxes, box_index, [1, 1])
+        states = self.state_conv(selected_features, training)
+        states = tf.squeeze(states, [1, 2])
+        other_states = tf.zeros_like(states)
+
+        initial_states = [states, other_states]
+
+        tiled_features = tf.gather(features, box_index, axis=0)
+
+        return self.rnn_layer(tiled_features, true_words, true_lengths, initial_states, training)
 
     def rnn_inference(self, features, word_obj_mask, poly, true_words, true_lengths, anchors_all, training):
         poly = tf.boolean_mask(poly, word_obj_mask)
@@ -232,50 +264,13 @@ class Encoder(tf.keras.layers.Layer):
         box_index = tf.boolean_mask(batch_index, word_obj_mask)
 
         selected_features = tf.image.crop_and_resize(features, bboxes, box_index, crop_size)
-        return self.rnn_layer(selected_features, true_words, true_lengths, training)
 
-        max_outputs = tf.shape(selected_features)[0]
-        num_outputs = 0
+        batch_size = tf.shape(selected_features)[0]
+        states_h = tf.zeros((batch_size, self.num_rnn_units), dtype=selected_features.dtype)
+        states_c = tf.zeros((batch_size, self.num_rnn_units), dtype=selected_features.dtype)
+        states = [states_h, states_c]
 
-        outputs = tf.TensorArray(features.dtype, size=0, dynamic_size=True, infer_shape=False)
-        outputs_ar = tf.TensorArray(features.dtype, size=0, dynamic_size=True, infer_shape=False)
-        written = 0
-
-        current_batch_size = 32
-        start = 0
-
-        while num_outputs < max_outputs:
-            end = tf.minimum(max_outputs - num_outputs, current_batch_size)
-
-            tw = true_words[start:end, ...]
-            tl = true_lengths[start:end, ...]
-            features = selected_features[start:end, ...]
-
-            out, out_ar = self.rnn_layer(features, tw, tl, training)
-            outputs = outputs.write(written, out)
-            outputs_ar = outputs_ar.write(written, out_ar)
-            written += 1
-
-            logger.info('features: {}, outputs: {}'.format(features.shape, out.shape))
-
-            num_outputs += tf.shape(features)[0]
-            start += tf.shape(features)[0]
-
-            if max_outputs - num_outputs >= current_batch_size:
-                continue
-            if max_outputs == num_outputs:
-                break
-
-            current_batch_size = tf.math.pow(2, tf.cast(tf.math.log(tf.cast(max_outputs - num_outputs, tf.float32)) / tf.math.log(2.), tf.int32))
-
-        outputs = outputs.concat()
-        outputs_ar = outputs_ar.concat()
-
-        expected_output_shape = tf.TensorShape([None, self.max_sequence_len, self.dictionary_size])
-        outputs.set_shape(expected_output_shape)
-        outputs_ar.set_shape(expected_output_shape)
-
-        return outputs, outputs_ar
+        return self.rnn_layer(selected_features, true_words, true_lengths, states, training)
 
     def rnn_inference_from_true_values(self, raw_features, word_obj_mask, true_word_poly, true_words, true_lengths, anchors_all, training):
         #poly = class_outputs[..., 1 : 1 + 4*2]
@@ -287,8 +282,8 @@ class Encoder(tf.keras.layers.Layer):
 
     # word mask is per anchor, i.e. this is true word_obj
     def call(self, inputs, training):
-        l = self.body(inputs, training)
-        head_outputs, raw_features = self.head(l[0], l[1], l[2], training)
+        l, raw_features = self.body(inputs, training)
+        head_outputs = self.head(l[0], l[1], l[2], training)
 
         self.output_sizes = [tf.shape(o)[1] for o in head_outputs]
 
@@ -335,6 +330,7 @@ def create_params(model_name, image_size, max_sequence_len, dictionary_size, pad
         'image_size': image_size,
         'num_anchors': anchors_gen.num_anchors,
         'dtype': dtype,
+        'l2_reg_weight': 0,
     }
 
     params = GlobalParams(**params)
