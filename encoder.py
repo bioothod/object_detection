@@ -28,7 +28,7 @@ def local_swish(x):
     return x * tf.nn.sigmoid(x)
 
 class EncoderConv(tf.keras.layers.Layer):
-    def __init__(self, params, num_features, kernel_size=(3, 3), strides=(1, 1), padding='SAME', want_max_pool=False, **kwargs):
+    def __init__(self, params, num_features, kernel_size=(3, 3), strides=(1, 1), padding='SAME', **kwargs):
         super().__init__(**kwargs)
         self.num_features = num_features
         self.kernel_size = kernel_size
@@ -43,25 +43,17 @@ class EncoderConv(tf.keras.layers.Layer):
                 strides=self.strides,
                 data_format=params.data_format,
                 use_bias=False,
-                padding=self.padding,
-                kernel_initializer='glorot_uniform')
+                padding=self.padding)
 
         self.bn = tf.keras.layers.BatchNormalization(
             axis=params.channel_axis,
             momentum=params.batch_norm_momentum,
             epsilon=params.batch_norm_epsilon)
 
-        self.max_pool = None
-        if want_max_pool:
-            self.max_pool = tf.keras.layers.MaxPool2D((2, 2), data_format=params.data_format)
-
     def call(self, inputs, training):
         x = self.bn(inputs, training)
         x = self.conv(x)
         x = self.relu_fn(x)
-
-        if self.max_pool is not None:
-            x = self.max_pool(x)
 
         return x
 
@@ -70,15 +62,16 @@ class EncoderConvList(tf.keras.layers.Layer):
         super().__init__(**kwargs)
 
         self.convs = []
-        idx = 0
-        for num_filters in filters:
-            kernel_size = 3
-            if idx % 2 == 0:
-                kernel_size = 1
-            idx += 1
 
+        kernel_size = 1
+        for num_filters in filters:
             conv = EncoderConv(params, num_filters, kernel_size=(kernel_size, kernel_size), strides=(1, 1), padding='SAME')
             self.convs.append(conv)
+
+            if kernel_size == 3:
+                kernel_size = 1
+            else:
+                kernel_size = 3
 
     def call(self, x, training):
         for conv in self.convs:
@@ -100,8 +93,7 @@ class ObjectDetectionLayer(tf.keras.layers.Layer):
                 strides=(1, 1),
                 data_format=params.data_format,
                 use_bias=False,
-                padding='SAME',
-                kernel_initializer='glorot_uniform')
+                padding='SAME')
 
             self.outputs.append(out)
 
