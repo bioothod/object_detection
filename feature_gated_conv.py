@@ -1,5 +1,7 @@
 import tensorflow as tf
 
+import darknet
+
 class TextConv(tf.keras.layers.Layer):
     def __init__(self, params, num_features, kernel_size=(3, 3), strides=(1, 1), padding='SAME', **kwargs):
         super(TextConv, self).__init__(self, **kwargs)
@@ -11,8 +13,8 @@ class TextConv(tf.keras.layers.Layer):
                 strides=strides,
                 data_format=params.data_format,
                 padding=padding,
+                use_bias=False,
                 kernel_regularizer=tf.keras.regularizers.l2(params.l2_reg_weight),
-                bias_regularizer=tf.keras.regularizers.l2(params.l2_reg_weight),
                 kernel_initializer='glorot_uniform')
 
         self.bn = tf.keras.layers.BatchNormalization(
@@ -36,17 +38,17 @@ class GatedTextConv(tf.keras.layers.Layer):
                 strides=strides,
                 data_format=params.data_format,
                 padding=padding,
+                use_bias=False,
                 kernel_regularizer=tf.keras.regularizers.l2(params.l2_reg_weight),
-                bias_regularizer=tf.keras.regularizers.l2(params.l2_reg_weight),
                 kernel_initializer='glorot_uniform')
         self.conv1 = tf.keras.layers.Conv2D(
                 num_features,
                 kernel_size=kernel_size,
                 strides=strides,
+                use_bias=False,
                 data_format=params.data_format,
                 padding=padding,
                 kernel_regularizer=tf.keras.regularizers.l2(params.l2_reg_weight),
-                bias_regularizer=tf.keras.regularizers.l2(params.l2_reg_weight),
                 kernel_initializer='glorot_uniform')
 
         self.bn = tf.keras.layers.BatchNormalization(
@@ -97,26 +99,50 @@ class FeatureExtractor(tf.keras.layers.Layer):
     def __init__(self, params, **kwargs):
         super(FeatureExtractor, self).__init__(self, **kwargs)
 
-        num_features = 32
-        mult_step = 8
+        num_features = 16
 
         self.blocks = []
 
         self.blocks.append(GatedBlock(params, num_features, kernel_size=(3, 3), strides=(1, 1), dropout_rate=0))
         self.blocks.append(GatedBlock(params, num_features*2, kernel_size=(3, 3), strides=(1, 1), dropout_rate=0))
-        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2), name='output0'))
-        self.blocks.append(GatedBlock(params, num_features*4, kernel_size=(3, 3), strides=(1, 1), dropout_rate=params.spatial_dropout))
-        self.blocks.append(GatedBlock(params, num_features*8, kernel_size=(1, 1), strides=(1, 1), dropout_rate=params.spatial_dropout))
-        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2), name='output1'))
+        self.blocks.append(GatedBlock(params, num_features*4, kernel_size=(3, 3), strides=(1, 1), dropout_rate=0))
+        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2)))
+        self.blocks.append(GatedBlock(params, num_features*8, kernel_size=(3, 3), strides=(1, 1), dropout_rate=params.spatial_dropout))
+        self.blocks.append(GatedBlock(params, num_features*8, kernel_size=(3, 3), strides=(1, 1), dropout_rate=params.spatial_dropout))
+        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2)))
         self.blocks.append(GatedBlock(params, num_features*16, kernel_size=(3, 3), strides=(1, 1), dropout_rate=params.spatial_dropout))
-        self.blocks.append(GatedBlock(params, num_features*32, kernel_size=(1, 1), strides=(1, 1), dropout_rate=params.spatial_dropout))
+        self.blocks.append(GatedBlock(params, num_features*16, kernel_size=(1, 1), strides=(1, 1), dropout_rate=params.spatial_dropout, name='raw0'))
         self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2), name='output2'))
+        self.blocks.append(GatedBlock(params, num_features*32, kernel_size=(3, 3), strides=(1, 1), dropout_rate=params.spatial_dropout))
+        self.blocks.append(GatedBlock(params, num_features*32, kernel_size=(1, 1), strides=(1, 1), dropout_rate=params.spatial_dropout, name='raw1'))
+        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2), name='output4'))
+        self.blocks.append(GatedBlock(params, num_features*32, kernel_size=(3, 3), strides=(1, 1), dropout_rate=params.spatial_dropout))
+        self.blocks.append(GatedBlock(params, num_features*32, kernel_size=(1, 1), strides=(1, 1), dropout_rate=params.spatial_dropout, name='raw2'))
+        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2), name='output4'))
+
+        self.raw1_upsample = darknet.DarknetUpsampling(params, 256)
+        self.raw2_upsample = darknet.DarknetUpsampling(params, 256)
+        #self.raw3_upsample = darknet.DarknetUpsampling(params, 512)
 
     def call(self, x, training):
         outputs = []
+        raw = []
         for block in self.blocks:
             x = block(x, training=training)
             if 'output' in block.name:
                 outputs.append(x)
+            if 'raw' in block.name:
+                raw.append(x)
 
-        return outputs
+        #x = self.raw3_upsample(raw[3], training=training)
+        #x = tf.concat([raw[2], x], -1)
+
+        x = raw[2]
+
+        x = self.raw2_upsample(x, training=training)
+        x = tf.concat([raw[1], x], -1)
+
+        x = self.raw1_upsample(x, training=training)
+        x = tf.concat([raw[0], x], -1)
+
+        return outputs, x
