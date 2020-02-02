@@ -134,7 +134,7 @@ def rotate_points(points, theta):
     return tf.matmul(points, rotation_matrix)
 
 def preprocess_for_train(image, word_poly, image_size, disable_rotation_augmentation):
-    if False and tf.random.uniform([], 0, 1) > 0.5:
+    if tf.random.uniform([], 0, 1) > 0.5:
         image = apply_with_random_selector(image,
                 lambda x, ordering: distort_color(x, ordering, True),
                 num_cases=4)
