@@ -196,10 +196,9 @@ class LossMetricAggregator:
     def evaluation_result(self):
         m = self.eval_metric
         obj_acc = m.word_obj_accuracy02.result()
-        dist = tf.math.exp(-m.word_dist_loss.result())
         word_acc, full_acc = m.text_metric_ar.result(want_acc=True)
 
-        return obj_acc + dist + word_acc
+        return obj_acc + word_acc
 
     def reset_states(self):
         self.train_metric.reset_states()
@@ -309,13 +308,13 @@ class LossMetricAggregator:
         # text CE loss
         if training:
             word_ce_loss, full_ce_loss = m.text_metric.update_state(true_words, true_lengths, y_pred_rnn)
-            text_ce_loss = word_ce_loss + full_ce_loss
+            text_ce_loss = word_ce_loss + full_ce_loss*0.1
             text_ce_loss = tf.nn.compute_average_loss(text_ce_loss, global_batch_size=self.global_batch_size)
         else:
             text_ce_loss = 0
 
         word_ce_loss_ar, full_ce_loss_ar = m.text_metric_ar.update_state(true_words, true_lengths, y_pred_rnn_ar)
-        text_ce_loss_ar = word_ce_loss_ar + full_ce_loss_ar
+        text_ce_loss_ar = word_ce_loss_ar + full_ce_loss_ar*0.1
         text_ce_loss_ar = tf.nn.compute_average_loss(text_ce_loss_ar, global_batch_size=self.global_batch_size)
 
         total_loss = text_ce_loss + text_ce_loss_ar
