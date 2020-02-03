@@ -82,6 +82,33 @@ class DarknetResidual(tf.keras.layers.Layer):
         x += inputs
         return x
 
+class DarknetRawFeatureUpsampling(tf.keras.layers.Layer):
+    def __init__(self, params, features, want_upsampling=True, **kwargs):
+        super().__init__(**kwargs)
+
+        kernel_size = (1, 1)
+        self.conv_blocks = []
+        for num_features in features:
+            self.conv_blocks.append(DarknetConv(params, num_features, kernel_size=kernel_size, strides=(1, 1), padding='SAME'))
+
+            if kernel_size == (1 ,1):
+                kernel_size = (3, 3)
+            else:
+                kernel_size = (1, 1)
+
+        self.upsample = False
+        if want_upsampling:
+            self.upsample = DarknetUpsampling(params, features[-1])
+
+    def call(self, x, training):
+        for conv in self.conv_blocks:
+            x = conv(x, training)
+
+        if self.upsample:
+            x = self.upsample(x, training)
+        return x
+
+
 class DarknetBody(tf.keras.layers.Layer):
     def __init__(self, params, **kwargs):
         super(DarknetBody, self).__init__(**kwargs)
@@ -127,9 +154,10 @@ class DarknetBody(tf.keras.layers.Layer):
         self.l5c = DarknetResidual(params, [512, 1024], name="l5c")
         self.l5d = DarknetResidual(params, [512, 1024], name="l5d")
         
-        self.raw1_upsample = DarknetUpsampling(params, 256)
-        self.raw2_upsample = DarknetUpsampling(params, 256)
-        self.raw3_upsample = DarknetUpsampling(params, 512)
+        self.raw0_upsample = DarknetRawFeatureUpsampling(params, [128, 256, 128], want_upsampling=False)
+        self.raw1_upsample = DarknetRawFeatureUpsampling(params, [128, 256, 128])
+        self.raw2_upsample = DarknetRawFeatureUpsampling(params, [256, 512, 256])
+        self.raw3_upsample = DarknetRawFeatureUpsampling(params, [512, 1024, 512])
 
     def call(self, inputs, training):
         raw = []
@@ -188,6 +216,8 @@ class DarknetBody(tf.keras.layers.Layer):
 
         x = self.raw1_upsample(x, training=training)
         x = tf.concat([raw[0], x], -1)
+
+        x = self.raw0_upsample(x, training=training)
 
         return outputs, x
 
