@@ -166,23 +166,27 @@ class FeatureExtractor(tf.keras.layers.Layer):
         self.blocks.append(GatedBlockPool(params, 64))
 
         self.blocks.append(GatedBlockResidual(params, [32, 64]))
+        self.blocks.append(GatedBlockResidual(params, [32, 64]))
         self.blocks.append(GatedBlockPool(params, 128))
 
+        self.blocks.append(GatedBlockResidual(params, [64, 128]))
         self.blocks.append(GatedBlockResidual(params, [64, 128], name='raw0'))
         self.blocks.append(GatedBlockPool(params, 256))
 
+        self.blocks.append(GatedBlockResidual(params, [128, 256]))
         self.blocks.append(GatedBlockResidual(params, [128, 256], name='output1_raw1'))
         self.blocks.append(GatedBlockPool(params, 512))
 
+        self.blocks.append(GatedBlockResidual(params, [256, 512]))
         self.blocks.append(GatedBlockResidual(params, [256, 512], name='output2_raw2'))
         self.blocks.append(GatedBlockPool(params, 1024))
 
         self.blocks.append(GatedBlockResidual(params, [512, 1024], name='output3_raw3'))
 
-        self.raw0_upsample = GatedBlockConvUpsampling(params, [128] , want_upsampling=False)
-        self.raw1_upsample = GatedBlockConvUpsampling(params, [128])
-        self.raw2_upsample = GatedBlockConvUpsampling(params, [256])
-        self.raw3_upsample = GatedBlockConvUpsampling(params, [512])
+        self.raw0_upsample = GatedBlockConvUpsampling(params, [128, 256] , want_upsampling=False)
+        self.raw1_upsample = GatedBlockConvUpsampling(params, [128, 256])
+        self.raw2_upsample = GatedBlockConvUpsampling(params, [256, 512])
+        self.raw3_upsample = GatedBlockConvUpsampling(params, [256, 512])
 
     def call(self, x, training):
         outputs = []
@@ -194,9 +198,6 @@ class FeatureExtractor(tf.keras.layers.Layer):
             if 'raw' in block.name:
                 raw.append(x)
 
-            logger.info('x: {}: {}'.format(block.name, x.shape))
-
-        logger.info('raw3: {}'.format(raw[3].shape))
         x = self.raw3_upsample(raw[3], training=training)
         x = tf.concat([raw[2], x], -1)
 
