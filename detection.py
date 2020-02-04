@@ -40,6 +40,8 @@ parser.add_argument('--min_eval_metric', default=0.2, type=float, help='Minimal 
 parser.add_argument('--epochs_lr_update', default=10, type=int, help='Maximum number of epochs without improvement used to reset or decrease learning rate')
 parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16 training/inference')
 parser.add_argument('--dataset_type', type=str, choices=['tfrecords'], default='tfrecords', help='Dataset type')
+parser.add_argument('--skip_tfrecrods_after_epochs', default=10, type=float, help='Drop tfrecords from --train_tfrecord_dir_skip after this many epochs')
+parser.add_argument('--train_tfrecord_dir_skip', type=str, action='append', help='Directory containing training TFRecords, which will be dropped after --skip_tfrecrods_after_epochs epochs')
 parser.add_argument('--train_tfrecord_dir', type=str, required=True, action='append', help='Directory containing training TFRecords')
 parser.add_argument('--eval_tfrecord_dir', type=str, required=True, action='append', help='Directory containing evaluation TFRecords')
 parser.add_argument('--image_size', type=int, required=True, help='Use this image size, if 0 - use default')
@@ -240,6 +242,7 @@ def train():
 
     if FLAGS.dataset_type == 'tfrecords':
         train_objdet_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir, is_training=True)
+        train_objdet_dataset_with_skip = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir + FLAGS.train_tfrecord_dir_skip, is_training=True)
         eval_objdet_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, is_training=False)
 
     if FLAGS.save_examples > 0:
@@ -446,7 +449,11 @@ def train():
 
         metric.reset_states()
 
-        train_steps = run_epoch('train', train_objdet_dataset, train_step, steps_per_train_epoch, epoch == FLAGS.epoch)
+        if epoch < FLAGS.skip_tfrecrods_after_epochs:
+            train_steps = run_epoch('train', train_objdet_dataset_with_skip, train_step, steps_per_train_epoch, epoch == FLAGS.epoch)
+        else:
+            train_steps = run_epoch('train', train_objdet_dataset, train_step, steps_per_train_epoch, epoch == FLAGS.epoch)
+
         eval_steps = run_epoch('eval', eval_objdet_dataset, eval_step, steps_per_eval_epoch, False)
 
         if hvd.rank() != 0:
