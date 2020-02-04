@@ -95,7 +95,6 @@ class AttentionBlock(tf.keras.layers.Layer):
         x = self.dropout(x, training=training)
         x = self.mha(x, state, training)
         attention_out = x + features
-        return attention_out
 
         x = self.dense_norm(x, training=training)
         x = self.dense_dropout(x, training=training)
