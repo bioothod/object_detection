@@ -1,6 +1,8 @@
+import logging
+
 import tensorflow as tf
 
-import darknet
+logger = logging.getLogger('detection')
 
 class TextConv(tf.keras.layers.Layer):
     def __init__(self, params, num_features, kernel_size=(3, 3), strides=(1, 1), padding='SAME', **kwargs):
@@ -69,60 +71,122 @@ class GatedTextConv(tf.keras.layers.Layer):
         return x
 
 class GatedBlock(tf.keras.layers.Layer):
-    def __init__(self, params, num_features, kernel_size, strides, dropout_rate=0, upsampling=None, **kwargs):
+    def __init__(self, params, num_features, kernel_size=(3, 3), strides=(1, 1), padding='SAME', **kwargs):
         super().__init__(**kwargs)
 
-        self.conv = TextConv(params, num_features, kernel_size=kernel_size, strides=strides)
-        self.gate = GatedTextConv(params, num_features, kernel_size=3, strides=1)
-
-        self.dropout = None
-        if dropout_rate and dropout_rate > 0:
-            self.dropout = tf.keras.layers.Dropout(params.spatial_dropout)
-
-        self.upsampling = None
-        if upsampling and upsampling != 0 and upsampling != (0, 0):
-            self.upsampling = tf.keras.layers.UpSampling2D(upsampling)
+        self.conv = TextConv(params, num_features, kernel_size=kernel_size, strides=strides, padding=padding)
+        self.gate = GatedTextConv(params, num_features, kernel_size=kernel_size, strides=strides, padding=padding)
 
     def call(self, inputs, training):
         x = self.conv(inputs, training=training)
         x = self.gate(x)
-        if self.dropout:
-            x = self.dropout(x, training=training)
-
-        if self.upsampling:
-            x = self.upsampling(x)
-
         return x
 
+class GatedBlockResidual(tf.keras.layers.Layer):
+    def __init__(self, params, num_features, **kwargs):
+        super().__init__(**kwargs)
+
+        self.conv0 = GatedBlock(params, num_features[0], kernel_size=(1, 1), strides=(1, 1), padding='SAME')
+        self.conv1 = GatedBlock(params, num_features[1], kernel_size=(3, 3), strides=(1, 1), padding='SAME')
+
+    def call(self, inputs, training):
+        x = self.conv0(inputs, training)
+        x = self.conv1(x, training)
+
+        x += inputs
+        return x
+
+class GatedBlockPool(tf.keras.layers.Layer):
+    def __init__(self, params, num_features, **kwargs):
+        super().__init__(**kwargs)
+
+        self.pad = tf.keras.layers.ZeroPadding2D(((1, 0), (1, 0)))
+
+        self.conv = TextConv(params,
+                        num_features,
+                        kernel_size=(3, 3),
+                        strides=(2, 2),
+                        padding='VALID')
+
+        self.dropout = tf.keras.layers.Dropout(rate=params.spatial_dropout)
+
+    def call(self, inputs, training):
+        x = self.pad(inputs)
+        x = self.conv(x, training)
+        x = self.dropout(x, training)
+        return x
+
+class GatedBlockUpsampling(tf.keras.layers.Layer):
+    def __init__(self, params, num_features, **kwargs):
+        super().__init__(**kwargs)
+
+        self.conv = GatedBlock(params, num_features, kernel_size=(1, 1), strides=(1, 1), padding='SAME')
+        self.upsampling = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
+
+    def call(self, inputs, training):
+        x = self.conv(inputs, training)
+        x = self.upsampling(x)
+        return x
+
+class GatedBlockConvUpsampling(tf.keras.layers.Layer):
+    def __init__(self, params, features, want_upsampling=True, **kwargs):
+        super().__init__(**kwargs)
+
+        kernel_size = (1, 1)
+        self.conv_blocks = []
+        for num_features in features:
+            self.conv_blocks.append(GatedBlock(params, num_features, kernel_size=kernel_size, strides=(1, 1), padding='SAME'))
+
+            if kernel_size == (1 ,1):
+                kernel_size = (3, 3)
+            else:
+                kernel_size = (1, 1)
+
+        self.upsample = False
+        if want_upsampling:
+            self.upsample = GatedBlockUpsampling(params, features[-1])
+
+    def call(self, x, training):
+        for conv in self.conv_blocks:
+            x = conv(x, training)
+
+        if self.upsample:
+            x = self.upsample(x, training)
+        return x
 
 class FeatureExtractor(tf.keras.layers.Layer):
     def __init__(self, params, **kwargs):
         super(FeatureExtractor, self).__init__(self, **kwargs)
 
-        num_features = 16
+        num_features = 32
 
         self.blocks = []
 
-        self.blocks.append(GatedBlock(params, num_features, kernel_size=(3, 3), strides=(1, 1), dropout_rate=0))
-        self.blocks.append(GatedBlock(params, num_features*2, kernel_size=(3, 3), strides=(1, 1), dropout_rate=0))
-        self.blocks.append(GatedBlock(params, num_features*4, kernel_size=(3, 3), strides=(1, 1), dropout_rate=0))
-        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2)))
-        self.blocks.append(GatedBlock(params, num_features*8, kernel_size=(3, 3), strides=(1, 1), dropout_rate=params.spatial_dropout))
-        self.blocks.append(GatedBlock(params, num_features*8, kernel_size=(3, 3), strides=(1, 1), dropout_rate=params.spatial_dropout))
-        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2)))
-        self.blocks.append(GatedBlock(params, num_features*16, kernel_size=(3, 3), strides=(1, 1), dropout_rate=params.spatial_dropout))
-        self.blocks.append(GatedBlock(params, num_features*16, kernel_size=(1, 1), strides=(1, 1), dropout_rate=params.spatial_dropout, name='raw0'))
-        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2), name='output2'))
-        self.blocks.append(GatedBlock(params, num_features*32, kernel_size=(3, 3), strides=(1, 1), dropout_rate=params.spatial_dropout))
-        self.blocks.append(GatedBlock(params, num_features*32, kernel_size=(1, 1), strides=(1, 1), dropout_rate=params.spatial_dropout, name='raw1'))
-        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2), name='output4'))
-        self.blocks.append(GatedBlock(params, num_features*32, kernel_size=(3, 3), strides=(1, 1), dropout_rate=params.spatial_dropout))
-        self.blocks.append(GatedBlock(params, num_features*32, kernel_size=(1, 1), strides=(1, 1), dropout_rate=params.spatial_dropout, name='raw2'))
-        self.blocks.append(tf.keras.layers.MaxPooling2D((2, 2), name='output4'))
+        self.blocks.append(GatedBlock(params, 32))
+        self.blocks.append(GatedBlockPool(params, 64))
 
-        self.raw1_upsample = darknet.DarknetUpsampling(params, 256)
-        self.raw2_upsample = darknet.DarknetUpsampling(params, 256)
-        #self.raw3_upsample = darknet.DarknetUpsampling(params, 512)
+        self.blocks.append(GatedBlockResidual(params, [32, 64]))
+        self.blocks.append(GatedBlockResidual(params, [32, 64]))
+        self.blocks.append(GatedBlockPool(params, 128))
+
+        self.blocks.append(GatedBlockResidual(params, [64, 128]))
+        self.blocks.append(GatedBlockResidual(params, [64, 128], name='raw0'))
+        self.blocks.append(GatedBlockPool(params, 256))
+
+        self.blocks.append(GatedBlockResidual(params, [128, 256]))
+        self.blocks.append(GatedBlockResidual(params, [128, 256], name='output1_raw1'))
+        self.blocks.append(GatedBlockPool(params, 512))
+
+        self.blocks.append(GatedBlockResidual(params, [256, 512]))
+        self.blocks.append(GatedBlockResidual(params, [256, 512], name='output2_raw2'))
+        self.blocks.append(GatedBlockPool(params, 1024))
+
+        self.blocks.append(GatedBlockResidual(params, [512, 1024], name='output3_raw3'))
+
+        self.raw0_upsample = GatedBlockConvUpsampling(params, [128, 256] , want_upsampling=False)
+        self.raw1_upsample = GatedBlockConvUpsampling(params, [128, 256])
+        self.raw2_upsample = GatedBlockConvUpsampling(params, [256, 512])
+        self.raw3_upsample = GatedBlockConvUpsampling(params, [256, 512])
 
     def call(self, x, training):
         outputs = []
@@ -134,15 +198,17 @@ class FeatureExtractor(tf.keras.layers.Layer):
             if 'raw' in block.name:
                 raw.append(x)
 
-        #x = self.raw3_upsample(raw[3], training=training)
-        #x = tf.concat([raw[2], x], -1)
+        x = self.raw3_upsample(raw[3], training=training)
+        x = tf.concat([raw[2], x], -1)
 
-        x = raw[2]
+        #x = raw[2]
 
         x = self.raw2_upsample(x, training=training)
         x = tf.concat([raw[1], x], -1)
 
         x = self.raw1_upsample(x, training=training)
         x = tf.concat([raw[0], x], -1)
+
+        x = self.raw0_upsample(x, training=training)
 
         return outputs, x

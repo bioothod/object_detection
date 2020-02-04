@@ -318,10 +318,10 @@ def train():
         obj_scale = 1.
         text_scale = 1.
         num_warmup_epochs = 4
-        if epoch_var < num_warmup_epochs:
-            text_scale = 0.
-        elif epoch_var < num_warmup_epochs*2:
-            obj_scale = (epoch_var + 1) / (num_warmup_epochs + 1)
+        #if epoch_var < num_warmup_epochs:
+        #    text_scale = 0.
+        #elif epoch_var < num_warmup_epochs*2:
+        #    obj_scale = (epoch_var + 1) / (num_warmup_epochs + 1)
         total_loss = objdet_loss*obj_scale + text_loss*text_scale
 
         #reg_loss = tf.math.add_n(model.losses)
