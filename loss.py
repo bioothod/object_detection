@@ -198,7 +198,7 @@ class LossMetricAggregator:
         obj_acc = m.word_obj_accuracy02.result()
         word_acc, full_acc = m.text_metric_ar.result(want_acc=True)
 
-        return obj_acc + word_acc
+        return obj_acc*0.3 + word_acc
 
     def reset_states(self):
         self.train_metric.reset_states()
