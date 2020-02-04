@@ -158,8 +158,6 @@ class FeatureExtractor(tf.keras.layers.Layer):
     def __init__(self, params, **kwargs):
         super(FeatureExtractor, self).__init__(self, **kwargs)
 
-        num_features = 32
-
         self.blocks = []
 
         self.blocks.append(GatedBlock(params, 32))
@@ -170,23 +168,31 @@ class FeatureExtractor(tf.keras.layers.Layer):
         self.blocks.append(GatedBlockPool(params, 128))
 
         self.blocks.append(GatedBlockResidual(params, [64, 128]))
+        self.blocks.append(GatedBlockResidual(params, [64, 128]))
         self.blocks.append(GatedBlockResidual(params, [64, 128], name='raw0'))
         self.blocks.append(GatedBlockPool(params, 256))
 
         self.blocks.append(GatedBlockResidual(params, [128, 256]))
-        self.blocks.append(GatedBlockResidual(params, [128, 256], name='output1_raw1'))
+        self.blocks.append(GatedBlockResidual(params, [128, 256]))
+        self.blocks.append(GatedBlockResidual(params, [128, 256]))
+        self.blocks.append(GatedBlockResidual(params, [128, 256], name='output0_raw1'))
         self.blocks.append(GatedBlockPool(params, 512))
 
         self.blocks.append(GatedBlockResidual(params, [256, 512]))
-        self.blocks.append(GatedBlockResidual(params, [256, 512], name='output2_raw2'))
+        self.blocks.append(GatedBlockResidual(params, [256, 512]))
+        self.blocks.append(GatedBlockResidual(params, [256, 512]))
+        self.blocks.append(GatedBlockResidual(params, [256, 512]))
+        self.blocks.append(GatedBlockResidual(params, [256, 512], name='output1_raw2'))
         self.blocks.append(GatedBlockPool(params, 1024))
 
-        self.blocks.append(GatedBlockResidual(params, [512, 1024], name='output3_raw3'))
+        self.blocks.append(GatedBlockResidual(params, [512, 1024]))
+        self.blocks.append(GatedBlockResidual(params, [512, 1024]))
+        self.blocks.append(GatedBlockResidual(params, [512, 1024], name='output2'))
 
-        self.raw0_upsample = GatedBlockConvUpsampling(params, [128, 256] , want_upsampling=False)
-        self.raw1_upsample = GatedBlockConvUpsampling(params, [128, 256])
-        self.raw2_upsample = GatedBlockConvUpsampling(params, [256, 512])
-        self.raw3_upsample = GatedBlockConvUpsampling(params, [256, 512])
+        self.raw0_upsample = GatedBlockConvUpsampling(params, [256, 512] , want_upsampling=False)
+        self.raw1_upsample = GatedBlockConvUpsampling(params, [256, 512])
+        self.raw2_upsample = GatedBlockConvUpsampling(params, [512, 1024])
+        #self.raw3_upsample = GatedBlockConvUpsampling(params, [256, 512])
 
     def call(self, x, training):
         outputs = []
@@ -198,10 +204,10 @@ class FeatureExtractor(tf.keras.layers.Layer):
             if 'raw' in block.name:
                 raw.append(x)
 
-        x = self.raw3_upsample(raw[3], training=training)
-        x = tf.concat([raw[2], x], -1)
+        #x = self.raw3_upsample(raw[3], training=training)
+        #x = tf.concat([raw[2], x], -1)
 
-        #x = raw[2]
+        x = raw[2]
 
         x = self.raw2_upsample(x, training=training)
         x = tf.concat([raw[1], x], -1)
