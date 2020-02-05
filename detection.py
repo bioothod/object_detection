@@ -40,7 +40,7 @@ parser.add_argument('--min_eval_metric', default=0.2, type=float, help='Minimal 
 parser.add_argument('--epochs_lr_update', default=10, type=int, help='Maximum number of epochs without improvement used to reset or decrease learning rate')
 parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16 training/inference')
 parser.add_argument('--dataset_type', type=str, choices=['tfrecords'], default='tfrecords', help='Dataset type')
-parser.add_argument('--skip_tfrecrods_after_epochs', default=10, type=float, help='Drop tfrecords from --train_tfrecord_dir_skip after this many epochs')
+parser.add_argument('--skip_tfrecrods_after_epochs', default=20, type=float, help='Drop tfrecords from --train_tfrecord_dir_skip after this many epochs')
 parser.add_argument('--train_tfrecord_dir_skip', type=str, action='append', help='Directory containing training TFRecords, which will be dropped after --skip_tfrecrods_after_epochs epochs')
 parser.add_argument('--train_tfrecord_dir', type=str, required=True, action='append', help='Directory containing training TFRecords')
 parser.add_argument('--eval_tfrecord_dir', type=str, required=True, action='append', help='Directory containing evaluation TFRecords')
@@ -195,6 +195,7 @@ def train():
         dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
 
         model(dummy_input, training=True)
+        #model.body.summary(print_fn=lambda line: logger.info(line))
 
         logger.info('image_size: {}, model output sizes: {}'.format(image_size, [s.numpy() for s in model.output_sizes]))
 
@@ -255,7 +256,6 @@ def train():
     logger.info('steps_per_train_epoch: {}, steps_per_eval_epoch: {}, dictionary_size: {}'.format(
         steps_per_train_epoch, steps_per_eval_epoch, dictionary_size))
 
-    #opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
     opt = tfa.optimizers.RectifiedAdam(lr=learning_rate, min_lr=FLAGS.min_learning_rate)
     opt = tfa.optimizers.Lookahead(opt, sync_period=6, slow_step_size=0.5)
     if FLAGS.use_fp16:
