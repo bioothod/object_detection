@@ -10,6 +10,7 @@ import darknet
 import encoder_efficientnet as efn_encoder
 import feature_gated_conv as gated_conv
 import preprocess
+import stn
 
 logger = logging.getLogger('detection')
 
@@ -188,48 +189,6 @@ class Encoder(tf.keras.layers.Layer):
 
         self.output_sizes = None
 
-    def rnn_inference1(self, features, word_obj_mask, poly, true_words, true_lengths, anchors_all, training):
-        poly = tf.boolean_mask(poly, word_obj_mask)
-        true_words = tf.boolean_mask(true_words, word_obj_mask)
-        true_lengths = tf.boolean_mask(true_lengths, word_obj_mask)
-
-        best_anchors = tf.boolean_mask(anchors_all[..., :2], word_obj_mask)
-        best_anchors = tf.expand_dims(best_anchors, 1)
-        best_anchors = tf.tile(best_anchors, [1, 4, 1])
-        poly = poly + best_anchors
-
-        feature_size = tf.cast(tf.shape(features)[1], tf.float32)
-        poly = poly * feature_size / self.image_size
-
-        x = poly[..., 0]
-        y = poly[..., 1]
-
-        xmin = tf.math.reduce_min(x, axis=1, keepdims=True)
-        ymin = tf.math.reduce_min(y, axis=1, keepdims=True)
-        xmax = xmin + 1
-        ymax = ymin + 1
-
-        bboxes = tf.concat([ymin, xmin, ymax, xmax], 1)
-        bboxes /= feature_size
-
-        batch_size = tf.shape(features)[0]
-        feature_size = tf.shape(word_obj_mask)[1]
-        batch_index = tf.range(batch_size, dtype=tf.int32)
-        batch_index = tf.expand_dims(batch_index, 1)
-        batch_index = tf.tile(batch_index, [1, feature_size])
-        box_index = tf.boolean_mask(batch_index, word_obj_mask)
-
-        selected_features = tf.image.crop_and_resize(features, bboxes, box_index, [1, 1])
-        states = self.state_conv(selected_features, training)
-        states = tf.squeeze(states, [1, 2])
-        other_states = tf.zeros_like(states)
-
-        initial_states = [states, other_states]
-
-        tiled_features = tf.gather(features, box_index, axis=0)
-
-        return self.rnn_layer(tiled_features, true_words, true_lengths, initial_states, training)
-
     def rnn_inference(self, features, word_obj_mask, poly, true_words, true_lengths, anchors_all, training):
         poly = tf.boolean_mask(poly, word_obj_mask)
         true_words = tf.boolean_mask(true_words, word_obj_mask)
@@ -242,11 +201,17 @@ class Encoder(tf.keras.layers.Layer):
 
         feature_size = tf.cast(tf.shape(features)[1], tf.float32)
         poly = poly * feature_size / self.image_size
-        crop_size = 16
-        crop_size = [crop_size, crop_size]
+        crop_size = 32
 
-        bboxes = anchors_gen.polygon2bbox(poly, want_yx=True)
-        bboxes /= feature_size
+        x = poly[..., 0]
+        y = poly[..., 1]
+        lx = (x[:, 0] + x[:, 3]) / 2
+        ly = (y[:, 0] + y[:, 3]) / 2
+
+        rx = (x[:, 1] + x[:, 2]) / 2
+        ry = (y[:, 1] + y[:, 2]) / 2
+
+        angles = tf.math.atan2(ry - ly, rx - lx)
 
         batch_size = tf.shape(features)[0]
         feature_size = tf.shape(word_obj_mask)[1]
@@ -255,7 +220,47 @@ class Encoder(tf.keras.layers.Layer):
         batch_index = tf.tile(batch_index, [1, feature_size])
         box_index = tf.boolean_mask(batch_index, word_obj_mask)
 
-        selected_features = tf.image.crop_and_resize(features, bboxes, box_index, crop_size)
+        stacked_features = tf.gather(features, box_index)
+
+        x0 = x[:, 0]
+        y0 = y[:, 0]
+        x1 = x[:, 1]
+        y1 = y[:, 1]
+        x2 = x[:, 2]
+        y2 = y[:, 2]
+        x3 = x[:, 3]
+        y3 = y[:, 3]
+
+        h0 = (x0 - x3)**2 + (y0 - y3)**2
+        h1 = (x1 - x2)**2 + (y1 - y2)**2
+        h = tf.math.sqrt(tf.maximum(h0, h1))
+
+        w0 = (x0 - x1)**2 + (y0 - y1)**2
+        w1 = (x2 - x3)**2 + (y2 - y3)**2
+        w = tf.math.sqrt(tf.maximum(w0, w1))
+
+        sx = w / crop_size
+        sy = h / crop_size
+
+        z = tf.zeros_like(x0)
+        o = tf.ones_like(x0)
+
+        def tm(t):
+            t = tf.convert_to_tensor(t)
+            t = tf.transpose(t, [2, 0, 1])
+            return t
+
+        def const(x):
+            return o * x
+
+        t0 = tm([[o, z, x0], [z, o, y0], [z, z, o]])
+        t1 = tm([[tf.cos(angles), -tf.sin(angles), z], [tf.sin(angles), tf.cos(angles), z], [z, z, o]])
+        t2 = tm([[sx, z, z], [z, sy, z], [z, z, o]])
+
+        transforms = t0 @ t1 @ t2
+        transforms = transforms[:, :2, :]
+
+        selected_features = stn.spatial_transformer_network(stacked_features, transforms, out_dims=[crop_size, crop_size])
 
         batch_size = tf.shape(selected_features)[0]
         states_h = tf.zeros((batch_size, self.num_rnn_units), dtype=selected_features.dtype)
