@@ -161,6 +161,7 @@ class FeatureExtractor(tf.keras.layers.Layer):
         self.blocks = []
 
         self.blocks.append(GatedBlock(params, 32))
+        self.blocks.append(GatedBlock(params, 64))
         self.blocks.append(GatedBlockPool(params, 64))
 
         self.blocks.append(GatedBlockResidual(params, [32, 64]))
@@ -169,29 +170,25 @@ class FeatureExtractor(tf.keras.layers.Layer):
 
         self.blocks.append(GatedBlockResidual(params, [64, 128]))
         self.blocks.append(GatedBlockResidual(params, [64, 128]))
+        self.blocks.append(GatedBlockResidual(params, [64, 128]))
         self.blocks.append(GatedBlockResidual(params, [64, 128], name='raw0'))
-        self.blocks.append(GatedBlockPool(params, 256))
+        self.blocks.append(GatedBlockPool(params, 256, name='output0'))
 
         self.blocks.append(GatedBlockResidual(params, [128, 256]))
         self.blocks.append(GatedBlockResidual(params, [128, 256]))
         self.blocks.append(GatedBlockResidual(params, [128, 256]))
-        self.blocks.append(GatedBlockResidual(params, [128, 256], name='output0_raw1'))
-        self.blocks.append(GatedBlockPool(params, 512))
+        self.blocks.append(GatedBlockResidual(params, [128, 256]))
+        self.blocks.append(GatedBlockResidual(params, [128, 256]))
+        self.blocks.append(GatedBlockResidual(params, [128, 256], name='raw1'))
+        self.blocks.append(GatedBlockPool(params, 512, name='output1'))
 
         self.blocks.append(GatedBlockResidual(params, [256, 512]))
-        self.blocks.append(GatedBlockResidual(params, [256, 512]))
-        self.blocks.append(GatedBlockResidual(params, [256, 512]))
-        self.blocks.append(GatedBlockResidual(params, [256, 512]))
-        self.blocks.append(GatedBlockResidual(params, [256, 512], name='output1_raw2'))
-        self.blocks.append(GatedBlockPool(params, 1024))
+        self.blocks.append(GatedBlockResidual(params, [256, 512], name='raw2'))
+        self.blocks.append(GatedBlockPool(params, 1024, name='output2'))
 
-        self.blocks.append(GatedBlockResidual(params, [512, 1024]))
-        self.blocks.append(GatedBlockResidual(params, [512, 1024]))
-        self.blocks.append(GatedBlockResidual(params, [512, 1024], name='output2'))
-
-        self.raw0_upsample = GatedBlockConvUpsampling(params, [256, 512] , want_upsampling=False)
-        self.raw1_upsample = GatedBlockConvUpsampling(params, [256, 512])
-        self.raw2_upsample = GatedBlockConvUpsampling(params, [512, 1024])
+        self.raw0_upsample = GatedBlockConvUpsampling(params, [128] , want_upsampling=False)
+        self.raw1_upsample = GatedBlockConvUpsampling(params, [256])
+        self.raw2_upsample = GatedBlockConvUpsampling(params, [512])
         #self.raw3_upsample = GatedBlockConvUpsampling(params, [256, 512])
 
     def call(self, x, training):
