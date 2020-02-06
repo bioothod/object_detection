@@ -40,7 +40,7 @@ parser.add_argument('--min_eval_metric', default=0.2, type=float, help='Minimal 
 parser.add_argument('--epochs_lr_update', default=10, type=int, help='Maximum number of epochs without improvement used to reset or decrease learning rate')
 parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16 training/inference')
 parser.add_argument('--dataset_type', type=str, choices=['tfrecords'], default='tfrecords', help='Dataset type')
-parser.add_argument('--skip_tfrecrods_after_epochs', default=20, type=float, help='Drop tfrecords from --train_tfrecord_dir_skip after this many epochs')
+parser.add_argument('--skip_tfrecrods_after_epochs', default=10, type=float, help='Drop tfrecords from --train_tfrecord_dir_skip after this many epochs')
 parser.add_argument('--train_tfrecord_dir_skip', type=str, action='append', help='Directory containing training TFRecords, which will be dropped after --skip_tfrecrods_after_epochs epochs')
 parser.add_argument('--train_tfrecord_dir', type=str, required=True, action='append', help='Directory containing training TFRecords')
 parser.add_argument('--eval_tfrecord_dir', type=str, required=True, action='append', help='Directory containing evaluation TFRecords')
@@ -309,7 +309,7 @@ def train():
 
         logits, rnn_features = model(images, is_training)
 
-        rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(rnn_features, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all_batched, is_training)
+        rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(rnn_features, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all, is_training)
 
         text_loss = metric.text_recognition_loss(true_values, rnn_outputs, rnn_outputs_ar, is_training)
 
