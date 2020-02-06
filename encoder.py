@@ -189,83 +189,96 @@ class Encoder(tf.keras.layers.Layer):
 
         self.output_sizes = None
 
-    def rnn_inference(self, features, word_obj_mask, poly, true_words, true_lengths, anchors_all, training):
-        poly = tf.boolean_mask(poly, word_obj_mask)
-        true_words = tf.boolean_mask(true_words, word_obj_mask)
-        true_lengths = tf.boolean_mask(true_lengths, word_obj_mask)
+    def rnn_inference(self, features_full, word_obj_mask_full, poly_full, true_words_full, true_lengths_full, anchors_all, training):
+        with tf.device('/cpu:0'):
+            crop_size = 24
+            logger.info('RNN features: {}, crop_size: {}'.format(features_full.shape, crop_size))
+            feature_size = tf.cast(tf.shape(features_full)[1], tf.float32)
 
-        best_anchors = tf.boolean_mask(anchors_all[..., :2], word_obj_mask)
-        best_anchors = tf.expand_dims(best_anchors, 1)
-        best_anchors = tf.tile(best_anchors, [1, 4, 1])
-        poly = poly + best_anchors
+            batch_size = tf.shape(features_full)[0]
+            num_crops_total = tf.math.count_nonzero(word_obj_mask_full, dtype=tf.int32)
 
-        feature_size = tf.cast(tf.shape(features)[1], tf.float32)
-        poly = poly * feature_size / self.image_size
-        crop_size = 32
+            selected_features = tf.TensorArray(tf.float32, size=num_crops_total, element_shape=tf.TensorShape([None, crop_size, crop_size, features_full.shape[3]]))
+            written = 0
 
-        x = poly[..., 0]
-        y = poly[..., 1]
-        lx = (x[:, 0] + x[:, 3]) / 2
-        ly = (y[:, 0] + y[:, 3]) / 2
+            for idx in tf.range(batch_size):
+                poly = poly_full[idx, ...]
+                word_obj_mask = word_obj_mask_full[idx, ...]
+                features = features_full[idx, ...]
 
-        rx = (x[:, 1] + x[:, 2]) / 2
-        ry = (y[:, 1] + y[:, 2]) / 2
+                poly = tf.boolean_mask(poly, word_obj_mask)
 
-        angles = tf.math.atan2(ry - ly, rx - lx)
+                best_anchors = tf.boolean_mask(anchors_all[..., :2], word_obj_mask)
+                best_anchors = tf.expand_dims(best_anchors, 1)
+                best_anchors = tf.tile(best_anchors, [1, 4, 1])
+                poly = poly + best_anchors
 
-        batch_size = tf.shape(features)[0]
-        feature_size = tf.shape(word_obj_mask)[1]
-        batch_index = tf.range(batch_size, dtype=tf.int32)
-        batch_index = tf.expand_dims(batch_index, 1)
-        batch_index = tf.tile(batch_index, [1, feature_size])
-        box_index = tf.boolean_mask(batch_index, word_obj_mask)
+                poly = poly * feature_size / self.image_size
 
-        stacked_features = tf.gather(features, box_index)
+                x = poly[..., 0]
+                y = poly[..., 1]
+                lx = (x[:, 0] + x[:, 3]) / 2
+                ly = (y[:, 0] + y[:, 3]) / 2
 
-        x0 = x[:, 0]
-        y0 = y[:, 0]
-        x1 = x[:, 1]
-        y1 = y[:, 1]
-        x2 = x[:, 2]
-        y2 = y[:, 2]
-        x3 = x[:, 3]
-        y3 = y[:, 3]
+                rx = (x[:, 1] + x[:, 2]) / 2
+                ry = (y[:, 1] + y[:, 2]) / 2
 
-        h0 = (x0 - x3)**2 + (y0 - y3)**2
-        h1 = (x1 - x2)**2 + (y1 - y2)**2
-        h = tf.math.sqrt(tf.maximum(h0, h1))
+                angles = tf.math.atan2(ry - ly, rx - lx)
 
-        w0 = (x0 - x1)**2 + (y0 - y1)**2
-        w1 = (x2 - x3)**2 + (y2 - y3)**2
-        w = tf.math.sqrt(tf.maximum(w0, w1))
+                x0 = x[:, 0]
+                y0 = y[:, 0]
+                x1 = x[:, 1]
+                y1 = y[:, 1]
+                x2 = x[:, 2]
+                y2 = y[:, 2]
+                x3 = x[:, 3]
+                y3 = y[:, 3]
 
-        sx = w / crop_size
-        sy = h / crop_size
+                h0 = (x0 - x3)**2 + (y0 - y3)**2
+                h1 = (x1 - x2)**2 + (y1 - y2)**2
+                h = tf.math.sqrt(tf.maximum(h0, h1))
 
-        z = tf.zeros_like(x0)
-        o = tf.ones_like(x0)
+                w0 = (x0 - x1)**2 + (y0 - y1)**2
+                w1 = (x2 - x3)**2 + (y2 - y3)**2
+                w = tf.math.sqrt(tf.maximum(w0, w1))
 
-        def tm(t):
-            t = tf.convert_to_tensor(t)
-            t = tf.transpose(t, [2, 0, 1])
-            return t
+                sx = w / crop_size
+                sy = h / crop_size
 
-        def const(x):
-            return o * x
+                z = tf.zeros_like(x0)
+                o = tf.ones_like(x0)
 
-        t0 = tm([[o, z, x0], [z, o, y0], [z, z, o]])
-        t1 = tm([[tf.cos(angles), -tf.sin(angles), z], [tf.sin(angles), tf.cos(angles), z], [z, z, o]])
-        t2 = tm([[sx, z, z], [z, sy, z], [z, z, o]])
+                def tm(t):
+                    t = tf.convert_to_tensor(t)
+                    t = tf.transpose(t, [2, 0, 1])
+                    return t
 
-        transforms = t0 @ t1 @ t2
-        transforms = transforms[:, :2, :]
+                def const(x):
+                    return o * x
 
-        selected_features = stn.spatial_transformer_network(stacked_features, transforms, out_dims=[crop_size, crop_size])
+                t0 = tm([[o, z, x0], [z, o, y0], [z, z, o]])
+                t1 = tm([[tf.cos(angles), -tf.sin(angles), z], [tf.sin(angles), tf.cos(angles), z], [z, z, o]])
+                t2 = tm([[sx, z, z], [z, sy, z], [z, z, o]])
+
+                transforms = t0 @ t1 @ t2
+                transforms = transforms[:, :2, :]
+
+                features = tf.expand_dims(features, 0)
+                num_crops = tf.shape(transforms)[0]
+                for crop_idx in tf.range(num_crops):
+                    t = transforms[crop_idx, ...]
+                    t = tf.expand_dims(t, 0)
+                    selected_features = selected_features.write(written, stn.spatial_transformer_network(features, t, out_dims=[crop_size, crop_size]))
+
+        selected_features = selected_features.concat()
 
         batch_size = tf.shape(selected_features)[0]
         states_h = tf.zeros((batch_size, self.num_rnn_units), dtype=selected_features.dtype)
         states_c = tf.zeros((batch_size, self.num_rnn_units), dtype=selected_features.dtype)
         states = [states_h, states_c]
+
+        true_words = tf.boolean_mask(true_words_full, word_obj_mask_full)
+        true_lengths = tf.boolean_mask(true_lengths_full, word_obj_mask_full)
 
         return self.rnn_layer(selected_features, true_words, true_lengths, states, training)
 
