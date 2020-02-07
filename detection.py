@@ -45,6 +45,7 @@ parser.add_argument('--train_tfrecord_dir_skip', type=str, action='append', help
 parser.add_argument('--train_tfrecord_dir', type=str, required=True, action='append', help='Directory containing training TFRecords')
 parser.add_argument('--eval_tfrecord_dir', type=str, required=True, action='append', help='Directory containing evaluation TFRecords')
 parser.add_argument('--image_size', type=int, required=True, help='Use this image size, if 0 - use default')
+parser.add_argument('--crop_size', type=int, default=24, help='Use this size for feature crops')
 parser.add_argument('--steps_per_eval_epoch', default=30, type=int, help='Number of steps per evaluation run')
 parser.add_argument('--steps_per_train_epoch', default=200, type=int, help='Number of steps per train run')
 parser.add_argument('--save_examples', type=int, default=0, help='Number of example images to save and exit')
@@ -190,7 +191,7 @@ def train():
     dictionary_size, dict_table, pad_value = anchors_gen.create_lookup_table(FLAGS.dictionary)
 
     image_size = FLAGS.image_size
-    model = encoder.create_model(FLAGS.model_name, image_size, FLAGS.max_sequence_len, dictionary_size, pad_value, dtype)
+    model = encoder.create_model(FLAGS.model_name, image_size, FLAGS.crop_size, FLAGS.max_sequence_len, dictionary_size, pad_value, dtype)
     if model.output_sizes is None:
         dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
 
