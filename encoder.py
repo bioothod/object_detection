@@ -160,6 +160,62 @@ class Head(tf.keras.layers.Layer):
 
         return [out2, out1, out0]
 
+class RNNBatch:
+    def __init__(self, rnn_layer, rnn_batch_size, true_words, true_lengths, training):
+        self.rnn_batch_size = rnn_batch_size
+        self.training = training
+        self.dtype = tf.float32
+
+        self.rnn_layer = rnn_layer
+        max_sequence_len = rnn_layer.max_sequence_len
+        dictionary_size = rnn_layer.dictionary_size
+
+        self.true_words = true_words
+        self.true_lengths = true_lengths
+
+        self.written = 0
+        self.rnn_processed_start = 0
+
+        self.output_written = 0
+
+    def run(self, arrays):
+        selected_features = arrays['selected_features'].concat()
+
+        batch_size = tf.shape(selected_features)[0]
+        states_h = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=self.dtype)
+        states_c = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=self.dtype)
+        states = [states_h, states_c]
+
+        tw = self.true_words[self.rnn_processed_start : self.rnn_processed_start + self.written, ...]
+        tl = self.true_lengths[self.rnn_processed_start : self.rnn_processed_start + self.written, ...]
+
+        out, out_ar = self.rnn_layer(selected_features, tw, tl, states, self.training)
+
+        arrays['outputs'] = arrays['outputs'].write(self.output_written, out)
+        arrays['outputs_ar'] = arrays['outputs'].write(self.output_written, out_ar)
+        self.output_written += 1
+
+        self.rnn_processed_start += self.written
+        self.written = 0
+
+        return arrays
+
+    def feed_crop(self, cropped_features, arrays):
+        arrays['selected_features'] = arrays['selected_features'].write(self.written, cropped_features)
+        self.written += 1
+
+        if self.written == self.rnn_batch_size:
+            arrays = self.run(arrays)
+
+        return arrays
+
+    def return_values(self, arrays):
+        if self.written != 0:
+            arrays = self.run(arrays)
+
+        return arrays['outputs'].concat(), arrays['outputs_ar'].concat()
+
+
 class Encoder(tf.keras.layers.Layer):
     def __init__(self, params, **kwargs):
         super().__init__(**kwargs)
@@ -190,97 +246,101 @@ class Encoder(tf.keras.layers.Layer):
         self.output_sizes = None
 
     def rnn_inference(self, features_full, word_obj_mask_full, poly_full, true_words_full, true_lengths_full, anchors_all, training):
-        with tf.device('/cpu:0'):
-            crop_size = 24
-            logger.info('RNN features: {}, crop_size: {}'.format(features_full.shape, crop_size))
-            feature_size = tf.cast(tf.shape(features_full)[1], tf.float32)
-
-            batch_size = tf.shape(features_full)[0]
-            num_crops_total = tf.math.count_nonzero(word_obj_mask_full, dtype=tf.int32)
-
-            selected_features = tf.TensorArray(tf.float32, size=num_crops_total, element_shape=tf.TensorShape([None, crop_size, crop_size, features_full.shape[3]]))
-            written = 0
-
-            for idx in tf.range(batch_size):
-                poly = poly_full[idx, ...]
-                word_obj_mask = word_obj_mask_full[idx, ...]
-                features = features_full[idx, ...]
-
-                poly = tf.boolean_mask(poly, word_obj_mask)
-
-                best_anchors = tf.boolean_mask(anchors_all[..., :2], word_obj_mask)
-                best_anchors = tf.expand_dims(best_anchors, 1)
-                best_anchors = tf.tile(best_anchors, [1, 4, 1])
-                poly = poly + best_anchors
-
-                poly = poly * feature_size / self.image_size
-
-                x = poly[..., 0]
-                y = poly[..., 1]
-                lx = (x[:, 0] + x[:, 3]) / 2
-                ly = (y[:, 0] + y[:, 3]) / 2
-
-                rx = (x[:, 1] + x[:, 2]) / 2
-                ry = (y[:, 1] + y[:, 2]) / 2
-
-                angles = tf.math.atan2(ry - ly, rx - lx)
-
-                x0 = x[:, 0]
-                y0 = y[:, 0]
-                x1 = x[:, 1]
-                y1 = y[:, 1]
-                x2 = x[:, 2]
-                y2 = y[:, 2]
-                x3 = x[:, 3]
-                y3 = y[:, 3]
-
-                h0 = (x0 - x3)**2 + (y0 - y3)**2
-                h1 = (x1 - x2)**2 + (y1 - y2)**2
-                h = tf.math.sqrt(tf.maximum(h0, h1))
-
-                w0 = (x0 - x1)**2 + (y0 - y1)**2
-                w1 = (x2 - x3)**2 + (y2 - y3)**2
-                w = tf.math.sqrt(tf.maximum(w0, w1))
-
-                sx = w / crop_size
-                sy = h / crop_size
-
-                z = tf.zeros_like(x0)
-                o = tf.ones_like(x0)
-
-                def tm(t):
-                    t = tf.convert_to_tensor(t)
-                    t = tf.transpose(t, [2, 0, 1])
-                    return t
-
-                def const(x):
-                    return o * x
-
-                t0 = tm([[o, z, x0], [z, o, y0], [z, z, o]])
-                t1 = tm([[tf.cos(angles), -tf.sin(angles), z], [tf.sin(angles), tf.cos(angles), z], [z, z, o]])
-                t2 = tm([[sx, z, z], [z, sy, z], [z, z, o]])
-
-                transforms = t0 @ t1 @ t2
-                transforms = transforms[:, :2, :]
-
-                features = tf.expand_dims(features, 0)
-                num_crops = tf.shape(transforms)[0]
-                for crop_idx in tf.range(num_crops):
-                    t = transforms[crop_idx, ...]
-                    t = tf.expand_dims(t, 0)
-                    selected_features = selected_features.write(written, stn.spatial_transformer_network(features, t, out_dims=[crop_size, crop_size]))
-
-        selected_features = selected_features.concat()
-
-        batch_size = tf.shape(selected_features)[0]
-        states_h = tf.zeros((batch_size, self.num_rnn_units), dtype=selected_features.dtype)
-        states_c = tf.zeros((batch_size, self.num_rnn_units), dtype=selected_features.dtype)
-        states = [states_h, states_c]
-
         true_words = tf.boolean_mask(true_words_full, word_obj_mask_full)
         true_lengths = tf.boolean_mask(true_lengths_full, word_obj_mask_full)
 
-        return self.rnn_layer(selected_features, true_words, true_lengths, states, training)
+        crop_size = 32
+        rnn_batch_size = 64
+
+        logger.info('RNN features: {}, crop_size: {}, rnn_batch_size: {}'.format(features_full.shape, crop_size, rnn_batch_size))
+        feature_size = tf.cast(tf.shape(features_full)[1], tf.float32)
+
+        batch_size = tf.shape(features_full)[0]
+
+        dtype = features_full.dtype
+
+        num_crops_total = tf.shape(true_words)[0]
+        rnn_batch = RNNBatch(self.rnn_layer, rnn_batch_size, true_words, true_lengths, training)
+        arrays = {
+            'selected_features': tf.TensorArray(dtype, size=0, dynamic_size=True, element_shape=tf.TensorShape([None, crop_size, crop_size, features_full.shape[3]])),
+            'outputs': tf.TensorArray(dtype, size=0, dynamic_size=True, element_shape=tf.TensorShape([None, self.max_sequence_len, self.dictionary_size])),
+            'outputs_ar': tf.TensorArray(dtype, size=0, dynamic_size=True, element_shape=tf.TensorShape([None, self.max_sequence_len, self.dictionary_size])),
+        }
+
+        for idx in tf.range(batch_size):
+            poly = poly_full[idx, ...]
+            word_obj_mask = word_obj_mask_full[idx, ...]
+            features = features_full[idx, ...]
+
+            poly = tf.boolean_mask(poly, word_obj_mask)
+
+            best_anchors = tf.boolean_mask(anchors_all[..., :2], word_obj_mask)
+            best_anchors = tf.expand_dims(best_anchors, 1)
+            best_anchors = tf.tile(best_anchors, [1, 4, 1])
+            poly = poly + best_anchors
+
+            poly = poly * feature_size / self.image_size
+
+            x = poly[..., 0]
+            y = poly[..., 1]
+            lx = (x[:, 0] + x[:, 3]) / 2
+            ly = (y[:, 0] + y[:, 3]) / 2
+
+            rx = (x[:, 1] + x[:, 2]) / 2
+            ry = (y[:, 1] + y[:, 2]) / 2
+
+            angles = tf.math.atan2(ry - ly, rx - lx)
+
+            x0 = x[:, 0]
+            y0 = y[:, 0]
+            x1 = x[:, 1]
+            y1 = y[:, 1]
+            x2 = x[:, 2]
+            y2 = y[:, 2]
+            x3 = x[:, 3]
+            y3 = y[:, 3]
+
+            h0 = (x0 - x3)**2 + (y0 - y3)**2
+            h1 = (x1 - x2)**2 + (y1 - y2)**2
+            h = tf.math.sqrt(tf.maximum(h0, h1))
+
+            w0 = (x0 - x1)**2 + (y0 - y1)**2
+            w1 = (x2 - x3)**2 + (y2 - y3)**2
+            w = tf.math.sqrt(tf.maximum(w0, w1))
+
+            sx = w / crop_size
+            sy = h / crop_size
+
+            z = tf.zeros_like(x0)
+            o = tf.ones_like(x0)
+
+            def tm(t):
+                t = tf.convert_to_tensor(t)
+                t = tf.transpose(t, [2, 0, 1])
+                return t
+
+            def const(x):
+                return o * x
+
+            t0 = tm([[o, z, x0], [z, o, y0], [z, z, o]])
+            t1 = tm([[tf.cos(angles), -tf.sin(angles), z], [tf.sin(angles), tf.cos(angles), z], [z, z, o]])
+            t2 = tm([[sx, z, z], [z, sy, z], [z, z, o]])
+
+            transforms = t0 @ t1 @ t2
+            transforms = transforms[:, :2, :]
+
+            features = tf.expand_dims(features, 0)
+            num_crops = tf.shape(transforms)[0]
+            for crop_idx in tf.range(num_crops):
+                t = transforms[crop_idx, ...]
+                t = tf.expand_dims(t, 0)
+
+                cropped_features = stn.spatial_transformer_network(features, t, out_dims=[crop_size, crop_size])
+                arrays = rnn_batch.feed_crop(cropped_features, arrays)
+                if rnn_batch.written == 0:
+                    arrays['selected_features'] = tf.TensorArray(dtype, size=0, dynamic_size=True, element_shape=tf.TensorShape([None, crop_size, crop_size, features_full.shape[3]]))
+
+        return rnn_batch.return_values(arrays)
 
     def rnn_inference_from_true_values(self, raw_features, word_obj_mask, true_word_poly, true_words, true_lengths, anchors_all, training):
         #poly = class_outputs[..., 1 : 1 + 4*2]
