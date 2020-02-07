@@ -169,14 +169,18 @@ class FeatureExtractor(tf.keras.layers.Layer):
         self.blocks.append(GatedBlockPool(params, 128))
 
         self.blocks.append(GatedBlockResidual(params, [64, 128]))
+        self.blocks.append(GatedBlockResidual(params, [64, 128]))
         self.blocks.append(GatedBlockPool(params, 256))
 
+        self.blocks.append(GatedBlockResidual(params, [128, 256]))
         self.blocks.append(GatedBlockResidual(params, [128, 256], name='raw0'))
         self.blocks.append(GatedBlockPool(params, 512, name='output0'))
 
+        self.blocks.append(GatedBlockResidual(params, [256, 512]))
         self.blocks.append(GatedBlockResidual(params, [256, 512], name='raw1'))
         self.blocks.append(GatedBlockPool(params, 512, name='output1'))
 
+        self.blocks.append(GatedBlockResidual(params, [256, 512]))
         self.blocks.append(GatedBlockResidual(params, [256, 512], name='raw2'))
         self.blocks.append(GatedBlockPool(params, 512, name='output2'))
 
@@ -206,6 +210,6 @@ class FeatureExtractor(tf.keras.layers.Layer):
         x = self.raw1_upsample(x, training=training)
         x = tf.concat([raw[0], x], -1)
 
-        x = self.raw0_upsample(x, training=training)
+        #x = self.raw0_upsample(x, training=training)
 
         return outputs, x
