@@ -282,12 +282,12 @@ class Encoder(tf.keras.layers.Layer):
         start = 0
         batch_size = 64
 
-        if False and selected_features.size() < batch_size:
+        if True or selected_features.size() < batch_size:
             selected_features = selected_features.concat()
 
             batch_size = tf.shape(selected_features)[0]
-            states_h = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=selected_features.dtype)
-            states_c = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=selected_features.dtype)
+            states_h = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=dtype)
+            states_c = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=dtype)
             states = [states_h, states_c]
 
             return self.rnn_layer(selected_features, true_words, true_lengths, states, training)
@@ -296,7 +296,6 @@ class Encoder(tf.keras.layers.Layer):
 
             outputs = tf.TensorArray(dtype, size=num)
             outputs_ar = tf.TensorArray(dtype, size=num)
-            written = 0
 
             states_h = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=dtype)
             states_c = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=dtype)
@@ -309,6 +308,8 @@ class Encoder(tf.keras.layers.Layer):
 
                 index = tf.range(start, end)
                 sf = selected_features.gather(index)
+                sf = tf.squeeze(sf, 1)
+                #logger.info('index: {}, sf: {}'.format(index.shape, sf.shape))
 
                 if idx == num - 1:
                     states_h = tf.zeros((end - start, self.rnn_layer.num_rnn_units), dtype=dtype)
@@ -318,9 +319,10 @@ class Encoder(tf.keras.layers.Layer):
                 else:
                     out, out_ar = self.rnn_layer(sf, true_words[start:end, ...], true_lengths[start:end, ...], states_big, training)
 
-                outputs = outputs.write(written, out)
-                outputs_ar = outputs_ar.write(written, out_ar)
-                written += 1
+                outputs = outputs.write(idx, out)
+                outputs_ar = outputs_ar.write(idx, out_ar)
+
+                start = end
 
             return outputs.concat(), outputs_ar.concat()
 
