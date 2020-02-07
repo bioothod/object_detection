@@ -278,14 +278,52 @@ class Encoder(tf.keras.layers.Layer):
                     selected_features = selected_features.write(written, cropped_features)
                     written += 1
 
-        selected_features = selected_features.concat()
 
-        batch_size = tf.shape(selected_features)[0]
-        states_h = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=selected_features.dtype)
-        states_c = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=selected_features.dtype)
-        states = [states_h, states_c]
+        start = 0
+        batch_size = 64
 
-        return self.rnn_layer(selected_features, true_words, true_lengths, states, training)
+        if False and selected_features.size() < batch_size:
+            selected_features = selected_features.concat()
+
+            batch_size = tf.shape(selected_features)[0]
+            states_h = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=selected_features.dtype)
+            states_c = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=selected_features.dtype)
+            states = [states_h, states_c]
+
+            return self.rnn_layer(selected_features, true_words, true_lengths, states, training)
+        else:
+            num = (selected_features.size() + batch_size - 1) // batch_size
+
+            outputs = tf.TensorArray(dtype, size=num)
+            outputs_ar = tf.TensorArray(dtype, size=num)
+            written = 0
+
+            states_h = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=dtype)
+            states_c = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=dtype)
+            states_big = [states_h, states_c]
+
+            for idx in range(num):
+                end = start + batch_size
+                if end > selected_features.size():
+                    end = selected_features.size()
+
+                index = tf.range(start, end)
+                sf = selected_features.gather(index)
+
+                if idx == num - 1:
+                    states_h = tf.zeros((end - start, self.rnn_layer.num_rnn_units), dtype=dtype)
+                    states_c = tf.zeros((end - start, self.rnn_layer.num_rnn_units), dtype=dtype)
+                    states = [states_h, states_c]
+                    out, out_ar = self.rnn_layer(sf, true_words[start:end, ...], true_lengths[start:end, ...], states, training)
+                else:
+                    out, out_ar = self.rnn_layer(sf, true_words[start:end, ...], true_lengths[start:end, ...], states_big, training)
+
+                outputs = outputs.write(written, out)
+                outputs_ar = outputs_ar.write(written, out_ar)
+                written += 1
+
+            return outputs.concat(), outputs_ar.concat()
+
 
     def rnn_inference_from_true_values(self, class_outputs, raw_features, word_obj_mask, true_word_poly, true_words, true_lengths, anchors_all, training, use_predicted_polys):
         if use_predicted_polys:
