@@ -287,10 +287,12 @@ class Encoder(tf.keras.layers.Layer):
 
         return self.rnn_layer(selected_features, true_words, true_lengths, states, training)
 
-    def rnn_inference_from_true_values(self, raw_features, word_obj_mask, true_word_poly, true_words, true_lengths, anchors_all, training):
-        #poly = class_outputs[..., 1 : 1 + 4*2]
+    def rnn_inference_from_true_values(self, class_outputs, raw_features, word_obj_mask, true_word_poly, true_words, true_lengths, anchors_all, training, use_predicted_polys):
+        if use_predicted_polys:
+            poly = class_outputs[..., 1 : 1 + 4*2]
+        else:
+            poly = true_word_poly
 
-        poly = true_word_poly
         poly = tf.reshape(poly, [-1, tf.shape(poly)[1], 4, 2])
 
         return self.rnn_inference(raw_features, word_obj_mask, poly, true_words, true_lengths, anchors_all, training)

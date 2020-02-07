@@ -51,6 +51,7 @@ parser.add_argument('--steps_per_train_epoch', default=200, type=int, help='Numb
 parser.add_argument('--save_examples', type=int, default=0, help='Number of example images to save and exit')
 parser.add_argument('--max_sequence_len', type=int, default=64, help='Maximum word length, also number of RNN attention timesteps')
 parser.add_argument('--reset_on_lr_update', action='store_true', help='Whether to reset to the best model after learning rate update')
+parser.add_argument('--use_predicted_polys_epochs', type=int, default=-1, help='After how many epochs to use predicted polynome coordinates for feature crops, negative means never')
 parser.add_argument('--disable_rotation_augmentation', action='store_true', help='Whether to disable rotation/flipping augmentation')
 
 default_char_dictionary="!\"#&\'\\()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -310,7 +311,13 @@ def train():
 
         logits, rnn_features = model(images, is_training)
 
-        rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(rnn_features, true_word_obj, true_word_poly, true_words, true_lengths, anchors_all, is_training)
+        use_predicted_polys = False
+        if FLAGS.use_predicted_polys_epochs >= 0:
+            use_predicted_polys = epoch_var > FLAGS.use_predicted_polys_epochs
+
+        rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(logits, rnn_features,
+                                                                           true_word_obj, true_word_poly, true_words, true_lengths,
+                                                                           anchors_all, is_training, use_predicted_polys)
 
         text_loss = metric.text_recognition_loss(true_values, rnn_outputs, rnn_outputs_ar, is_training)
 
