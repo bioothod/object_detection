@@ -34,52 +34,41 @@ def normalize_image(image, dtype):
     return image
 
 def main(argv=None):
-    with tf.Graph().as_default() as g:
-        if FLAGS.checkpoint:
-            checkpoint_prefix = FLAGS.checkpoint
-        elif FLAGS.checkpoint_dir:
-            checkpoint_prefix = tf.train.latest_checkpoint(FLAGS.checkpoint_dir)
+    if FLAGS.checkpoint:
+        checkpoint_prefix = FLAGS.checkpoint
+    elif FLAGS.checkpoint_dir:
+        checkpoint_prefix = tf.train.latest_checkpoint(FLAGS.checkpoint_dir)
+    else:
+        logger.error('You have to specify either checkpoint or checkpoint directory')
+        exit(-1)
 
-        #saver = tf.train.Saver()
+    model = encoder.create_model(FLAGS.model_name, FLAGS.num_classes)
+    image_size = model.image_size
+    all_anchors, all_grid_xy, all_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
 
-        with tf.Session(graph=g) as sess:
-            #saver.restore(sess, FLAGS.input)
+    checkpoint = tf.train.Checkpoint(model=model)
 
-            tf.keras.backend.set_learning_phase(0)
-            tf.keras.backend.set_session(sess)
+    status = checkpoint.restore(checkpoint_prefix)
+    status.assert_existing_objects_matched().expect_partial()
+    logger.info("Restored from external checkpoint {}".format(checkpoint_prefix))
 
+    @tf.function(input_signature=[tf.TensorSpec([image_size * image_size * 3], tf.uint8)])
+    def control_flow(images):
+        images = tf.reshape(images, [-1, image_size, image_size, 3])
+        images = normalize_image(images, tf.float32)
 
-            model = encoder.create_model(FLAGS.model_name, FLAGS.num_classes)
-            image_size = model.image_size
-            all_anchors, all_grid_xy, all_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
+        return eval_step_logits(model, images, image_size, FLAGS.num_classes, all_anchors, all_grid_xy, all_ratios)
 
-            checkpoint = tf.train.Checkpoint(model=model)
+    dummy_image = tf.zeros((image_size * image_size * 3), dtype=tf.uint8)
+    control_flow(dummy_image)
 
-            images = tf.keras.layers.Input(shape=(image_size * image_size * 3), name='input/images_rgb', dtype=tf.uint8)
-            images = tf.reshape(images, [-1, image_size, image_size, 3])
-            images = normalize_image(images, tf.float32)
+    to_export = tf.Module()
+    to_export.model = model
+    to_export.control_flow = control_flow
+    tf.saved_model.save(to_export, FLAGS.output_dir)
 
-            coords_batch, scores_batch, objs_batch, cat_ids_batch = eval_step_logits(model, images, image_size, FLAGS.num_classes, all_anchors, all_grid_xy, all_ratios)
-
-            coords_batch = tf.identity(coords_batch, name='output/coords')
-            scores_batch = tf.identity(scores_batch, name='output/scores')
-            objs_batch = tf.identity(objs_batch, name='output/objectness')
-            cat_ids_batch = tf.identity(cat_ids_batch, name='output/category_ids')
-
-            sess.run([tf.compat.v1.global_variables_initializer(), tf.compat.v1.local_variables_initializer()])
-
-            status = checkpoint.restore(checkpoint_prefix)
-            status.assert_existing_objects_matched().expect_partial()
-            logger.info("Restored from external checkpoint {}".format(checkpoint_prefix))
-
-            output_graph_def = tf.compat.v1.graph_util.convert_variables_to_constants(sess, sess.graph.as_graph_def(), ['output/coords', 'output/scores', 'output/objectness', 'output/category_ids'])
-
-            output = '{}-{}.frozen.pb'.format(checkpoint_prefix, tf.__version__)
-            filename = tf.io.write_graph(output_graph_def, os.path.dirname(output), os.path.basename(output), as_text=False)
-
-            print('Saved graph as {}'.format(os.path.abspath(filename)))
+    logger.info('Saved model into {}'.format(FLAGS.output_dir))
 
 if __name__ == '__main__':
     FLAGS = parser.parse_args()
-
-    tf.app.run()
+    main()
