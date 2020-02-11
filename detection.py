@@ -95,6 +95,7 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
 
     scale = image_size / mx
     word_poly *= scale
+    word_poly = tf.cast(word_poly, dtype)
 
     image = tf.cast(image, dtype)
     image -= 128
@@ -193,15 +194,34 @@ def train():
 
     image_size = FLAGS.image_size
     model = encoder.create_model(FLAGS.model_name, image_size, FLAGS.crop_size, FLAGS.max_sequence_len, dictionary_size, pad_value, dtype)
-    if model.output_sizes is None:
-        dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
 
-        model(dummy_input, training=True)
-        #model.body.summary(print_fn=lambda line: logger.info(line))
+    batch_size = int(FLAGS.batch_size / num_replicas)
+    dummy_input = tf.ones((batch_size, image_size, image_size, 3), dtype=dtype)
 
-        logger.info('image_size: {}, model output sizes: {}'.format(image_size, [s.numpy() for s in model.output_sizes]))
+    logits, rnn_features = model(dummy_input, training=True)
 
-    anchors_all, output_xy_grids, output_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
+    anchors_all, output_xy_grids, output_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes, dtype)
+
+    true_word_obj = logits[..., 0]
+    true_word_poly = logits[..., 1 : 9]
+
+    num_anchors = tf.shape(true_word_obj)[1]
+
+    true_words = tf.ones((batch_size, num_anchors, FLAGS.max_sequence_len), dtype=tf.int64)
+    true_lengths = tf.ones((batch_size, num_anchors), dtype=tf.int64)
+
+    tidx = tf.range(num_anchors)
+    tidx = tf.expand_dims(tidx, 0)
+    tidx = tf.tile(tidx, [batch_size, 1])
+    true_word_obj = tf.where(tidx < 256 // batch_size, 1, 0)
+    test_words = tf.math.count_nonzero(true_word_obj)
+
+    rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(logits, rnn_features,
+                                                                       true_word_obj, true_word_poly, true_words, true_lengths,
+                                                                       anchors_all, training=True, use_predicted_polys=True)
+    model.summary(print_fn=lambda line: logger.info(line))
+
+    logger.info('image_size: {}, model output sizes: {}, test words: {}'.format(image_size, [s.numpy() for s in model.output_sizes], test_words.numpy()))
 
     def create_dataset_from_tfrecord(name, dataset_dirs, is_training):
         filenames = []

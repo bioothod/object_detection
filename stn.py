@@ -110,10 +110,12 @@ def affine_grid_generator(height, width, theta):
     num_batch = tf.shape(theta)[0]
 
     # create normalized 2D grid
-    x = tf.linspace(0.0, 1.0, width)
-    y = tf.linspace(0.0, 1.0, height)
-    x = x * tf.cast(width, tf.float32)
-    y = y * tf.cast(height, tf.float32)
+    z = tf.constant(0, theta.dtype)
+    o = tf.constant(1, theta.dtype)
+    x = tf.linspace(z, o, width)
+    y = tf.linspace(z, o, height)
+    x = x * tf.cast(width, theta.dtype)
+    y = y * tf.cast(height, theta.dtype)
     x_t, y_t = tf.meshgrid(x, y)
 
     # flatten
@@ -128,9 +130,8 @@ def affine_grid_generator(height, width, theta):
     sampling_grid = tf.expand_dims(sampling_grid, axis=0)
     sampling_grid = tf.tile(sampling_grid, tf.stack([num_batch, 1, 1]))
 
-    # cast to float32 (required for matmul)
-    theta = tf.cast(theta, 'float32')
-    sampling_grid = tf.cast(sampling_grid, 'float32')
+    theta = tf.cast(theta, theta.dtype)
+    sampling_grid = tf.cast(sampling_grid, theta.dtype)
 
     # transform the sampling grid - batch multiply
     batch_grids = tf.matmul(theta, sampling_grid)
@@ -164,10 +165,6 @@ def bilinear_sampler(img, x, y):
     max_x = tf.cast(W - 1, 'int32')
     zero = tf.zeros([], dtype='int32')
 
-    # rescale x and y to [0, W-1/H-1]
-    x = tf.cast(x, 'float32')
-    y = tf.cast(y, 'float32')
-
     # grab 4 nearest corner points for each (x_i, y_i)
     x0 = tf.cast(tf.floor(x), 'int32')
     x1 = x0 + 1
@@ -187,10 +184,10 @@ def bilinear_sampler(img, x, y):
     Id = get_pixel_value(img, x1, y1)
 
     # recast as float for delta calculation
-    x0 = tf.cast(x0, 'float32')
-    x1 = tf.cast(x1, 'float32')
-    y0 = tf.cast(y0, 'float32')
-    y1 = tf.cast(y1, 'float32')
+    x0 = tf.cast(x0, x.dtype)
+    x1 = tf.cast(x1, x.dtype)
+    y0 = tf.cast(y0, x.dtype)
+    y1 = tf.cast(y1, x.dtype)
 
     # calculate deltas
     wa = (x1-x) * (y1-y)

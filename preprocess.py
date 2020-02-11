@@ -101,10 +101,10 @@ def distort_color(image, color_ordering=0, fast_mode=True, scope='distort_color'
         # The random_* ops do not necessarily clamp.
         return tf.clip_by_value(image, -1.0, 1.0)
 
-def random_expand(image, polys, ratio=2):
+def random_expand(image, polys, ratio):
     height, width, depth = _ImageDimensions(image, rank=3)
 
-    float_height, float_width = tf.cast(height, tf.float32), tf.cast(width, tf.float32)
+    float_height, float_width = tf.cast(height, ratio.dtype), tf.cast(width, ratio.dtype)
 
     canvas_width, canvas_height = tf.cast(float_width * ratio, tf.int32), tf.cast(float_height * ratio, tf.int32)
 
@@ -134,17 +134,20 @@ def rotate_points(points, theta):
     return tf.matmul(points, rotation_matrix)
 
 def preprocess_for_train(image, word_poly, image_size, disable_rotation_augmentation):
+    dtype = image.dtype
+
     if tf.random.uniform([], 0, 1) > 0.5:
         image = apply_with_random_selector(image,
                 lambda x, ordering: distort_color(x, ordering, True),
                 num_cases=4)
 
-    if False and tf.random.uniform([], 0, 1) > 0.5:
-        ratio = tf.random.uniform([], minval=1.01, maxval=1.3, dtype=tf.float32)
+    if tf.random.uniform([], 0, 1) > 0.5:
+        ratio = tf.random.uniform([], minval=1.01, maxval=1.2, dtype=word_poly.dtype)
 
         poly_rel = word_poly / image_size
         image, new_poly = random_expand(image, poly_rel, ratio)
         image = tf.image.resize(image, [image_size, image_size])
+        image = tf.cast(image, dtype)
         word_poly = new_poly * image_size
 
     if tf.random.uniform([], 0, 1) > 0.5:
@@ -155,6 +158,7 @@ def preprocess_for_train(image, word_poly, image_size, disable_rotation_augmenta
 
         image = tfa.image.rotate(image, angle, interpolation='BILINEAR')
 
+        angle = tf.cast(angle, word_poly.dtype)
         word_poly -= [image_size/2, image_size/2]
         word_poly = rotate_points(word_poly, angle)
         word_poly += [image_size/2, image_size/2]

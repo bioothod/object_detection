@@ -16,9 +16,8 @@ def create_anchors():
     anchors = anchors_dict["0"]
     # _,_,W,H format
     anchors = np.array(anchors, dtype=np.float32)
-    areas = anchors[:, 0] * anchors[:, 1]
 
-    return anchors, areas
+    return anchors
 
 def create_xy_grid(batch_size, output_size, anchors_per_scale):
     y = tf.tile(tf.range(output_size, dtype=tf.int32)[:, tf.newaxis], [1, output_size])
@@ -26,21 +25,21 @@ def create_xy_grid(batch_size, output_size, anchors_per_scale):
 
     xy_grid = tf.concat([x[:, :, tf.newaxis], y[:, :, tf.newaxis]], axis=-1)
     xy_grid = tf.tile(xy_grid[tf.newaxis, :, :, tf.newaxis, :], [batch_size, 1, 1, anchors_per_scale, 1])
-    xy_grid = tf.cast(xy_grid, tf.float32)
 
     return xy_grid
 
-def generate_anchors(image_size, output_sizes):
-    np_anchor_boxes, np_anchor_areas = create_anchors()
+def generate_anchors(image_size, output_sizes, dtype):
+    anchor_boxes = create_anchors()
+    anchor_boxes = tf.cast(anchor_boxes, dtype)
 
-    anchors_reshaped = tf.reshape(np_anchor_boxes, [num_scales, num_anchors, 2])
+    anchors_reshaped = tf.reshape(anchor_boxes, [num_scales, num_anchors, 2])
     anchors_abs_coords = []
 
     output_xy_grids = []
     output_ratios = []
 
     for base_scale, output_size in zip(range(num_scales), output_sizes):
-        output_size_float = tf.cast(output_size, tf.float32)
+        output_size_float = tf.cast(output_size, dtype)
         ratio = float(image_size) / output_size_float
 
         anchors_wh_one = anchors_reshaped[num_scales - base_scale - 1, ...]
@@ -49,6 +48,7 @@ def generate_anchors(image_size, output_sizes):
         anchors_wh = tf.reshape(anchors_wh, [output_size, output_size, num_anchors, 2]) # [13, 13, num_anchors, 2]
 
         anchors_xy = create_xy_grid(1, output_size, num_anchors)
+        anchors_xy = tf.cast(anchors_xy, dtype)
         anchors_xy = tf.squeeze(anchors_xy, 0) # [13, 13, num_anchors, 2]
         anchors_xy_flat = tf.reshape(anchors_xy, [-1, 2])
         output_xy_grids.append(anchors_xy_flat)
@@ -141,8 +141,8 @@ def find_bbox_anchor_for_poly(poly, anchors_all):
     bboxes = polygon2bbox(poly)
 
     ious = box_iou(bboxes, anchors_all)
-    logger.info('ious: {}, bboxes: {}, anchors_all: {}'.format(
-        ious.shape, bboxes.shape, anchors_all.shape))
+    #logger.info('ious: {}, bboxes: {}, anchors_all: {}'.format(
+    #    ious.shape, bboxes.shape, anchors_all.shape))
 
     best_anchors_index = tf.argmax(ious, 1)
 
@@ -167,7 +167,7 @@ def generate_true_values_for_anchors(word_poly, anchors_all, text_labels, text_l
     # output polygon shape [N, 4, 2]
     word_poly_for_loss, word_index = find_bbox_anchor_for_poly(word_poly, anchors_all)
 
-    word_objs = tf.ones((tf.shape(word_poly_for_loss)[0], 1))
+    word_objs = tf.ones((tf.shape(word_poly_for_loss)[0], 1), dtype=word_poly.dtype)
 
     word_idx = tf.expand_dims(word_index, 1)
 
@@ -175,7 +175,7 @@ def generate_true_values_for_anchors(word_poly, anchors_all, text_labels, text_l
     output_dims = 1 + 2*4 + max_word_len + 1
 
     num_true_anchors = anchors_all.shape[0]
-    output = tf.zeros((num_true_anchors, output_dims))
+    output = tf.zeros((num_true_anchors, output_dims), dtype=word_poly.dtype)
 
     text_labels = tf.cast(text_labels, word_objs.dtype)
     text_lenghts = tf.cast(text_lenghts, word_objs.dtype)
@@ -201,7 +201,7 @@ def unpack_true_values(true_values, all_anchors, current_image_shape, image_size
     best_anchors = tf.tile(best_anchors, [1, 4, 1])
     word_poly = word_poly + best_anchors
 
-    current_image_shape = tf.cast(current_image_shape, tf.float32)
+    current_image_shape = tf.cast(current_image_shape, word_poly.dtype)
 
     imh, imw = current_image_shape[:2]
     max_side = tf.maximum(imh, imw)

@@ -112,17 +112,17 @@ class Head(tf.keras.layers.Layer):
         super().__init__(**kwargs)
 
         self.s2_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
-        self.s2_input = EncoderConvList(params, [512, 1024, 512, 1024, 512])
+        self.s2_input = EncoderConvList(params, [512])
         self.s2_output = ObjectDetectionLayer(params, num_classes, name="detection_layer_2")
         self.up2 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
 
         self.s1_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
-        self.s1_input = EncoderConvList(params, [256, 512, 256, 512, 256])
+        self.s1_input = EncoderConvList(params, [256])
         self.s1_output = ObjectDetectionLayer(params, num_classes, name="detection_layer_1")
         self.up1 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
 
         self.s0_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
-        self.s0_input = EncoderConvList(params, [128, 256, 128, 256, 128])
+        self.s0_input = EncoderConvList(params, [128])
         self.s0_output = ObjectDetectionLayer(params, num_classes, name="detection_layer_0")
 
         self.pads = [None]
@@ -133,6 +133,7 @@ class Head(tf.keras.layers.Layer):
         x2 = self.s2_input(in2)
         x2 = self.s2_dropout(x2, training=training)
         up2 = self.up2(x2)
+        up2 = tf.cast(up2, in0.dtype)
         out2 = self.s2_output(x2, training=training)
 
         diff = up2.shape[1] - in1.shape[1]
@@ -145,6 +146,7 @@ class Head(tf.keras.layers.Layer):
         x1 = self.s1_input(x1)
         x1 = self.s1_dropout(x1, training=training)
         up1 = self.up1(x1)
+        up1 = tf.cast(up1, in0.dtype)
         out1 = self.s1_output(x1, training=training)
 
         diff = up1.shape[1] - in0.shape[1]
@@ -160,7 +162,7 @@ class Head(tf.keras.layers.Layer):
 
         return [out2, out1, out0]
 
-class Encoder(tf.keras.layers.Layer):
+class Encoder(tf.keras.Model):
     def __init__(self, params, **kwargs):
         super().__init__(**kwargs)
 
@@ -191,96 +193,96 @@ class Encoder(tf.keras.layers.Layer):
         self.output_sizes = None
 
     def rnn_inference(self, features_full, word_obj_mask_full, poly_full, true_words_full, true_lengths_full, anchors_all, training):
+        dtype = features_full.dtype
+
+        word_obj_mask_full = tf.where(word_obj_mask_full > 0, True, False)
+
         true_words = tf.boolean_mask(true_words_full, word_obj_mask_full)
         true_lengths = tf.boolean_mask(true_lengths_full, word_obj_mask_full)
 
         logger.info('RNN features: {}, crop_size: {}'.format(features_full.shape, self.crop_size))
-        feature_size = tf.cast(tf.shape(features_full)[1], tf.float32)
+        feature_size = tf.cast(tf.shape(features_full)[1], dtype)
 
         batch_size = tf.shape(features_full)[0]
 
-        dtype = features_full.dtype
+        selected_features = tf.TensorArray(dtype, size=0, dynamic_size=True)
+        written = 0
 
-        with tf.device('cpu:0'):
-            selected_features = tf.TensorArray(dtype, size=0, dynamic_size=True)
-            written = 0
+        for idx in tf.range(batch_size):
+            poly = poly_full[idx, ...]
+            word_obj_mask = word_obj_mask_full[idx, ...]
+            features = features_full[idx, ...]
 
-            for idx in tf.range(batch_size):
-                poly = poly_full[idx, ...]
-                word_obj_mask = word_obj_mask_full[idx, ...]
-                features = features_full[idx, ...]
+            poly = tf.boolean_mask(poly, word_obj_mask)
 
-                poly = tf.boolean_mask(poly, word_obj_mask)
+            best_anchors = tf.boolean_mask(anchors_all[..., :2], word_obj_mask)
+            best_anchors = tf.expand_dims(best_anchors, 1)
+            best_anchors = tf.tile(best_anchors, [1, 4, 1])
+            poly = poly + best_anchors
 
-                best_anchors = tf.boolean_mask(anchors_all[..., :2], word_obj_mask)
-                best_anchors = tf.expand_dims(best_anchors, 1)
-                best_anchors = tf.tile(best_anchors, [1, 4, 1])
-                poly = poly + best_anchors
+            poly = poly * feature_size / self.image_size
 
-                poly = poly * feature_size / self.image_size
+            x = poly[..., 0]
+            y = poly[..., 1]
+            lx = (x[:, 0] + x[:, 3]) / 2
+            ly = (y[:, 0] + y[:, 3]) / 2
 
-                x = poly[..., 0]
-                y = poly[..., 1]
-                lx = (x[:, 0] + x[:, 3]) / 2
-                ly = (y[:, 0] + y[:, 3]) / 2
+            rx = (x[:, 1] + x[:, 2]) / 2
+            ry = (y[:, 1] + y[:, 2]) / 2
 
-                rx = (x[:, 1] + x[:, 2]) / 2
-                ry = (y[:, 1] + y[:, 2]) / 2
+            angles = tf.math.atan2(ry - ly, rx - lx)
 
-                angles = tf.math.atan2(ry - ly, rx - lx)
+            x0 = x[:, 0]
+            y0 = y[:, 0]
+            x1 = x[:, 1]
+            y1 = y[:, 1]
+            x2 = x[:, 2]
+            y2 = y[:, 2]
+            x3 = x[:, 3]
+            y3 = y[:, 3]
 
-                x0 = x[:, 0]
-                y0 = y[:, 0]
-                x1 = x[:, 1]
-                y1 = y[:, 1]
-                x2 = x[:, 2]
-                y2 = y[:, 2]
-                x3 = x[:, 3]
-                y3 = y[:, 3]
+            h0 = (x0 - x3)**2 + (y0 - y3)**2
+            h1 = (x1 - x2)**2 + (y1 - y2)**2
+            h = tf.math.sqrt(tf.maximum(h0, h1))
 
-                h0 = (x0 - x3)**2 + (y0 - y3)**2
-                h1 = (x1 - x2)**2 + (y1 - y2)**2
-                h = tf.math.sqrt(tf.maximum(h0, h1))
+            w0 = (x0 - x1)**2 + (y0 - y1)**2
+            w1 = (x2 - x3)**2 + (y2 - y3)**2
+            w = tf.math.sqrt(tf.maximum(w0, w1))
 
-                w0 = (x0 - x1)**2 + (y0 - y1)**2
-                w1 = (x2 - x3)**2 + (y2 - y3)**2
-                w = tf.math.sqrt(tf.maximum(w0, w1))
+            sx = w / self.crop_size
+            sy = h / self.crop_size
 
-                sx = w / self.crop_size
-                sy = h / self.crop_size
+            z = tf.zeros_like(x0)
+            o = tf.ones_like(x0)
 
-                z = tf.zeros_like(x0)
-                o = tf.ones_like(x0)
+            def tm(t):
+                t = tf.convert_to_tensor(t)
+                t = tf.transpose(t, [2, 0, 1])
+                return t
 
-                def tm(t):
-                    t = tf.convert_to_tensor(t)
-                    t = tf.transpose(t, [2, 0, 1])
-                    return t
+            def const(x):
+                return o * x
 
-                def const(x):
-                    return o * x
+            t0 = tm([[o, z, x0], [z, o, y0], [z, z, o]])
+            t1 = tm([[tf.cos(angles), -tf.sin(angles), z], [tf.sin(angles), tf.cos(angles), z], [z, z, o]])
+            t2 = tm([[sx, z, z], [z, sy, z], [z, z, o]])
 
-                t0 = tm([[o, z, x0], [z, o, y0], [z, z, o]])
-                t1 = tm([[tf.cos(angles), -tf.sin(angles), z], [tf.sin(angles), tf.cos(angles), z], [z, z, o]])
-                t2 = tm([[sx, z, z], [z, sy, z], [z, z, o]])
+            transforms = t0 @ t1 @ t2
+            transforms = transforms[:, :2, :]
 
-                transforms = t0 @ t1 @ t2
-                transforms = transforms[:, :2, :]
+            features = tf.expand_dims(features, 0)
+            num_crops = tf.shape(transforms)[0]
+            for crop_idx in tf.range(num_crops):
+                t = transforms[crop_idx, ...]
+                t = tf.expand_dims(t, 0)
 
-                features = tf.expand_dims(features, 0)
-                num_crops = tf.shape(transforms)[0]
-                for crop_idx in tf.range(num_crops):
-                    t = transforms[crop_idx, ...]
-                    t = tf.expand_dims(t, 0)
+                cropped_features = stn.spatial_transformer_network(features, t, out_dims=[self.crop_size, self.crop_size])
 
-                    cropped_features = stn.spatial_transformer_network(features, t, out_dims=[self.crop_size, self.crop_size])
-
-                    selected_features = selected_features.write(written, cropped_features)
-                    written += 1
+                selected_features = selected_features.write(written, cropped_features)
+                written += 1
 
 
-        start = 0
-        batch_size = 64
+        batch_size = 16
 
         if True or selected_features.size() < batch_size:
             selected_features = selected_features.concat()
@@ -294,14 +296,21 @@ class Encoder(tf.keras.layers.Layer):
         else:
             num = (selected_features.size() + batch_size - 1) // batch_size
 
-            outputs = tf.TensorArray(dtype, size=num)
-            outputs_ar = tf.TensorArray(dtype, size=num)
+            with tf.device('cpu:0'):
+                outputs = tf.TensorArray(dtype, size=num)
+                outputs_ar = tf.TensorArray(dtype, size=num)
 
             states_h = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=dtype)
             states_c = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=dtype)
             states_big = [states_h, states_c]
 
-            for idx in range(num):
+            idx = 0
+            start = 0
+
+            def cond(idx, outputs, outputs_ar, start):
+                return tf.less(idx, num)
+
+            def body(idx, outputs, outputs_ar, start):
                 end = start + batch_size
                 if end > selected_features.size():
                     end = selected_features.size()
@@ -311,20 +320,43 @@ class Encoder(tf.keras.layers.Layer):
                 sf = tf.squeeze(sf, 1)
                 #logger.info('index: {}, sf: {}'.format(index.shape, sf.shape))
 
-                if idx == num - 1:
-                    states_h = tf.zeros((end - start, self.rnn_layer.num_rnn_units), dtype=dtype)
-                    states_c = tf.zeros((end - start, self.rnn_layer.num_rnn_units), dtype=dtype)
-                    states = [states_h, states_c]
-                    out, out_ar = self.rnn_layer(sf, true_words[start:end, ...], true_lengths[start:end, ...], states, training)
-                else:
-                    out, out_ar = self.rnn_layer(sf, true_words[start:end, ...], true_lengths[start:end, ...], states_big, training)
+                tw = true_words[start:end, ...]
+                tl = true_lengths[start:end, ...]
 
-                outputs = outputs.write(idx, out)
-                outputs_ar = outputs_ar.write(idx, out_ar)
+                if (idx == num - 1) and (end - start != batch_size):
+                    pad_size = batch_size - (end - start)
+
+                    #tf.print('selected_features:', selected_features.size(), 'start:', start, 'end:', end, 'idx:', idx, 'pad:', pad_size,
+                    #        'tw:', tf.shape(tw), 'tl:', tf.shape(tl), 'sf:', tf.shape(sf))
+
+                    tw = tf.pad(tw, [[0, pad_size], [0, 0]])
+                    tl = tf.pad(tl, [[0, pad_size]])
+                    sf = tf.pad(sf, [[0, pad_size], [0, 0], [0, 0], [0, 0]])
+
+                tw.set_shape([batch_size, self.max_sequence_len])
+                tl.set_shape([batch_size])
+                sf.set_shape([batch_size, self.crop_size, self.crop_size, features_full.shape[3]])
+
+                out, out_ar = self.rnn_layer(sf, tw, tl, states_big, training)
+
+                with tf.device('cpu:0'):
+                    if (idx == num - 1) and (end - start != batch_size):
+                        num_elements = end - start
+                        out = out[:num_elements, ...]
+                        out_ar = out_ar[:num_elements, ...]
+
+                    outputs = outputs.write(idx, out)
+                    outputs_ar = outputs_ar.write(idx, out_ar)
 
                 start = end
+                idx += 1
 
-            return outputs.concat(), outputs_ar.concat()
+                return idx, outputs, outputs_ar, start
+
+            idx, outputs, outputs_ar, start = tf.while_loop(cond, body, [idx, outputs, outputs_ar, start], parallel_iterations=32)
+
+            with tf.device('cpu:0'):
+                return outputs.concat(), outputs_ar.concat()
 
 
     def rnn_inference_from_true_values(self, class_outputs, raw_features, word_obj_mask, true_word_poly, true_words, true_lengths, anchors_all, training, use_predicted_polys):
