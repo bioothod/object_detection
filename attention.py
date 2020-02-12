@@ -36,7 +36,7 @@ class MultiHeadAttention(tf.keras.layers.Layer):
         self.query_dense = tf.keras.layers.Dense(units=attention_feature_dim)
         self.value_dense = tf.keras.layers.Dense(units=attention_feature_dim)
 
-        self.attention = tf.keras.layers.Attention()
+        #self.attention = tf.keras.layers.Attention()
 
         self.dense = tf.keras.layers.Dense(units=attention_feature_dim)
 
@@ -73,8 +73,8 @@ class AttentionBlock(tf.keras.layers.Layer):
     def __init__(self, params, attention_feature_dim, num_heads, **kwargs):
         super().__init__(**kwargs)
 
-        #self.norm = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-        if True:
+        self.norm = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        if False:
             self.norm = tf.keras.layers.BatchNormalization(
                 axis=params.channel_axis,
                 momentum=params.batch_norm_momentum,
@@ -86,8 +86,8 @@ class AttentionBlock(tf.keras.layers.Layer):
         self.dense0 = tf.keras.layers.Dense(units=attention_feature_dim)
         self.dense1 = tf.keras.layers.Dense(units=attention_feature_dim)
         self.dense_dropout = tf.keras.layers.Dropout(rate=params.spatial_dropout)
-        #self.dense_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-        if True:
+        self.dense_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        if False:
             self.dense_norm = tf.keras.layers.BatchNormalization(
                 axis=params.channel_axis,
                 momentum=params.batch_norm_momentum,
@@ -108,6 +108,7 @@ class AttentionBlock(tf.keras.layers.Layer):
         x = self.dense0(x)
         x = self.relu_fn(x)
         x = self.dense1(x)
+        x = self.relu_fn(x)
 
         dense_out = x + attention_out
 
@@ -139,7 +140,6 @@ class AttentionCell(tf.keras.layers.Layer):
 
         self.attention_layer = AttentionBlock(params, attention_feature_dim, num_heads)
         self.attention_pooling = tf.keras.layers.GlobalAveragePooling1D()
-        self.attention_dropout = tf.keras.layers.Dropout(rate=params.spatial_dropout)
 
         self.wc = tf.keras.layers.Dense(attention_feature_dim)
         self.wc_dropout = tf.keras.layers.Dropout(rate=params.spatial_dropout)
@@ -153,10 +153,9 @@ class AttentionCell(tf.keras.layers.Layer):
 
         weighted_features = self.attention_layer(features, state_with_time, training)
         weighted_pooled_features = self.attention_pooling(weighted_features)
-        weighted_pooled_features = self.attention_dropout(weighted_pooled_features, training)
 
         weighted_char_dist = self.wc(char_dist)
-        weighted_char_dist = self.wc_dropout(weighted_char_dist, training)
+        #weighted_char_dist = self.wc_dropout(weighted_char_dist, training)
 
         rnn_input = weighted_char_dist + weighted_pooled_features
 
