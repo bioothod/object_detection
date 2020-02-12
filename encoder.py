@@ -112,17 +112,17 @@ class Head(tf.keras.layers.Layer):
         super().__init__(**kwargs)
 
         self.s2_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
-        self.s2_input = EncoderConvList(params, [512])
+        self.s2_input = EncoderConvList(params, [512, 1024, 512])
         self.s2_output = ObjectDetectionLayer(params, num_classes, name="detection_layer_2")
         self.up2 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
 
         self.s1_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
-        self.s1_input = EncoderConvList(params, [256])
+        self.s1_input = EncoderConvList(params, [256, 512, 256])
         self.s1_output = ObjectDetectionLayer(params, num_classes, name="detection_layer_1")
         self.up1 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
 
         self.s0_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
-        self.s0_input = EncoderConvList(params, [128])
+        self.s0_input = EncoderConvList(params, [128, 256, 128])
         self.s0_output = ObjectDetectionLayer(params, num_classes, name="detection_layer_0")
 
         self.pads = [None]
@@ -194,8 +194,6 @@ class Encoder(tf.keras.Model):
 
     def rnn_inference(self, features_full, word_obj_mask_full, poly_full, true_words_full, true_lengths_full, anchors_all, training):
         dtype = features_full.dtype
-
-        word_obj_mask_full = tf.where(word_obj_mask_full > 0, True, False)
 
         true_words = tf.boolean_mask(true_words_full, word_obj_mask_full)
         true_lengths = tf.boolean_mask(true_lengths_full, word_obj_mask_full)
