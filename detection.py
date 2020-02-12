@@ -52,6 +52,7 @@ parser.add_argument('--save_examples', type=int, default=0, help='Number of exam
 parser.add_argument('--max_sequence_len', type=int, default=64, help='Maximum word length, also number of RNN attention timesteps')
 parser.add_argument('--reset_on_lr_update', action='store_true', help='Whether to reset to the best model after learning rate update')
 parser.add_argument('--use_predicted_polys_epochs', type=int, default=-1, help='After how many epochs to use predicted polynome coordinates for feature crops, negative means never')
+parser.add_argument('--max_word_batch', type=int, default=64, help='Maximum batch of word')
 parser.add_argument('--disable_rotation_augmentation', action='store_true', help='Whether to disable rotation/flipping augmentation')
 
 default_char_dictionary="!\"#&\'\\()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -123,9 +124,6 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
 
     return filename, image, true_values
 
-def calc_epoch_steps(num_files):
-    return (num_files + FLAGS.batch_size - 1) // FLAGS.batch_size
-
 def draw_bboxes(image_size, train_dataset, num_examples, all_anchors, dictionary, max_sequence_len):
     data_dir = os.path.join(FLAGS.train_dir, 'tmp')
     os.makedirs(data_dir, exist_ok=True)
@@ -195,8 +193,7 @@ def train():
     image_size = FLAGS.image_size
     model = encoder.create_model(FLAGS.model_name, image_size, FLAGS.crop_size, FLAGS.max_sequence_len, dictionary_size, pad_value, dtype)
 
-    batch_size = int(FLAGS.batch_size / num_replicas)
-    dummy_input = tf.ones((batch_size, image_size, image_size, 3), dtype=dtype)
+    dummy_input = tf.ones((FLAGS.batch_size, image_size, image_size, 3), dtype=dtype)
 
     logits, rnn_features = model(dummy_input, training=True)
 
@@ -207,13 +204,13 @@ def train():
 
     num_anchors = tf.shape(true_word_obj)[1]
 
-    true_words = tf.ones((batch_size, num_anchors, FLAGS.max_sequence_len), dtype=tf.int64)
-    true_lengths = tf.ones((batch_size, num_anchors), dtype=tf.int64)
+    true_words = tf.ones((FLAGS.batch_size, num_anchors, FLAGS.max_sequence_len), dtype=tf.int64)
+    true_lengths = tf.ones((FLAGS.batch_size, num_anchors), dtype=tf.int64)
 
     tidx = tf.range(num_anchors)
     tidx = tf.expand_dims(tidx, 0)
-    tidx = tf.tile(tidx, [batch_size, 1])
-    true_word_obj = tf.where(tidx < 256 // batch_size, 1, 0)
+    tidx = tf.tile(tidx, [FLAGS.batch_size, 1])
+    true_word_obj = tf.where(tidx < 256 // FLAGS.batch_size, 1, 0)
     test_words = tf.math.count_nonzero(true_word_obj)
 
     rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(logits, rnn_features,
@@ -326,8 +323,11 @@ def train():
         true_word_poly = true_values[..., 1 : 9]
         true_words = true_values[..., 9 : 9 + FLAGS.max_sequence_len]
         true_lengths = true_values[..., 9 + FLAGS.max_sequence_len]
+
+        true_word_obj = tf.cast(true_word_obj, tf.bool)
         true_words = tf.cast(true_words, tf.int64)
         true_lengths = tf.cast(true_lengths, tf.int64)
+        true_word_poly = tf.cast(true_word_poly, tf.float32)
 
         logits, rnn_features = model(images, is_training)
 
@@ -335,25 +335,55 @@ def train():
         if FLAGS.use_predicted_polys_epochs >= 0:
             use_predicted_polys = epoch_var > FLAGS.use_predicted_polys_epochs
 
+        num_words = tf.math.count_nonzero(true_word_obj)
+
+        if num_words > FLAGS.max_word_batch:
+            batch_size = tf.shape(true_words)[0]
+            feature_size = tf.shape(true_word_obj)[1]
+
+            idx = tf.range(feature_size)
+            idx = tf.expand_dims(idx, 0)
+            idx = tf.tile(idx, [batch_size, 1])
+
+            batch_idx = tf.range(batch_size)
+            batch_idx = tf.expand_dims(batch_idx, 1)
+            batch_idx = tf.tile(batch_idx, [1, feature_size])
+
+            true_word_obj_mask = tf.cast(true_word_obj, tf.bool)
+            idx_masked = tf.boolean_mask(idx, true_word_obj_mask)
+            batch_idx_masked = tf.boolean_mask(batch_idx, true_word_obj_mask)
+
+            ratio = float(FLAGS.max_word_batch) / tf.cast(num_words, tf.float32)
+            rnd_idx = tf.random.uniform([num_words], minval=0., maxval=1.)
+            rnd_idx = tf.where(rnd_idx < ratio)
+
+            scatter_idx = tf.gather(idx_masked, rnd_idx)
+            scatter_batch_idx = tf.gather(batch_idx_masked, rnd_idx)
+
+            num_updates = tf.shape(rnd_idx)[0]
+            ones = tf.ones(num_updates, tf.bool)
+
+            scatter_idx_concat = tf.concat([scatter_batch_idx, scatter_idx], 1)
+
+            tf.print('true_words reduced:', num_words, '->', num_updates,
+                    'scatter_batch_idx:', tf.shape(scatter_batch_idx), 'scatter_idx:', tf.shape(scatter_idx), 'scatter_idx_concat:', tf.shape(scatter_idx_concat),
+                    'ones:', tf.shape(ones))
+            #tf.print('scatter_idx_concat:', scatter_idx_concat)
+
+            true_word_obj = tf.scatter_nd(scatter_idx_concat, ones, true_word_obj.shape)
+
         rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(logits, rnn_features,
                                                                            true_word_obj, true_word_poly, true_words, true_lengths,
                                                                            anchors_all, is_training, use_predicted_polys)
 
-        text_loss = metric.text_recognition_loss(true_values, rnn_outputs, rnn_outputs_ar, is_training)
+        text_loss = metric.text_recognition_loss(true_word_obj, true_words, true_lengths, rnn_outputs, rnn_outputs_ar, is_training)
 
         m = metric.train_metric
         if not is_training:
             m = metric.eval_metric
 
-        objdet_loss = metric.object_detection_loss(true_values, logits, is_training)
-        obj_scale = 1.
-        text_scale = 1.
-        num_warmup_epochs = 4
-        #if epoch_var < num_warmup_epochs:
-        #    text_scale = 0.
-        #elif epoch_var < num_warmup_epochs*2:
-        #    obj_scale = (epoch_var + 1) / (num_warmup_epochs + 1)
-        total_loss = objdet_loss*obj_scale + text_loss*text_scale
+        objdet_loss = metric.object_detection_loss(true_word_obj, true_word_poly, logits, is_training)
+        total_loss = objdet_loss + text_loss
 
         #reg_loss = tf.math.add_n(model.losses)
         #total_loss += reg_loss
