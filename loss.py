@@ -4,48 +4,44 @@ logger = logging.getLogger('detection')
 import tensorflow as tf
 
 class FocalLoss(tf.keras.losses.Loss):
-    def __init__(self, from_logits=False, label_smoothing=0, reduction=tf.keras.losses.Reduction.NONE):
-        super(FocalLoss, self).__init__()
+    def __init__(self, from_logits=False, label_smoothing=0, sigmoid_ce=False, reduction=tf.keras.losses.Reduction.NONE, **kwargs):
+        super(FocalLoss, self).__init__(**kwargs)
         self.alpha = 0.25
         self.gamma = 2
         self.reduction = reduction
+        self.epsilon = 1e-9
         self.from_logits = from_logits
+        self.sigmoid_ce = sigmoid_ce
 
     def call(self, y_true, y_pred, weights=None):
-        y_true = tf.clip_by_value(y_true, 0, 1)
-
-        dtype = tf.float32
+        y_pred = tf.cast(y_pred, tf.float32)
+        y_true = tf.cast(y_true, tf.float32)
 
         if self.from_logits:
-            sigmoid_p = tf.nn.sigmoid(y_pred)
+            if self.sigmoid_ce:
+                y_pred = tf.nn.sigmoid(y_pred)
+            else:
+                y_pred = tf.nn.softmax(y_pred, axis=-1)
         else:
-            sigmoid_p = y_pred
+            y_pred = tf.clip_by_value(y_pred, self.epsilon, 1. - self.epsilon)
 
-        sigmoid_p = tf.cast(y_pred, dtype)
-
-        zeros = tf.zeros_like(sigmoid_p, dtype=dtype)
-
-        pos_p_sub = tf.where(y_true > zeros, y_true - sigmoid_p, zeros)
-        neg_p_sub = tf.where(y_true > zeros, zeros, sigmoid_p)
-
-        p = tf.clip_by_value(sigmoid_p, 1e-10, 1)
-        one_minus_p = tf.clip_by_value(1 - sigmoid_p, 1e-10, 1)
-
-        per_entry_cross_ent = - self.alpha * (pos_p_sub ** self.gamma) * tf.math.log(p) - \
-            (1 - self.alpha) * (neg_p_sub ** self.gamma) * tf.math.log(one_minus_p)
-
+        ce = tf.multiply(y_true, -tf.math.log(y_pred))
+        weight = tf.multiply(y_true, tf.pow(tf.subtract(1., y_pred), self.gamma))
+        fl = tf.multiply(self.alpha, tf.multiply(weight, ce))
         if self.reduction == tf.keras.losses.Reduction.NONE:
-            return per_entry_cross_ent
+            fl = tf.reduce_sum(fl, -1)
+        else:
+            fl = tf.reduce_sum(fl)
 
-        raise "qwe"
-
+        return fl
 
 class TextMetric:
     def __init__(self, max_sequence_len, dictionary_size, label_smoothing=0, from_logits=False, **kwargs):
         self.dictionary_size = dictionary_size
         self.max_sequence_len = max_sequence_len
 
-        self.ce = tf.keras.losses.CategoricalCrossentropy(from_logits=from_logits, reduction=tf.keras.losses.Reduction.NONE, label_smoothing=label_smoothing)
+        #self.ce = tf.keras.losses.CategoricalCrossentropy(from_logits=from_logits, reduction=tf.keras.losses.Reduction.NONE, label_smoothing=label_smoothing)
+        self.ce = FocalLoss(from_logits=from_logits, label_smoothing=label_smoothing, sigmoid_ce=False, reduction=tf.keras.losses.Reduction.NONE, name='text_focal_loss')
 
         self.word_loss = tf.keras.metrics.Mean()
         self.full_loss = tf.keras.metrics.Mean()
@@ -112,7 +108,7 @@ class TextMetric:
 
 
 class Metric:
-    def __init__(self, max_sequence_len, dictionary_size, from_logits=False, training=True, **kwargs):
+    def __init__(self, max_sequence_len, dictionary_size, from_logits=False, training=True, label_smoothing=0.1, **kwargs):
         self.total_loss = tf.keras.metrics.Mean()
 
         self.training = training
@@ -123,9 +119,10 @@ class Metric:
         self.word_obj_whole_loss = tf.keras.metrics.Mean()
         self.word_obj_accuracy02 = tf.keras.metrics.BinaryAccuracy(threshold=0.2)
         self.word_obj_accuracy05 = tf.keras.metrics.BinaryAccuracy(threshold=0.5)
+        self.word_obj_whole_accuracy05 = tf.keras.metrics.BinaryAccuracy(threshold=0.5)
 
-        self.text_metric = TextMetric(max_sequence_len, dictionary_size, label_smoothing=0.1, from_logits=from_logits)
-        self.text_metric_ar = TextMetric(max_sequence_len, dictionary_size, label_smoothing=0.1, from_logits=from_logits)
+        self.text_metric = TextMetric(max_sequence_len, dictionary_size, label_smoothing=label_smoothing, from_logits=from_logits)
+        self.text_metric_ar = TextMetric(max_sequence_len, dictionary_size, label_smoothing=label_smoothing, from_logits=from_logits)
 
     def reset_states(self):
         self.total_loss.reset_states()
@@ -136,35 +133,35 @@ class Metric:
         self.word_obj_whole_loss.reset_states()
         self.word_obj_accuracy02.reset_states()
         self.word_obj_accuracy05.reset_states()
+        self.word_obj_whole_accuracy05.reset_states()
 
         self.text_metric.reset_states()
         self.text_metric_ar.reset_states()
 
     def str_result(self):
         if self.training:
-            return 'total_loss: {:.3e}, dist: {:.3f}, text ce: {}, acc: {}, AR text ce: {}, acc: {}, word_obj_acc: {:.3f}/{:.3f}'.format(
+            return 'total_loss: {:.3e}, dist: {:.3f}, acc: {}, AR acc: {}, word_obj_acc: {:.3f}/{:.3f}/{:.4f}'.format(
                     self.total_loss.result(),
                     self.word_dist_loss.result(),
 
-                    self.text_metric.str_result(want_loss=True),
                     self.text_metric.str_result(want_acc=True),
 
-                    self.text_metric_ar.str_result(want_loss=True),
                     self.text_metric_ar.str_result(want_acc=True),
 
                     self.word_obj_accuracy02.result(),
                     self.word_obj_accuracy05.result(),
+                    self.word_obj_whole_accuracy05.result(),
                     )
         else:
-            return 'total_loss: {:.3e}, dist: {:.3f}, AR text ce: {}, acc: {}, word_obj_acc: {:.3f}/{:.4f}'.format(
+            return 'total_loss: {:.3e}, dist: {:.3f}, acc: {}, word_obj_acc: {:.3f}/{:.4f}/{:.4f}'.format(
                     self.total_loss.result(),
                     self.word_dist_loss.result(),
 
-                    self.text_metric_ar.str_result(want_loss=True),
                     self.text_metric_ar.str_result(want_acc=True),
 
                     self.word_obj_accuracy02.result(),
                     self.word_obj_accuracy05.result(),
+                    self.word_obj_whole_accuracy05.result(),
                     )
 
 
@@ -181,7 +178,8 @@ class LossMetricAggregator:
         label_smoothing = 0.1
 
         self.mae = tf.keras.losses.MeanAbsoluteError(reduction=tf.keras.losses.Reduction.NONE)
-        self.obj_loss = FocalLoss(label_smoothing=label_smoothing, from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
+        self.obj_loss = FocalLoss(label_smoothing=label_smoothing, from_logits=True, sigmoid_ce=True, reduction=tf.keras.losses.Reduction.NONE, name='obj_focal_loss')
+        #self.obj_loss = tf.keras.losses.BinaryCrossentropy(label_smoothing=label_smoothing, from_logits=True, reduction=tf.keras.losses.Reduction.NONE, name='obj_focal_loss')
 
         self.train_metric = Metric(max_sequence_len, dictionary_size, from_logits=False, label_smoothing=label_smoothing, name='train_metric', training=True)
         self.eval_metric = Metric(max_sequence_len, dictionary_size, from_logits=False, label_smoothing=label_smoothing, name='eval_metric', training=False)
@@ -198,48 +196,24 @@ class LossMetricAggregator:
         obj_acc = m.word_obj_accuracy02.result()
         word_acc, full_acc = m.text_metric_ar.result(want_acc=True)
 
-        return obj_acc*0.3 + word_acc
+        return word_acc
 
     def reset_states(self):
         self.train_metric.reset_states()
         self.eval_metric.reset_states()
 
-    def gen_ignore_mask(self, input_tuple, object_mask, true_bboxes):
-        idx, pred_boxes_for_single_image = input_tuple
-        valid_true_boxes = tf.boolean_mask(true_bboxes[idx, ..., 0:4], tf.cast(object_mask[idx, ..., 0], tf.bool))
-        iou = box_iou(pred_boxes_for_single_image, valid_true_boxes)
-        best_iou = tf.reduce_max(iou, axis=-1)
-        ignore_mask_tmp = tf.cast(best_iou < 0.5, tf.float32)
-        #logger.info('pred_boxes_for_single_image: {}, valid_true_boxes: {}, iou: {}, best_iou: {}, ignore_mask_tmp: {}'.format(
-        #    pred_boxes_for_single_image.shape, valid_true_boxes.shape, iou.shape, best_iou.shape, ignore_mask_tmp.shape))
-        return ignore_mask_tmp
-
-    def focal_loss(self, y_true, y_pred, alpha=1, gamma=2):
-        focal_loss = alpha * tf.pow(tf.abs(y_true - y_pred), gamma)
-        return focal_loss
-
-    def object_detection_loss(self, y_true, y_pred, training):
+    def object_detection_loss(self, word_object_mask, true_word_poly, y_pred, training):
         # predicted tensors
         pred_word_obj = y_pred[..., 0]
         pred_word_poly = y_pred[..., 1 : 9]
 
-        # true tensors
-        true_word_obj = y_true[..., 0]
-        true_word_poly = y_true[..., 1 : 9]
-
         pred_word_obj = tf.cast(pred_word_obj, tf.float32)
         pred_word_poly = tf.cast(pred_word_poly, tf.float32)
 
-        true_word_obj = tf.cast(true_word_obj, tf.float32)
-        true_word_poly = tf.cast(true_word_poly, tf.float32)
-
-
+        true_word_obj = tf.cast(word_object_mask, tf.float32)
 
         true_word_obj_whole = true_word_obj
         pred_word_obj_whole = pred_word_obj
-
-        word_object_mask = tf.cast(true_word_obj, 'bool')
-
 
         pred_word_obj = tf.boolean_mask(pred_word_obj, word_object_mask)
         pred_word_poly = tf.boolean_mask(pred_word_poly, word_object_mask)
@@ -269,13 +243,14 @@ class LossMetricAggregator:
 
         word_obj_loss = self.obj_loss(y_true=true_word_obj, y_pred=pred_word_obj)
         m.word_obj_loss.update_state(word_obj_loss)
-        word_obj_loss = tf.nn.compute_average_loss(word_obj_loss, global_batch_size=self.global_batch_size)
+        word_obj_loss = word_obj_loss / self.global_batch_size
 
         obj_loss = word_obj_loss + word_obj_whole_loss
 
         # for accuracy metric, only check true object matches
         m.word_obj_accuracy02.update_state(true_word_obj, pred_word_obj)
         m.word_obj_accuracy05.update_state(true_word_obj, pred_word_obj)
+        m.word_obj_whole_accuracy05.update_state(true_word_obj_whole, pred_word_obj_whole)
 
         def nans(p):
             pred_obj_nan = tf.math.is_nan(p)
@@ -292,18 +267,7 @@ class LossMetricAggregator:
 
         return dist_loss + obj_loss
 
-    def text_recognition_loss(self, y_true, y_pred_rnn, y_pred_rnn_ar, training):
-        true_word_obj = y_true[..., 0]
-
-        word_object_mask = tf.cast(true_word_obj, 'bool')
-
-        true_words = y_true[..., 9 : 9 + self.max_sequence_len]
-        true_lengths = y_true[..., 9 + self.max_sequence_len]
-
-
-        true_words = tf.cast(true_words, tf.int64)
-        true_lengths = tf.cast(true_lengths, tf.int64)
-
+    def text_recognition_loss(self, word_object_mask, true_words, true_lengths, y_pred_rnn, y_pred_rnn_ar, training):
         true_words = tf.boolean_mask(true_words, word_object_mask)
         true_lengths = tf.boolean_mask(true_lengths, word_object_mask)
 
@@ -314,13 +278,13 @@ class LossMetricAggregator:
         # text CE loss
         if training:
             word_ce_loss, full_ce_loss = m.text_metric.update_state(true_words, true_lengths, y_pred_rnn)
-            text_ce_loss = word_ce_loss + full_ce_loss*0.1
+            text_ce_loss = word_ce_loss + full_ce_loss*0.01
             text_ce_loss = tf.nn.compute_average_loss(text_ce_loss, global_batch_size=self.global_batch_size)
         else:
             text_ce_loss = 0
 
         word_ce_loss_ar, full_ce_loss_ar = m.text_metric_ar.update_state(true_words, true_lengths, y_pred_rnn_ar)
-        text_ce_loss_ar = word_ce_loss_ar + full_ce_loss_ar*0.1
+        text_ce_loss_ar = word_ce_loss_ar + full_ce_loss_ar*0.01
         text_ce_loss_ar = tf.nn.compute_average_loss(text_ce_loss_ar, global_batch_size=self.global_batch_size)
 
         total_loss = text_ce_loss + text_ce_loss_ar
