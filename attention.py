@@ -182,7 +182,7 @@ def add_spatial_encoding(features):
 
     return tf.concat([features, loc], 3)
 
-class RNNLayer(tf.keras.layers.Layer):
+class RNNLayer(tf.keras.Model):
     def __init__(self, params, num_rnn_units, max_sequence_len, dictionary_size, pad_value, cell='lstm', **kwargs):
         super(RNNLayer, self).__init__(self, **kwargs)
 
@@ -200,7 +200,6 @@ class RNNLayer(tf.keras.layers.Layer):
         attention_feature_dim = 256
         num_heads = 8
 
-        self.dense_dropout = tf.keras.layers.SpatialDropout1D(rate=params.spatial_dropout)
         self.dense_features = tf.keras.layers.Dense(units=attention_feature_dim)
         self.attention_cell = AttentionCell(params, num_rnn_units, attention_feature_dim, num_heads, dictionary_size, cell=cell)
 
@@ -212,7 +211,7 @@ class RNNLayer(tf.keras.layers.Layer):
         spatial_feature_size = spatial_features.shape[-1]
         reshaped_features = tf.reshape(spatial_features, [batch_size, -1, spatial_feature_size])
 
-        #logger.info('image_featuers: {}, spatial features: {} -> {}'.format(image_features.shape, spatial_features.shape, reshaped_features.shape))
+        #logger.info('image_features: {}, spatial features: {} -> {}'.format(image_features.shape, spatial_features.shape, reshaped_features.shape))
 
         null_token = tf.tile([self.start_token], [batch_size])
         def init():
@@ -233,12 +232,11 @@ class RNNLayer(tf.keras.layers.Layer):
                 if training:
                     char_dist = tf.one_hot(gt_tokens[:, idx-1], self.dictionary_size, dtype=image_features.dtype)
 
-            dropout_features = self.dense_dropout(features, training=training)
             if training:
-                char_dist, state = self.attention_cell(char_dist, dropout_features, state, training)
+                char_dist, state = self.attention_cell(char_dist, features, state, training)
                 char_dists = char_dists.write(idx, char_dist)
 
-            char_dist_ar, state_ar = self.attention_cell(char_dist_ar, dropout_features, state_ar, training)
+            char_dist_ar, state_ar = self.attention_cell(char_dist_ar, features, state_ar, training)
             char_dists_ar = char_dists_ar.write(idx, char_dist_ar)
 
         out_ar = char_dists_ar.stack()
