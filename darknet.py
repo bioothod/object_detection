@@ -109,24 +109,24 @@ class DarknetRawFeatureUpsampling(tf.keras.layers.Layer):
         return x
 
 
-class DarknetBody(tf.keras.layers.Layer):
+class DarknetBody(tf.keras.Model):
     def __init__(self, params, **kwargs):
         super(DarknetBody, self).__init__(**kwargs)
         
-        # (256, 256, 3)
+        # (512, 512, 3)
         self.l0a = DarknetConv(params, 32, name="l0")
         self.l0_pool = DarknetConvPool(params, 64, name="l0_pool")
 
-        # (128, 128, 64)
+        # (256, 256, 64)
         self.l1a = DarknetResidual(params, [32, 64], name="l1")
         self.l1_pool = DarknetConvPool(params, 128, name="l1_pool")
 
-        # (64, 64, 128)
+        # (128, 128, 128)
         self.l2a = DarknetResidual(params, [64, 128], name="l2a")
         self.l2b = DarknetResidual(params, [64, 128], name="l2b")
         self.l2_pool = DarknetConvPool(params, 256, name="l2_pool")
 
-        # (32, 32, 256)
+        # (64, 64, 256)
         self.l3a = DarknetResidual(params, [128, 256], name="l3a")
         self.l3b = DarknetResidual(params, [128, 256], name="l3b")
         self.l3c = DarknetResidual(params, [128, 256], name="l3c")
@@ -137,7 +137,7 @@ class DarknetBody(tf.keras.layers.Layer):
         self.l3h = DarknetResidual(params, [128, 256], name="l3h")
         self.l3_pool = DarknetConvPool(params, 512, name="l3_pool")
         
-        # (16, 16, 512)
+        # (32, 32, 512)
         self.l4a = DarknetResidual(params, [256, 512], name="l4a")
         self.l4b = DarknetResidual(params, [256, 512], name="l4b")
         self.l4c = DarknetResidual(params, [256, 512], name="l4c")
@@ -148,16 +148,15 @@ class DarknetBody(tf.keras.layers.Layer):
         self.l4h = DarknetResidual(params, [256, 512], name="l4h")
         self.l4_pool = DarknetConvPool(params, 1024, name="l4_pool")
 
-        # (8, 8, 1024)
+        # (16, 16, 1024)
         self.l5a = DarknetResidual(params, [512, 1024], name="l5a")
         self.l5b = DarknetResidual(params, [512, 1024], name="l5b")
         self.l5c = DarknetResidual(params, [512, 1024], name="l5c")
         self.l5d = DarknetResidual(params, [512, 1024], name="l5d")
         
         self.raw0_upsample = DarknetRawFeatureUpsampling(params, [128, 256, 128], want_upsampling=False)
-        self.raw1_upsample = DarknetRawFeatureUpsampling(params, [128, 256, 128])
-        self.raw2_upsample = DarknetRawFeatureUpsampling(params, [256, 512, 256])
-        self.raw3_upsample = DarknetRawFeatureUpsampling(params, [512, 1024, 512])
+        self.raw1_upsample = DarknetRawFeatureUpsampling(params, [256, 512, 256])
+        self.raw2_upsample = DarknetRawFeatureUpsampling(params, [512, 1024, 512])
 
     def call(self, inputs, training):
         raw = []
@@ -201,15 +200,15 @@ class DarknetBody(tf.keras.layers.Layer):
         x = self.l5b(x, training)
         x = self.l5c(x, training)
         x = self.l5d(x, training)
-        raw.append(x)
+        #raw.append(x)
         output_l5 = x
 
         outputs = [output_l3, output_l4, output_l5]
 
-        x = self.raw3_upsample(raw[3], training=training)
-        x = tf.concat([raw[2], x], -1)
+        #x = self.raw3_upsample(raw[3], training=training)
+        #x = tf.concat([raw[2], x], -1)
 
-        #x = raw[2]
+        x = raw[2]
 
         x = self.raw2_upsample(x, training=training)
         x = tf.concat([raw[1], x], -1)
