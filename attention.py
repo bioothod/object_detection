@@ -142,7 +142,6 @@ class AttentionCell(tf.keras.layers.Layer):
         self.attention_pooling = tf.keras.layers.GlobalAveragePooling1D()
 
         self.wc = tf.keras.layers.Dense(attention_feature_dim)
-        self.wc_dropout = tf.keras.layers.Dropout(rate=params.spatial_dropout)
 
         self.wu_pred = tf.keras.layers.Dense(dictionary_size)
         self.wo = tf.keras.layers.Dense(dictionary_size)
@@ -155,7 +154,6 @@ class AttentionCell(tf.keras.layers.Layer):
         weighted_pooled_features = self.attention_pooling(weighted_features)
 
         weighted_char_dist = self.wc(char_dist)
-        #weighted_char_dist = self.wc_dropout(weighted_char_dist, training)
 
         rnn_input = weighted_char_dist + weighted_pooled_features
 
