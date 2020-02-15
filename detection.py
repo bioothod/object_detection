@@ -26,7 +26,7 @@ import preprocess
 parser = argparse.ArgumentParser()
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch')
 parser.add_argument('--num_epochs', type=int, default=1000, help='Number of epochs to run')
-parser.add_argument('--skip_saving_epochs', type=int, default=4, help='Do not save good checkpoint and update best metric for this number of the first epochs')
+parser.add_argument('--skip_saving_epochs', type=int, default=0, help='Do not save good checkpoint and update best metric for this number of the first epochs')
 parser.add_argument('--epoch', type=int, default=0, help='Initial epoch\'s number')
 parser.add_argument('--train_dir', type=str, required=True, help='Path to train directory, where graph will be stored')
 parser.add_argument('--base_checkpoint', type=str, help='Load base model weights from this file')
@@ -216,7 +216,10 @@ def train():
     rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(logits, rnn_features,
                                                                        true_word_obj, true_word_poly, true_words, true_lengths,
                                                                        anchors_all, training=True, use_predicted_polys=True)
-    model.summary(print_fn=lambda line: logger.info(line))
+    line_length = 128
+    model.body.summary(line_length=line_length, print_fn=lambda line: logger.info(line))
+    model.rnn_layer.summary(line_length=line_length, print_fn=lambda line: logger.info(line))
+    model.summary(line_length=line_length, print_fn=lambda line: logger.info(line))
 
     logger.info('image_size: {}, model output sizes: {}, test words: {}'.format(image_size, [s.numpy() for s in model.output_sizes], test_words.numpy()))
 
@@ -365,9 +368,7 @@ def train():
 
             scatter_idx_concat = tf.concat([scatter_batch_idx, scatter_idx], 1)
 
-            tf.print('true_words reduced:', num_words, '->', num_updates,
-                    'scatter_batch_idx:', tf.shape(scatter_batch_idx), 'scatter_idx:', tf.shape(scatter_idx), 'scatter_idx_concat:', tf.shape(scatter_idx_concat),
-                    'ones:', tf.shape(ones))
+            tf.print('true_words reduced:', num_words, '->', num_updates)
             #tf.print('scatter_idx_concat:', scatter_idx_concat)
 
             true_word_obj = tf.scatter_nd(scatter_idx_concat, ones, true_word_obj.shape)
@@ -475,7 +476,7 @@ def train():
     best_metric = 0
     best_saved_path = None
     num_epochs_without_improvement = 0
-    initial_learning_rate_multiplier = 0.5
+    initial_learning_rate_multiplier = 0.2
     learning_rate_multiplier = initial_learning_rate_multiplier
 
     def validation_metric():
@@ -510,6 +511,13 @@ def train():
         if epoch < FLAGS.skip_tfrecrods_after_epochs:
             train_steps = run_epoch('train', train_objdet_dataset_with_skip, train_step, steps_per_train_epoch, epoch == FLAGS.epoch)
         else:
+            if epoch == FLAGS.skip_tfrecrods_after_epochs and epoch != FLAGS.epoch:
+                logger.info('removing warmup data from datasets: lr: {} -> {}', learning_rate.numpy(), FLAGS.initial_learning_rate)
+
+                num_epochs_without_improvement = 0
+                learning_rate_multiplier = initial_learning_rate_multiplier
+                learning_rate.assign(FLAGS.initial_learning_rate)
+
             train_steps = run_epoch('train', train_objdet_dataset, train_step, steps_per_train_epoch, epoch == FLAGS.epoch)
 
         eval_steps = run_epoch('eval', eval_objdet_dataset, eval_step, steps_per_eval_epoch, False)
