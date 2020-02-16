@@ -221,7 +221,7 @@ def train():
     model.rnn_layer.summary(line_length=line_length, print_fn=lambda line: logger.info(line))
     model.summary(line_length=line_length, print_fn=lambda line: logger.info(line))
 
-    logger.info('image_size: {}, model output sizes: {}, test words: {}'.format(image_size, [s.numpy() for s in model.output_sizes], test_words.numpy()))
+    logger.info('image_size: {}, model output sizes: {}, max_word_batch: {}'.format(image_size, [s.numpy() for s in model.output_sizes], FLAGS.max_word_batch))
 
     def create_dataset_from_tfrecord(name, dataset_dirs, is_training):
         filenames = []
@@ -359,11 +359,12 @@ def train():
             ratio = float(FLAGS.max_word_batch) / tf.cast(num_words, tf.float32)
             rnd_idx = tf.random.uniform([num_words], minval=0., maxval=1.)
             rnd_idx = tf.where(rnd_idx < ratio)
+            rnd_idx = rnd_idx[:FLAGS.max_word_batch, ...]
+            num_updates = tf.shape(rnd_idx)[0]
 
             scatter_idx = tf.gather(idx_masked, rnd_idx)
             scatter_batch_idx = tf.gather(batch_idx_masked, rnd_idx)
 
-            num_updates = tf.shape(rnd_idx)[0]
             ones = tf.ones(num_updates, tf.bool)
 
             scatter_idx_concat = tf.concat([scatter_batch_idx, scatter_idx], 1)
