@@ -178,8 +178,8 @@ class LossMetricAggregator:
         label_smoothing = 0.1
 
         self.mae = tf.keras.losses.MeanAbsoluteError(reduction=tf.keras.losses.Reduction.NONE)
-        self.obj_loss = FocalLoss(label_smoothing=label_smoothing, from_logits=True, sigmoid_ce=True, reduction=tf.keras.losses.Reduction.NONE, name='obj_focal_loss')
-        #self.obj_loss = tf.keras.losses.BinaryCrossentropy(label_smoothing=label_smoothing, from_logits=True, reduction=tf.keras.losses.Reduction.NONE, name='obj_focal_loss')
+        #self.obj_loss = FocalLoss(label_smoothing=label_smoothing, from_logits=True, sigmoid_ce=True, reduction=tf.keras.losses.Reduction.NONE, name='obj_focal_loss')
+        self.obj_loss = tf.keras.losses.BinaryCrossentropy(label_smoothing=label_smoothing, from_logits=True, reduction=tf.keras.losses.Reduction.NONE, name='obj_focal_loss')
 
         self.train_metric = Metric(max_sequence_len, dictionary_size, from_logits=False, label_smoothing=label_smoothing, name='train_metric', training=True)
         self.eval_metric = Metric(max_sequence_len, dictionary_size, from_logits=False, label_smoothing=label_smoothing, name='eval_metric', training=False)
