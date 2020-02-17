@@ -16,6 +16,7 @@ from collections import defaultdict
 
 import anchors_gen
 import encoder
+import stn
 
 logger = logging.getLogger('detection')
 logger.propagate = False
@@ -44,6 +45,7 @@ parser.add_argument('--do_not_save_images', action='store_true', help='Do not sa
 parser.add_argument('--save_crops_dir', type=str, help='Directory to save slightly upscaled text crops')
 parser.add_argument('--dataset_type', type=str, choices=['files', 'mscoco_tfrecords', 'filelist'], default='files', help='Dataset type')
 parser.add_argument('--image_size', type=int, required=True, help='Use this image size, if 0 - use default')
+parser.add_argument('--crop_size', type=int, default=24, help='Use this size for feature crops')
 parser.add_argument('--max_sequence_len', default=32, type=int, help='Maximum sequence length')
 parser.add_argument('filenames', type=str, nargs='*', help='Numeric label : file path')
 
@@ -259,31 +261,86 @@ def per_image_supression(y_pred, image_size, anchors_all, model, pad_value):
     word_poly, word_obj, word_index_size = size_filter_for_poly(word_poly, word_obj)
     word_poly_sorted, word_obj_sorted, word_index_sort = sort_and_pad_for_poly(word_poly, word_obj, tf.squeeze(word_obj, 1))
 
-    if tf.shape(word_obj)[0] > 0:
-        features = tf.expand_dims(features, 0)
-        feature_size = tf.cast(tf.shape(features)[1], tf.float32)
-        feature_poly = word_poly * feature_size / image_size
-        crop_size = 16
-        crop_size = [crop_size, crop_size]
-
-        bboxes = anchors_gen.polygon2bbox(feature_poly, want_yx=True)
-        bboxes /= feature_size
-
-        box_index = tf.tile([0], [tf.shape(bboxes)[0]])
-
-        selected_features = tf.image.crop_and_resize(features, bboxes, box_index, crop_size)
-
-        batch_size = tf.shape(selected_features)[0]
-        states_h = tf.zeros((batch_size, model.num_rnn_units), dtype=selected_features.dtype)
-        states_c = tf.zeros((batch_size, model.num_rnn_units), dtype=selected_features.dtype)
-        states = [states_h, states_c]
-
-        _, rnn_outputs_ar = model.rnn_layer(selected_features, 0, 0, states, False)
-
-        texts = tf.argmax(rnn_outputs_ar, -1)
-        texts = tf.pad(texts, [[0, FLAGS.max_ret - tf.shape(texts)[0]], [0, 0]], mode='CONSTANT', constant_values=pad_value)
-    else:
+    if tf.shape(word_obj)[0] == 0:
         texts = tf.ones((FLAGS.max_ret, FLAGS.max_sequence_len), dtype=tf.int64) * pad_value
+        return word_obj_sorted, word_poly_sorted, texts
+
+    selected_features = tf.TensorArray(features.dtype, size=0, dynamic_size=True)
+    written = 0
+
+    features = tf.expand_dims(features, 0)
+    feature_size = tf.cast(tf.shape(features)[1], tf.float32)
+    feature_poly = word_poly * feature_size / image_size
+
+    x = feature_poly[..., 0]
+    y = feature_poly[..., 1]
+    lx = (x[:, 0] + x[:, 3]) / 2
+    ly = (y[:, 0] + y[:, 3]) / 2
+
+    rx = (x[:, 1] + x[:, 2]) / 2
+    ry = (y[:, 1] + y[:, 2]) / 2
+
+    angles = tf.math.atan2(ry - ly, rx - lx)
+
+    x0 = x[:, 0]
+    y0 = y[:, 0]
+    x1 = x[:, 1]
+    y1 = y[:, 1]
+    x2 = x[:, 2]
+    y2 = y[:, 2]
+    x3 = x[:, 3]
+    y3 = y[:, 3]
+
+    h0 = (x0 - x3)**2 + (y0 - y3)**2
+    h1 = (x1 - x2)**2 + (y1 - y2)**2
+    h = tf.math.sqrt(tf.maximum(h0, h1)) + 2
+
+    w0 = (x0 - x1)**2 + (y0 - y1)**2
+    w1 = (x2 - x3)**2 + (y2 - y3)**2
+    w = tf.math.sqrt(tf.maximum(w0, w1)) + 2
+
+    sx = w / (FLAGS.crop_size * 2)
+    sy = h / (FLAGS.crop_size / 2)
+
+    z = tf.zeros_like(x0)
+    o = tf.ones_like(x0)
+
+    def tm(t):
+        t = tf.convert_to_tensor(t)
+        t = tf.transpose(t, [2, 0, 1])
+        return t
+
+    def const(x):
+        return o * x
+
+    t0 = tm([[o, z, x0-1], [z, o, y0-1], [z, z, o]])
+    t1 = tm([[tf.cos(angles), -tf.sin(angles), z], [tf.sin(angles), tf.cos(angles), z], [z, z, o]])
+    t2 = tm([[sx, z, z], [z, sy, z], [z, z, o]])
+
+    transforms = t0 @ t1 @ t2
+    transforms = transforms[:, :2, :]
+
+    num_crops = tf.shape(transforms)[0]
+    for crop_idx in tf.range(num_crops):
+        t = transforms[crop_idx, ...]
+        t = tf.expand_dims(t, 0)
+
+        cropped_features = stn.spatial_transformer_network(features, t, out_dims=[FLAGS.crop_size, FLAGS.crop_size])
+
+        selected_features = selected_features.write(written, cropped_features)
+        written += 1
+
+    selected_features = selected_features.concat()
+
+    batch_size = tf.shape(selected_features)[0]
+    states_h = tf.zeros((batch_size, model.num_rnn_units), dtype=selected_features.dtype)
+    states_c = tf.zeros((batch_size, model.num_rnn_units), dtype=selected_features.dtype)
+    states = [states_h, states_c]
+
+    _, rnn_outputs_ar = model.rnn_layer(selected_features, 0, 0, states, False)
+
+    texts = tf.argmax(rnn_outputs_ar, -1)
+    texts = tf.pad(texts, [[0, FLAGS.max_ret - tf.shape(texts)[0]], [0, 0]], mode='CONSTANT', constant_values=pad_value)
 
     return word_obj_sorted, word_poly_sorted, texts
 
@@ -446,13 +503,13 @@ def run_inference():
 
     dictionary_size, dict_table, pad_value = anchors_gen.create_lookup_table(FLAGS.dictionary)
 
-    model = encoder.create_model(FLAGS.model_name, image_size, FLAGS.max_sequence_len, dictionary_size, pad_value, dtype)
+    model = encoder.create_model(FLAGS.model_name, image_size, FLAGS.crop_size, FLAGS.max_sequence_len, dictionary_size, pad_value, dtype)
     if model.output_sizes is None:
         dummy_input = tf.ones((int(FLAGS.batch_size), image_size, image_size, 3), dtype=dtype)
         model(dummy_input, training=False)
         logger.info('image_size: {}, model output sizes: {}'.format(image_size, model.output_sizes))
 
-    anchors_all, all_grid_xy, all_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
+    anchors_all, all_grid_xy, all_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes, dtype)
 
     checkpoint = tf.train.Checkpoint(model=model)
 
