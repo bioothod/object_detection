@@ -241,14 +241,14 @@ class Encoder(tf.keras.Model):
 
             h0 = (x0 - x3)**2 + (y0 - y3)**2
             h1 = (x1 - x2)**2 + (y1 - y2)**2
-            h = tf.math.sqrt(tf.maximum(h0, h1))
+            h = tf.math.sqrt(tf.maximum(h0, h1)) + 2
 
             w0 = (x0 - x1)**2 + (y0 - y1)**2
             w1 = (x2 - x3)**2 + (y2 - y3)**2
-            w = tf.math.sqrt(tf.maximum(w0, w1))
+            w = tf.math.sqrt(tf.maximum(w0, w1)) + 2
 
-            sx = w / self.crop_size
-            sy = h / self.crop_size
+            sx = w / (self.crop_size * 2)
+            sy = h / (self.crop_size // 2)
 
             z = tf.zeros_like(x0)
             o = tf.ones_like(x0)
@@ -261,7 +261,7 @@ class Encoder(tf.keras.Model):
             def const(x):
                 return o * x
 
-            t0 = tm([[o, z, x0], [z, o, y0], [z, z, o]])
+            t0 = tm([[o, z, x0-1], [z, o, y0-1], [z, z, o]])
             t1 = tm([[tf.cos(angles), -tf.sin(angles), z], [tf.sin(angles), tf.cos(angles), z], [z, z, o]])
             t2 = tm([[sx, z, z], [z, sy, z], [z, z, o]])
 
@@ -274,87 +274,19 @@ class Encoder(tf.keras.Model):
                 t = transforms[crop_idx, ...]
                 t = tf.expand_dims(t, 0)
 
-                cropped_features = stn.spatial_transformer_network(features, t, out_dims=[self.crop_size, self.crop_size])
+                cropped_features = stn.spatial_transformer_network(features, t, out_dims=[self.crop_size // 2, self.crop_size * 2])
 
                 selected_features = selected_features.write(written, cropped_features)
                 written += 1
 
+        selected_features = selected_features.concat()
 
-        batch_size = 16
+        batch_size = tf.shape(selected_features)[0]
+        states_h = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=dtype)
+        states_c = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=dtype)
+        states = [states_h, states_c]
 
-        if True or selected_features.size() < batch_size:
-            selected_features = selected_features.concat()
-
-            batch_size = tf.shape(selected_features)[0]
-            states_h = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=dtype)
-            states_c = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=dtype)
-            states = [states_h, states_c]
-
-            return self.rnn_layer(selected_features, true_words, true_lengths, states, training)
-        else:
-            num = (selected_features.size() + batch_size - 1) // batch_size
-
-            with tf.device('cpu:0'):
-                outputs = tf.TensorArray(dtype, size=num)
-                outputs_ar = tf.TensorArray(dtype, size=num)
-
-            states_h = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=dtype)
-            states_c = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=dtype)
-            states_big = [states_h, states_c]
-
-            idx = 0
-            start = 0
-
-            def cond(idx, outputs, outputs_ar, start):
-                return tf.less(idx, num)
-
-            def body(idx, outputs, outputs_ar, start):
-                end = start + batch_size
-                if end > selected_features.size():
-                    end = selected_features.size()
-
-                index = tf.range(start, end)
-                sf = selected_features.gather(index)
-                sf = tf.squeeze(sf, 1)
-                #logger.info('index: {}, sf: {}'.format(index.shape, sf.shape))
-
-                tw = true_words[start:end, ...]
-                tl = true_lengths[start:end, ...]
-
-                if (idx == num - 1) and (end - start != batch_size):
-                    pad_size = batch_size - (end - start)
-
-                    #tf.print('selected_features:', selected_features.size(), 'start:', start, 'end:', end, 'idx:', idx, 'pad:', pad_size,
-                    #        'tw:', tf.shape(tw), 'tl:', tf.shape(tl), 'sf:', tf.shape(sf))
-
-                    tw = tf.pad(tw, [[0, pad_size], [0, 0]])
-                    tl = tf.pad(tl, [[0, pad_size]])
-                    sf = tf.pad(sf, [[0, pad_size], [0, 0], [0, 0], [0, 0]])
-
-                tw.set_shape([batch_size, self.max_sequence_len])
-                tl.set_shape([batch_size])
-                sf.set_shape([batch_size, self.crop_size, self.crop_size, features_full.shape[3]])
-
-                out, out_ar = self.rnn_layer(sf, tw, tl, states_big, training)
-
-                with tf.device('cpu:0'):
-                    if (idx == num - 1) and (end - start != batch_size):
-                        num_elements = end - start
-                        out = out[:num_elements, ...]
-                        out_ar = out_ar[:num_elements, ...]
-
-                    outputs = outputs.write(idx, out)
-                    outputs_ar = outputs_ar.write(idx, out_ar)
-
-                start = end
-                idx += 1
-
-                return idx, outputs, outputs_ar, start
-
-            idx, outputs, outputs_ar, start = tf.while_loop(cond, body, [idx, outputs, outputs_ar, start], parallel_iterations=32)
-
-            with tf.device('cpu:0'):
-                return outputs.concat(), outputs_ar.concat()
+        return self.rnn_layer(selected_features, true_words, true_lengths, states, training)
 
 
     def rnn_inference_from_true_values(self, class_outputs, raw_features, word_obj_mask, true_word_poly, true_words, true_lengths, anchors_all, training, use_predicted_polys):
