@@ -51,10 +51,9 @@ class TextMetric:
 
     def update_state(self, true_texts, true_lengths, logits):
         dtype = tf.float32
-        true_lengths = tf.cast(true_lengths, dtype)
         logits = tf.cast(logits, dtype)
 
-        true_texts_oh = tf.one_hot(true_texts, self.dictionary_size)
+        true_texts_oh = tf.one_hot(true_texts, self.dictionary_size, dtype=dtype)
 
         batch_size = tf.shape(logits)[0]
         weights = tf.range(self.max_sequence_len, dtype=true_lengths.dtype)
@@ -64,7 +63,7 @@ class TextMetric:
         true_lengths = tf.expand_dims(true_lengths, 1)
         true_lengths = tf.tile(true_lengths, [1, self.max_sequence_len])
         #logger.info('true_texts: {}, true_texts_oh: {}, logits: {}, weights: {}'.format(true_texts.shape, true_texts_oh.shape, logits.shape, weights.shape))
-        weights = tf.where(weights < true_lengths, tf.ones_like(weights), tf.zeros_like(weights))
+        weights = tf.where(weights < true_lengths, tf.ones_like(weights, dtype=dtype), tf.zeros_like(weights, dtype=dtype))
 
         word_loss = self.ce(y_true=true_texts_oh, y_pred=logits, sample_weight=weights)
         full_loss = self.ce(y_true=true_texts_oh, y_pred=logits)
