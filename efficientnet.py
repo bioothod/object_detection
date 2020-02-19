@@ -19,7 +19,6 @@ GlobalParams = collections.namedtuple('GlobalParams', [
     'batch_norm_momentum', 'batch_norm_epsilon', 'dropout_rate', 'data_format',
     'num_classes', 'width_coefficient', 'depth_coefficient',
     'depth_divisor', 'min_depth', 'drop_connect_rate', 'relu_fn',
-    'l2_reg_weight',
 ])
 GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
 
