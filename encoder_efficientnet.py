@@ -10,7 +10,7 @@ logger = logging.getLogger('detection')
 GlobalParams = collections.namedtuple('GlobalParams', [
     'batch_norm_momentum', 'batch_norm_epsilon', 'data_format',
     'relu_fn',
-    'l2_reg_weight', 'spatial_dims', 'channel_axis', 'model_name',
+    'spatial_dims', 'channel_axis', 'model_name',
     'obj_score_threshold', 'lstm_dropout', 'spatial_dropout'
 ])
 
