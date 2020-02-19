@@ -17,7 +17,7 @@ logger = logging.getLogger('detection')
 GlobalParams = collections.namedtuple('GlobalParams', [
     'batch_norm_momentum', 'batch_norm_epsilon', 'data_format',
     'relu_fn',
-    'l2_reg_weight', 'spatial_dims', 'channel_axis', 'model_name',
+    'spatial_dims', 'channel_axis', 'model_name',
     'obj_score_threshold', 'lstm_dropout', 'spatial_dropout',
     'dictionary_size', 'max_sequence_len', 'pad_value',
     'image_size', 'num_anchors', 'crop_size',
@@ -112,17 +112,17 @@ class Head(tf.keras.layers.Layer):
         super().__init__(**kwargs)
 
         self.s2_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
-        self.s2_input = EncoderConvList(params, [512, 1024, 512])
+        self.s2_input = EncoderConvList(params, [512])
         self.s2_output = ObjectDetectionLayer(params, num_classes, name="detection_layer_2")
         self.up2 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
 
         self.s1_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
-        self.s1_input = EncoderConvList(params, [256, 512, 256])
+        self.s1_input = EncoderConvList(params, [256])
         self.s1_output = ObjectDetectionLayer(params, num_classes, name="detection_layer_1")
         self.up1 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
 
         self.s0_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
-        self.s0_input = EncoderConvList(params, [128, 256, 128])
+        self.s0_input = EncoderConvList(params, [128])
         self.s0_output = ObjectDetectionLayer(params, num_classes, name="detection_layer_0")
 
         self.pads = [None]
@@ -184,10 +184,8 @@ class Encoder(tf.keras.Model):
             raise NameError('unsupported model name {}'.format(params.model_name))
 
         self.crop_size = params.crop_size
-        self.num_rnn_units = 256
 
-        self.rnn_layer = attention.RNNLayer(params, self.num_rnn_units, self.max_sequence_len, params.dictionary_size, params.pad_value, cell='lstm')
-        #self.state_conv = EncoderConv(params, self.num_rnn_units)
+        self.rnn_layer = attention.RNNLayer(params, self.max_sequence_len, params.dictionary_size, params.pad_value)
         self.head = Head(params, classes)
 
         self.output_sizes = None
@@ -198,7 +196,7 @@ class Encoder(tf.keras.Model):
         true_words = tf.boolean_mask(true_words_full, word_obj_mask_full)
         true_lengths = tf.boolean_mask(true_lengths_full, word_obj_mask_full)
 
-        logger.info('RNN features: {}, crop_size: {}'.format(features_full.shape, self.crop_size))
+        logger.info('RNN features: {}, crop_size: {}'.format(features_full.shape, list(self.crop_size)))
         feature_size = tf.cast(tf.shape(features_full)[1], dtype)
 
         batch_size = tf.shape(features_full)[0]
@@ -247,8 +245,8 @@ class Encoder(tf.keras.Model):
             w1 = (x2 - x3)**2 + (y2 - y3)**2
             w = tf.math.sqrt(tf.maximum(w0, w1)) + 2
 
-            sx = w / (self.crop_size * 2)
-            sy = h / (self.crop_size // 2)
+            sy = h / self.crop_size[0]
+            sx = w / self.crop_size[1]
 
             z = tf.zeros_like(x0)
             o = tf.ones_like(x0)
@@ -274,19 +272,14 @@ class Encoder(tf.keras.Model):
                 t = transforms[crop_idx, ...]
                 t = tf.expand_dims(t, 0)
 
-                cropped_features = stn.spatial_transformer_network(features, t, out_dims=[self.crop_size // 2, self.crop_size * 2])
+                cropped_features = stn.spatial_transformer_network(features, t, out_dims=self.crop_size)
 
                 selected_features = selected_features.write(written, cropped_features)
                 written += 1
 
         selected_features = selected_features.concat()
 
-        batch_size = tf.shape(selected_features)[0]
-        states_h = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=dtype)
-        states_c = tf.zeros((batch_size, self.rnn_layer.num_rnn_units), dtype=dtype)
-        states = [states_h, states_c]
-
-        return self.rnn_layer(selected_features, true_words, true_lengths, states, training)
+        return self.rnn_layer(selected_features, true_words, true_lengths, training)
 
 
     def rnn_inference_from_true_values(self, class_outputs, raw_features, word_obj_mask, true_word_poly, true_words, true_lengths, anchors_all, training, use_predicted_polys):
@@ -323,6 +316,9 @@ class Encoder(tf.keras.Model):
 def create_params(model_name, image_size, crop_size, max_sequence_len, dictionary_size, pad_value, dtype):
     data_format='channels_last'
 
+    crop = crop_size.split('x')[:2]
+    crop_size = [int(c) for c in crop]
+
     if data_format == 'channels_first':
         raise NameError('unsupported data format {}'.format(data_format))
 
@@ -350,7 +346,6 @@ def create_params(model_name, image_size, crop_size, max_sequence_len, dictionar
         'num_anchors': anchors_gen.num_anchors,
         'dtype': dtype,
         'crop_size': crop_size,
-        'l2_reg_weight': 0,
     }
 
     params = GlobalParams(**params)
