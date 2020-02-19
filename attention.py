@@ -33,12 +33,12 @@ class MultiHeadAttention(tf.keras.layers.Layer):
 
         self.depth = attention_feature_dim // self.num_heads
 
-        self.query_dense = tf.keras.layers.Dense(units=attention_feature_dim)
-        self.value_dense = tf.keras.layers.Dense(units=attention_feature_dim)
+        self.query_dense = tf.keras.layers.Dense(units=attention_feature_dim, name='query')
+        self.value_dense = tf.keras.layers.Dense(units=attention_feature_dim, name='value')
 
         #self.attention = tf.keras.layers.Attention()
 
-        self.dense = tf.keras.layers.Dense(units=attention_feature_dim)
+        self.dense = tf.keras.layers.Dense(units=attention_feature_dim, name='final')
 
     def split_heads(self, inputs, batch_size):
         inputs = tf.reshape(inputs, shape=(batch_size, -1, self.num_heads, self.depth))
@@ -73,21 +73,23 @@ class AttentionBlock(tf.keras.layers.Layer):
     def __init__(self, params, attention_feature_dim, num_heads, **kwargs):
         super().__init__(**kwargs)
 
-        self.norm = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-        if False:
+        if params.dtype == tf.float32:
+            self.norm = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        else:
             self.norm = tf.keras.layers.BatchNormalization(
                 axis=params.channel_axis,
                 momentum=params.batch_norm_momentum,
                 epsilon=params.batch_norm_epsilon)
 
         self.dropout = tf.keras.layers.Dropout(rate=params.spatial_dropout)
-        self.mha = MultiHeadAttention(attention_feature_dim, num_heads)
+        self.mha = MultiHeadAttention(attention_feature_dim, num_heads, name='mha')
 
-        self.dense0 = tf.keras.layers.Dense(units=attention_feature_dim)
-        self.dense1 = tf.keras.layers.Dense(units=attention_feature_dim)
+        self.dense0 = tf.keras.layers.Dense(units=attention_feature_dim, name='dense0')
+        self.dense1 = tf.keras.layers.Dense(units=attention_feature_dim, name='dense1')
         self.dense_dropout = tf.keras.layers.Dropout(rate=params.spatial_dropout)
-        self.dense_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-        if False:
+        if params.dtype == tf.float32:
+            self.dense_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        else:
             self.dense_norm = tf.keras.layers.BatchNormalization(
                 axis=params.channel_axis,
                 momentum=params.batch_norm_momentum,
@@ -117,57 +119,44 @@ class AttentionBlock(tf.keras.layers.Layer):
         return dense_out
 
 class AttentionCell(tf.keras.layers.Layer):
-    def __init__(self, params, num_units, attention_feature_dim, num_heads, dictionary_size, cell='lstm', **kwargs):
+    def __init__(self, params, attention_feature_dim, num_heads, dictionary_size, **kwargs):
         super(AttentionCell, self).__init__(self, **kwargs)
 
-        self.dictionary_size = dictionary_size
-
-        self.cell_dropout = tf.keras.layers.Dropout(rate=params.lstm_dropout)
-        cell = cell.lower()
-        if cell == 'lstm':
-            self.cell = tf.keras.layers.LSTMCell(num_units,
-                    kernel_initializer=tf.keras.initializers.Orthogonal(),
-                    recurrent_initializer=tf.keras.initializers.Orthogonal(),
-                    unit_forget_bias=True)
-        elif cell == 'gru':
-            self.cell = tf.keras.layers.GRUCell(num_units,
-                    kernel_initializer=tf.keras.initializers.Orthogonal(),
-                    recurrent_initializer=tf.keras.initializers.Orthogonal())
-        else:
-            raise NameError('unsupported rnn cell type "{}"'.format(cell))
-
-        self.cell_clip = 10
-
-        self.attention_layer = AttentionBlock(params, attention_feature_dim, num_heads)
+        self.attention_layer0 = AttentionBlock(params, attention_feature_dim, num_heads, name='att0')
+        self.attention_layer1 = AttentionBlock(params, attention_feature_dim, num_heads, name='att1')
         self.attention_pooling = tf.keras.layers.GlobalAveragePooling1D()
 
-        self.wc = tf.keras.layers.Dense(attention_feature_dim)
+        self.wc = tf.keras.layers.Dense(attention_feature_dim, name='wc')
 
-        self.wu_pred = tf.keras.layers.Dense(dictionary_size)
-        self.wo = tf.keras.layers.Dense(dictionary_size)
+        self.dense_dropout = tf.keras.layers.Dropout(rate=params.spatial_dropout)
+        self.dense0 = tf.keras.layers.Dense(attention_feature_dim, name='dense0')
 
-    def call(self, char_dist, features, state, training=True):
-        state_concat = tf.concat(state, -1)
-        state_with_time = tf.expand_dims(state_concat, 1)
+        self.wo = tf.keras.layers.Dense(dictionary_size, name='wo')
 
-        weighted_features = self.attention_layer(features, state_with_time, training)
-        weighted_pooled_features = self.attention_pooling(weighted_features)
+    def call(self, char_dist, features, state, training):
+        state_with_time = tf.expand_dims(state, 1)
+
+        weighted_features0 = self.attention_layer0(features, state_with_time, training)
+        weighted_pooled_features0 = self.attention_pooling(weighted_features0)
 
         weighted_char_dist = self.wc(char_dist)
 
-        rnn_input = weighted_char_dist + weighted_pooled_features
+        if False:
+            state1 = weighted_char_dist + weighted_pooled_features0
+            state_with_time1 = tf.expand_dims(state1, 1)
+            weighted_features1 = self.attention_layer1(weighted_features0, state_with_time1, training)
+            weighted_pooled_features1 = self.attention_pooling(weighted_features1)
+            net_out = weighted_pooled_features1
+        else:
+            net_input = weighted_char_dist + weighted_pooled_features0
 
-        #logger.info('char_dist: {}, weighted_char_dist: {}, features: {}, weighted_features: {}, weighted_pooled_features: {}, rnn_input: {}, state: {}'.format(
-        #    char_dist.shape, weighted_char_dist.shape, features.shape, weighted_features.shape, weighted_pooled_features.shape, rnn_input.shape, state_with_time.shape))
+            net_out = self.dense_dropout(net_input, training=training)
+            net_out = self.dense0(net_out)
 
-        rnn_input = self.cell_dropout(rnn_input, training)
-        rnn_out, new_state = self.cell(rnn_input, state, training=training)
-        new_state = [tf.clip_by_value(s, -self.cell_clip, self.cell_clip) for s in new_state]
-
-        output_char_dist = self.wo(rnn_out) + self.wu_pred(weighted_pooled_features)
+        output_char_dist = self.wo(net_out)
         output_char_dist = tf.nn.softmax(output_char_dist, axis=1)
 
-        return output_char_dist, new_state
+        return output_char_dist, weighted_pooled_features0
 
 def add_spatial_encoding(features):
     batch_size = tf.shape(features)[0]
@@ -183,7 +172,7 @@ def add_spatial_encoding(features):
     return tf.concat([features, loc], 3)
 
 class RNNLayer(tf.keras.Model):
-    def __init__(self, params, num_rnn_units, max_sequence_len, dictionary_size, pad_value, cell='lstm', **kwargs):
+    def __init__(self, params, max_sequence_len, dictionary_size, pad_value, **kwargs):
         super(RNNLayer, self).__init__(self, **kwargs)
 
         self.bn = tf.keras.layers.BatchNormalization(
@@ -195,37 +184,35 @@ class RNNLayer(tf.keras.Model):
         self.max_sequence_len = max_sequence_len
         self.dictionary_size = dictionary_size
 
-        self.num_rnn_units = num_rnn_units
-
-        attention_feature_dim = 256
+        self.attention_feature_dim = 256
         num_heads = 8
 
-        self.dense_features = tf.keras.layers.Dense(units=attention_feature_dim)
-        self.attention_cell = AttentionCell(params, num_rnn_units, attention_feature_dim, num_heads, dictionary_size, cell=cell)
+        self.conv_features = tf.keras.layers.Conv2D(self.attention_feature_dim, kernel_size=(1, 1), strides=(1, 1), padding='SAME', activation=params.relu_fn)
+        self.attention_cell = AttentionCell(params, self.attention_feature_dim, num_heads, dictionary_size)
 
-    def call(self, image_features, gt_tokens, gt_lens, initial_state, training):
+    def call(self, image_features, gt_tokens, gt_lens, training):
         image_features = self.bn(image_features, training=training)
         spatial_features = add_spatial_encoding(image_features)
 
         batch_size = tf.shape(spatial_features)[0]
-        spatial_feature_size = spatial_features.shape[-1]
-        reshaped_features = tf.reshape(spatial_features, [batch_size, -1, spatial_feature_size])
 
         #logger.info('image_features: {}, spatial features: {} -> {}'.format(image_features.shape, spatial_features.shape, reshaped_features.shape))
+
+        spatial_features = self.conv_features(spatial_features)
+        features = tf.reshape(spatial_features, [batch_size, -1, self.attention_feature_dim])
 
         null_token = tf.tile([self.start_token], [batch_size])
         def init():
             char_dists = tf.TensorArray(image_features.dtype, size=self.max_sequence_len)
 
             char_dist = tf.one_hot(null_token, self.dictionary_size, dtype=image_features.dtype)
+            initial_state = tf.zeros((batch_size, tf.shape(features)[-1]), dtype=features.dtype)
 
             return initial_state, char_dist, char_dists
 
 
         state, char_dist, char_dists = init()
         state_ar, char_dist_ar, char_dists_ar = init()
-
-        features = self.dense_features(reshaped_features)
 
         for idx in range(self.max_sequence_len):
             if idx != 0:
