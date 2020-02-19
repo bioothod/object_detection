@@ -8,7 +8,7 @@ logger = logging.getLogger('detection')
 
 GlobalParams = collections.namedtuple('GlobalParams', [
     'batch_norm_momentum', 'batch_norm_epsilon', 'dropout_rate', 'data_format',
-    'relu_fn', 'l2_reg_weight', 'channel_axis', 'spatial_dims'
+    'relu_fn', 'channel_axis', 'spatial_dims'
 ])
 GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
 
