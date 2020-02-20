@@ -154,21 +154,21 @@ class FeatureExtractor(tf.keras.Model):
 
         self.blocks = []
 
-        self.blocks.append(TextConv(params, 16, name='l0_512_text_conv_16'))
-        self.blocks.append(TextConv(params, 32, name='l0_512_text_conv_32'))
-        self.blocks.append(BlockPool(params, 64, name='l0_256_pool_64'))
+        self.blocks.append(TextConv(params, 16, name='l0_conv0'))
+        self.blocks.append(TextConv(params, 32, name='l0_conv1'))
+        self.blocks.append(BlockPool(params, 64, name='l0_pool'))
 
-        self.blocks.append(GatedBlockResidual(params, [32, 64], name='l1_256_res_64'))
-        self.blocks.append(BlockPool(params, 128, name='l1_128_pool_64'))
+        self.blocks.append(GatedBlockResidual(params, [32, 64], name='l1_res0'))
+        self.blocks.append(BlockPool(params, 64, name='l1_pool'))
 
-        self.blocks.append(GatedBlockResidual(params, [64, 128], name='l2_128_res_64_raw0'))
-        self.blocks.append(BlockPool(params, 256, name='l2_64_pool_128_output0'))
+        self.blocks.append(GatedBlockResidual(params, [64, 64], name='l2_res0_raw0'))
+        self.blocks.append(BlockPool(params, 128, name='l2_pool_output0'))
 
-        self.blocks.append(GatedBlockResidual(params, [128, 256], name='l3_64_res_128_raw1'))
-        self.blocks.append(BlockPool(params, 512, name='l3_32_pool_256_output1'))
+        self.blocks.append(GatedBlockResidual(params, [128, 128], name='l3_res0_raw1'))
+        self.blocks.append(BlockPool(params, 256, name='l3_pool_output1'))
 
-        self.blocks.append(GatedBlockResidual(params, [256, 512], name='l4_32_res_256_raw2'))
-        self.blocks.append(BlockPool(params, 512, name='l4_16_pool_512_output2'))
+        self.blocks.append(GatedBlockResidual(params, [256, 256], name='l4_res0_raw2'))
+        self.blocks.append(BlockPool(params, 512, name='l4_pool_output2'))
 
         self.raw0_upsampling = BlockConvUpsampling(params, [256] , want_upsampling=False)
         self.raw1_upsampling = BlockConvUpsampling(params, [256])
