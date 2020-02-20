@@ -162,6 +162,41 @@ class Head(tf.keras.layers.Layer):
 
         return [out2, out1, out0]
 
+def gaussian_mask(mu, sigma, dim, dim_tile):
+    r = tf.cast(tf.range(dim), tf.float32)
+    r = tf.expand_dims(r, 0)
+    r = tf.tile(r, [tf.shape(mu)[0], 1])
+
+    #sigma = tf.expand_dims(sigma, -1)
+    #mu = tf.expand_dims(mu, -1)
+
+    centers = r - mu
+    mask = tf.exp(-.5 * tf.square(centers / sigma))
+    mask = tf.expand_dims(mask, -1)
+    mask = tf.tile(mask, [1, 1, dim_tile])
+    #mask = mask / (tf.reduce_sum(mask, 1, keepdims=True) + 1e-8)
+    return mask
+
+def generate_gaussian_mask(image, mask_params):
+    h = tf.shape(image)[1]
+    w = tf.shape(image)[2]
+    c = tf.shape(image)[3]
+
+    mu_h, sigma_h, mu_w, sigma_w = tf.split(mask_params, 4, axis=-1)
+
+    mask_h = gaussian_mask(mu_h, sigma_h, h, w)
+    mask_w = gaussian_mask(mu_w, sigma_w, w, h)
+    mask_w = tf.transpose(mask_w, (0, 2, 1))
+
+    mask = mask_h * mask_w
+
+    mask = tf.expand_dims(mask, -1)
+    mask = tf.tile(mask, [1, 1, 1, c])
+
+    new_image = image * mask
+
+    return new_image
+
 class Encoder(tf.keras.Model):
     def __init__(self, params, **kwargs):
         super().__init__(**kwargs)
@@ -247,6 +282,7 @@ class Encoder(tf.keras.Model):
 
             sy = h / self.crop_size[0]
             sx = w / self.crop_size[1]
+            scale = tf.maximum(sx, sy)
 
             z = tf.zeros_like(x0)
             o = tf.ones_like(x0)
@@ -261,10 +297,19 @@ class Encoder(tf.keras.Model):
 
             t0 = tm([[o, z, x0-1], [z, o, y0-1], [z, z, o]])
             t1 = tm([[tf.cos(angles), -tf.sin(angles), z], [tf.sin(angles), tf.cos(angles), z], [z, z, o]])
-            t2 = tm([[sx, z, z], [z, sy, z], [z, z, o]])
+            t2 = tm([[scale, z, z], [z, scale, z], [z, z, o]])
 
             transforms = t0 @ t1 @ t2
             transforms = transforms[:, :2, :]
+
+            xsize = w / scale
+            ysize = h / scale
+
+            mu_w = xsize / 2
+            mu_h = ysize / 2
+            sigma_w = xsize / 4
+            sigma_h = ysize / 4
+            mask_params = tf.stack([mu_h, sigma_h, mu_w, sigma_w], 1)
 
             features = tf.expand_dims(features, 0)
             num_crops = tf.shape(transforms)[0]
@@ -272,7 +317,10 @@ class Encoder(tf.keras.Model):
                 t = transforms[crop_idx, ...]
                 t = tf.expand_dims(t, 0)
 
+                mp = tf.expand_dims(mask_params[crop_idx, ...], 0)
+
                 cropped_features = stn.spatial_transformer_network(features, t, out_dims=self.crop_size)
+                cropped_features = generate_gaussian_mask(cropped_features, mp)
 
                 selected_features = selected_features.write(written, cropped_features)
                 written += 1
