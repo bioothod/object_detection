@@ -24,6 +24,7 @@ import loss
 import preprocess
 
 parser = argparse.ArgumentParser()
+parser.add_argument('--force_epoch', type=int, help='Force this epoch number')
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch')
 parser.add_argument('--num_epochs', type=int, default=1000, help='Number of epochs to run')
 parser.add_argument('--skip_saving_epochs', type=int, default=0, help='Do not save good checkpoint and update best metric for this number of the first epochs')
@@ -289,22 +290,20 @@ def train():
     checkpoint = tf.train.Checkpoint(step=global_step, epoch=epoch_var, optimizer=opt, model=model)
     manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=20)
 
-    restored_path = None
+    restore_path = None
 
     if FLAGS.use_good_checkpoint:
-        good_checkpoint = tf.train.Checkpoint(step=global_step, epoch=epoch_var, optimizer=opt, model=model)
-        good_manager = tf.train.CheckpointManager(good_checkpoint, good_checkpoint_dir, max_to_keep=20)
-        if good_manager.latest_checkpoint:
-            status = good_checkpoint.restore(good_manager.latest_checkpoint)
-            logger.info("Restored from good checkpoint {}, global step: {}".format(good_manager.latest_checkpoint, global_step.numpy()))
-            restored_path = good_manager.latest_checkpoint
+        restore_path = tf.train.latest_checkpoint(good_checkpoint_dir)
+        if restore_path:
+            status = checkpoint.restore(restore_path)
+            logger.info("Restored from good checkpoint {}, global step: {}".format(restore_path, global_step.numpy()))
 
-    if not restored_path:
+    if not restore_path:
         status = checkpoint.restore(manager.latest_checkpoint)
 
         if manager.latest_checkpoint:
             logger.info("Restored from {}, global step: {}, epoch: {}".format(manager.latest_checkpoint, global_step.numpy(), epoch_var.numpy()))
-            restored_path = manager.latest_checkpoint
+            restore_path = manager.latest_checkpoint
         else:
             logger.info("Initializing from scratch, no latest checkpoint")
 
@@ -316,6 +315,15 @@ def train():
                 saved_path = manager.save()
                 logger.info("Restored base model from external checkpoint {} and saved object-based checkpoint {}".format(FLAGS.base_checkpoint, saved_path))
                 exit(0)
+
+    if FLAGS.use_predicted_polys_epochs >= 0:
+        if epoch_var.numpy() >= FLAGS.use_predicted_polys_epochs:
+            logger.info('epoch: {}, global_step: {}, use_predicted_polys_epochs: {}, will use predicted polygones for dimensions'.format(
+                int(epoch_var.numpy()), global_step.numpy(), FLAGS.use_predicted_polys_epochs))
+
+    if FLAGS.force_epoch:
+        logger.info('epoch: {}, global_step: {}, forcing epoch number {}'.format(int(epoch_var.numpy()), global_step.numpy(), FLAGS.force_epoch))
+        epoch_var.assign(FLAGS.force_epoch)
 
     metric = loss.LossMetricAggregator(FLAGS.max_sequence_len, dictionary_size, FLAGS.batch_size * num_replicas)
 
@@ -337,7 +345,8 @@ def train():
 
         use_predicted_polys = False
         if FLAGS.use_predicted_polys_epochs >= 0:
-            use_predicted_polys = epoch_var.numpy() > FLAGS.use_predicted_polys_epochs
+            # this is eager mode, there is no epoch_var.numpy() method
+            use_predicted_polys = epoch_var > FLAGS.use_predicted_polys_epochs
 
         num_words = tf.math.count_nonzero(true_word_obj)
 
@@ -454,7 +463,7 @@ def train():
         metric.train_metric.total_loss.update_state(text_loss)
         return objdet_loss, text_loss
 
-    def run_epoch(name, dataset, step_func, max_steps, first_epoch=False):
+    def run_epoch(name, dataset, step_func, max_steps, broadcast_variables=False):
         if name == 'train':
             m = metric.train_metric
         else:
@@ -473,7 +482,7 @@ def train():
             objdet_loss, text_loss = step_func(filenames, images, true_values)
 
             if name == 'train':
-                if first_batch and first_epoch:
+                if first_batch and broadcast_variables:
                     logger.info('broadcasting initial variables')
                     hvd.broadcast_variables(model.variables, root_rank=0)
                     hvd.broadcast_variables(opt.variables(), root_rank=0)
@@ -527,11 +536,11 @@ def train():
         return metric.evaluation_result()
 
     if hvd.rank() == 0:
-        if restored_path:
+        if restore_path:
             metric.reset_states()
-            logger.info('there is a checkpoint {}, running initial validation'.format(restored_path))
+            logger.info('there is a checkpoint {}, running initial validation'.format(restore_path))
 
-            eval_steps = run_epoch('eval', eval_objdet_dataset, eval_step, steps_per_eval_epoch, False)
+            eval_steps = run_epoch('eval', eval_objdet_dataset, eval_step, steps_per_eval_epoch, broadcast_variables=False)
             best_metric = validation_metric()
             logger.info('initial validation: {}, metric: {:.3f}'.format(metric.str_result(False), best_metric))
 
@@ -549,9 +558,10 @@ def train():
     learning_rate.assign(FLAGS.initial_learning_rate)
     for epoch in range(FLAGS.num_epochs):
         metric.reset_states()
+        want_reset = False
 
         if epoch_var.numpy() < FLAGS.skip_tfrecrods_after_epochs:
-            train_steps = run_epoch('train', train_objdet_dataset_with_skip, train_step, steps_per_train_epoch, epoch == 0)
+            train_steps = run_epoch('train', train_objdet_dataset_with_skip, train_step, steps_per_train_epoch, (epoch == 0))
         else:
             if epoch_var.numpy() == FLAGS.skip_tfrecrods_after_epochs and epoch != 0:
                 logger.info('removing warmup data from datasets: lr: {} -> {}', learning_rate.numpy(), FLAGS.initial_learning_rate)
@@ -559,15 +569,15 @@ def train():
                 num_epochs_without_improvement = 0
                 learning_rate_multiplier = initial_learning_rate_multiplier
                 learning_rate.assign(FLAGS.initial_learning_rate)
+                want_reset = True
 
-            train_steps = run_epoch('train', train_objdet_dataset, train_step, steps_per_train_epoch, epoch == 0)
+            train_steps = run_epoch('train', train_objdet_dataset, train_step, steps_per_train_epoch, (epoch == 0))
 
-        eval_steps = run_epoch('eval', eval_objdet_dataset, eval_step, steps_per_eval_epoch, False)
+        eval_steps = run_epoch('eval', eval_objdet_dataset, eval_step, steps_per_eval_epoch, broadcast_variables=False)
 
         epoch_var.assign_add(1)
 
-        if hvd.rank() != 0:
-            continue
+        new_lr = learning_rate.numpy()
 
         new_metric = validation_metric()
 
@@ -577,11 +587,13 @@ def train():
             metric.str_result(True), metric.str_result(False),
             new_metric, best_metric))
 
-        saved_path = manager.save()
+        if hvd.rank() == 0:
+            saved_path = manager.save()
 
         if new_metric > best_metric:
             if epoch_var.numpy() > FLAGS.skip_saving_epochs:
-                best_saved_path = checkpoint.save(file_prefix='{}/ckpt-{:.4f}'.format(good_checkpoint_dir, new_metric))
+                if hvd.rank() == 0:
+                    best_saved_path = checkpoint.save(file_prefix='{}/ckpt-{:.4f}'.format(good_checkpoint_dir, new_metric))
 
                 logger.info("epoch: {}, global_step: {}, saved checkpoint: {}, eval metric: {:.4f} -> {:.4f}: {}".format(
                     int(epoch_var.numpy()), global_step.numpy(), best_saved_path, best_metric, new_metric, metric.str_result(False)))
@@ -593,32 +605,44 @@ def train():
         else:
             num_epochs_without_improvement += 1
 
-        if num_epochs_without_improvement >= FLAGS.epochs_lr_update:
-            want_reset = False
-            new_lr = learning_rate.numpy()
 
+        if num_epochs_without_improvement >= FLAGS.epochs_lr_update:
             if learning_rate > FLAGS.min_learning_rate:
                 new_lr = learning_rate.numpy() * learning_rate_multiplier
                 if new_lr < FLAGS.min_learning_rate:
                     new_lr = FLAGS.min_learning_rate
 
-                logger.info('epoch: {}, global_step: {}, epochs without metric improvement: {}, best metric: {:.5f}, updating learning rate: {:.2e} -> {:.2e}'.format(
-                    int(epoch_var.numpy()), global_step.numpy(), num_epochs_without_improvement, best_metric, learning_rate.numpy(), new_lr))
+                if FLAGS.reset_on_lr_update:
+                    want_reset = True
+
+                logger.info('epoch: {}, global_step: {}, epochs without metric improvement: {}, best metric: {:.5f}, updating learning rate: {:.2e} -> {:.2e}, will reset: {}'.format(
+                    int(epoch_var.numpy()), global_step.numpy(), num_epochs_without_improvement, best_metric, learning_rate.numpy(), new_lr, want_reset))
                 num_epochs_without_improvement = 0
                 if learning_rate_multiplier > 0.1:
                     learning_rate_multiplier /= 2
 
-                if FLAGS.reset_on_lr_update:
-                    want_reset = True
+
             elif num_epochs_without_improvement >= FLAGS.epochs_lr_update:
                 new_lr = FLAGS.initial_learning_rate
-                logger.info('epoch: {}, global_step: {}, epochs without metric improvement: {}, best metric: {:.5f}, resetting learning rate: {:.2e} -> {:.2e}'.format(
-                    int(epoch_var.numpy()), global_step.numpy(), num_epochs_without_improvement, best_metric, learning_rate.numpy(), new_lr))
-                num_epochs_without_improvement = 0
                 want_reset = True
+
+                logger.info('epoch: {}, global_step: {}, epochs without metric improvement: {}, best metric: {:.5f}, resetting learning rate: {:.2e} -> {:.2e}, will reset: {}'.format(
+                    int(epoch_var.numpy()), global_step.numpy(), num_epochs_without_improvement, best_metric, learning_rate.numpy(), new_lr, want_reset))
+
+                num_epochs_without_improvement = 0
                 learning_rate_multiplier = initial_learning_rate_multiplier
 
-            if want_reset and best_saved_path:
+
+        if FLAGS.use_predicted_polys_epochs >= 0:
+            if epoch_var.numpy() == FLAGS.use_predicted_polys_epochs:
+                logger.info('epoch: {}, global_step: {}, starting to use predicted polygones for dimensions, will reset model to the best available'.format(
+                    int(epoch_var.numpy()), global_step.numpy()))
+
+                want_reset = True
+
+        if want_reset:
+            restore_path = tf.train.latest_checkpoint(good_checkpoint_dir)
+            if restore_path:
                 epoch_num = epoch_var.numpy()
                 step_num = global_step.numpy()
                 logger.info('epoch: {}, global_step: {}, best metric: {:.5f}, learning rate: {:.2e} -> {:.2e}, restoring best checkpoint: {}'.format(
@@ -629,7 +653,8 @@ def train():
                 epoch_var.assign(epoch_num)
                 global_step.assign(step_num)
 
-            learning_rate.assign(new_lr)
+        # update learning rate even without resetting model
+        learning_rate.assign(new_lr)
 
 
 if __name__ == '__main__':
