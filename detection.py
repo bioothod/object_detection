@@ -219,7 +219,7 @@ def train():
                                                                        true_word_obj, true_word_poly, true_words, true_lengths,
                                                                        anchors_all, training=True, use_predicted_polys=True)
     line_length = 128
-    model.body.summary(line_length=line_length, print_fn=lambda line: logger.info(line))
+    #model.body.summary(line_length=line_length, print_fn=lambda line: logger.info(line))
     model.rnn_layer.summary(line_length=line_length, print_fn=lambda line: logger.info(line))
     model.summary(line_length=line_length, print_fn=lambda line: logger.info(line))
 
@@ -564,7 +564,7 @@ def train():
             train_steps = run_epoch('train', train_objdet_dataset_with_skip, train_step, steps_per_train_epoch, (epoch == 0))
         else:
             if epoch_var.numpy() == FLAGS.skip_tfrecrods_after_epochs and epoch != 0:
-                logger.info('removing warmup data from datasets: lr: {} -> {}', learning_rate.numpy(), FLAGS.initial_learning_rate)
+                logger.info('removing warmup data from datasets: lr: {} -> {}'.format(learning_rate.numpy(), FLAGS.initial_learning_rate))
 
                 num_epochs_without_improvement = 0
                 learning_rate_multiplier = initial_learning_rate_multiplier
