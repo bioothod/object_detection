@@ -174,29 +174,35 @@ class RNNLayer(tf.keras.Model):
         self.max_sequence_len = max_sequence_len
         self.dictionary_size = dictionary_size
 
-        self.stem = ft.TextConv(params, 128, name='stem')
-        self.res0 = ft.GatedBlockResidual(params, [64, 128], name='res0')
-        self.pool0 = ft.BlockPool(params, 256, strides=(2, 1), name='pool0')
-        self.res1 = ft.GatedBlockResidual(params, [128, 256], name='res1')
-        self.pool1 = ft.BlockPool(params, 512, strides=(2, 1), name='pool1')
-
         self.attention_feature_dim = 256
         num_heads = 8
+
+        self.res0 = ft.GatedBlockResidual(params, [128, 256], name='res0')
+        self.pool0 = ft.BlockPool(params, 128, strides=(2, 1), name='pool0')
+        self.res1 = ft.GatedBlockResidual(params, [64, 128], name='res1')
+        self.pool1 = ft.BlockPool(params, 128, strides=(2, 1), name='pool1')
+        self.res2 = ft.GatedBlockResidual(params, [64, 128], name='res2')
+        self.pool2 = ft.BlockPool(params, 128, strides=(2, 1), name='pool2')
+        self.attention_conv = ft.TextConv(params, self.attention_feature_dim, kernel_size=1, strides=1)
 
         self.attention_cell = AttentionCell(params, self.attention_feature_dim, num_heads, dictionary_size)
 
     def call(self, image_features, gt_tokens, gt_lens, training):
-        img = self.stem(image_features, training)
-        img = self.res0(img, training)
+        #img = self.stem(image_features, training)
+        img = self.res0(image_features, training)
         img = self.pool0(img, training)
         img = self.res1(img, training)
         img = self.pool1(img, training)
+        img = self.res2(img, training)
+        img = self.pool2(img, training)
 
         spatial_features = add_spatial_encoding(img)
 
+        spatial_features = self.attention_conv(spatial_features, training)
+
         batch_size = tf.shape(spatial_features)[0]
 
-        #logger.info('image_features: {}, spatial features: {} -> {}'.format(image_features.shape, spatial_features.shape, reshaped_features.shape))
+        #logger.info('image_features: {}, img: {}, spatial features: {}'.format(image_features.shape, img.shape, spatial_features.shape))
 
         features = tf.reshape(spatial_features, [batch_size, -1, self.attention_feature_dim])
 
