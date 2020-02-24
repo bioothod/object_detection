@@ -226,6 +226,86 @@ class Encoder(tf.keras.Model):
 
         self.output_sizes = None
 
+    def sample_crops_for_single_image(self, features, feature_poly, selected_features, written):
+        x = feature_poly[..., 0]
+        y = feature_poly[..., 1]
+        lx = (x[:, 0] + x[:, 3]) / 2
+        ly = (y[:, 0] + y[:, 3]) / 2
+
+        rx = (x[:, 1] + x[:, 2]) / 2
+        ry = (y[:, 1] + y[:, 2]) / 2
+
+        angles = tf.math.atan2(ry - ly, rx - lx)
+
+        x0 = x[:, 0]
+        y0 = y[:, 0]
+        x1 = x[:, 1]
+        y1 = y[:, 1]
+        x2 = x[:, 2]
+        y2 = y[:, 2]
+        x3 = x[:, 3]
+        y3 = y[:, 3]
+
+        h0 = (x0 - x3)**2 + (y0 - y3)**2
+        h1 = (x1 - x2)**2 + (y1 - y2)**2
+        h = tf.math.sqrt(tf.maximum(h0, h1)) + 2
+
+        w0 = (x0 - x1)**2 + (y0 - y1)**2
+        w1 = (x2 - x3)**2 + (y2 - y3)**2
+        w = tf.math.sqrt(tf.maximum(w0, w1)) + 2
+
+        sy = h / self.crop_size[0]
+        sx = w / self.crop_size[1]
+        scale = tf.maximum(sx, sy)
+
+        z = tf.zeros_like(x0)
+        o = tf.ones_like(x0)
+
+        def tm(t):
+            t = tf.convert_to_tensor(t)
+            t = tf.transpose(t, [2, 0, 1])
+            return t
+
+        def const(x):
+            return o * x
+
+        t0 = tm([[o, z, x0-1], [z, o, y0-1], [z, z, o]])
+        t1 = tm([[tf.cos(angles), -tf.sin(angles), z], [tf.sin(angles), tf.cos(angles), z], [z, z, o]])
+        if self.use_gaussian_mask:
+            t2 = tm([[scale, z, z], [z, scale, z], [z, z, o]])
+
+            xsize = w / scale
+            ysize = h / scale
+
+            mu_w = xsize / 2
+            mu_h = ysize / 2
+            sigma_w = xsize / 4
+            sigma_h = ysize / 4
+            mask_params = tf.stack([mu_h, sigma_h, mu_w, sigma_w], 1)
+        else:
+            t2 = tm([[sx, z, z], [z, sy, z], [z, z, o]])
+            mask_params = tf.zeros((1,))
+
+        transforms = t0 @ t1 @ t2
+        transforms = transforms[:, :2, :]
+
+        features = tf.expand_dims(features, 0)
+        num_crops = tf.shape(transforms)[0]
+        for crop_idx in tf.range(num_crops):
+            t = transforms[crop_idx, ...]
+            t = tf.expand_dims(t, 0)
+
+            cropped_features = stn.spatial_transformer_network(features, t, out_dims=self.crop_size)
+
+            if self.use_gaussian_mask:
+                mp = tf.expand_dims(mask_params[crop_idx, ...], 0)
+                cropped_features = generate_gaussian_mask(cropped_features, mp)
+
+            selected_features = selected_features.write(written, cropped_features)
+            written += 1
+
+        return selected_features, written
+
     def rnn_inference(self, features_full, word_obj_mask_full, poly_full, true_words_full, true_lengths_full, anchors_all, training):
         dtype = features_full.dtype
 
@@ -254,82 +334,7 @@ class Encoder(tf.keras.Model):
 
             poly = poly * feature_size / self.image_size
 
-            x = poly[..., 0]
-            y = poly[..., 1]
-            lx = (x[:, 0] + x[:, 3]) / 2
-            ly = (y[:, 0] + y[:, 3]) / 2
-
-            rx = (x[:, 1] + x[:, 2]) / 2
-            ry = (y[:, 1] + y[:, 2]) / 2
-
-            angles = tf.math.atan2(ry - ly, rx - lx)
-
-            x0 = x[:, 0]
-            y0 = y[:, 0]
-            x1 = x[:, 1]
-            y1 = y[:, 1]
-            x2 = x[:, 2]
-            y2 = y[:, 2]
-            x3 = x[:, 3]
-            y3 = y[:, 3]
-
-            h0 = (x0 - x3)**2 + (y0 - y3)**2
-            h1 = (x1 - x2)**2 + (y1 - y2)**2
-            h = tf.math.sqrt(tf.maximum(h0, h1)) + 2
-
-            w0 = (x0 - x1)**2 + (y0 - y1)**2
-            w1 = (x2 - x3)**2 + (y2 - y3)**2
-            w = tf.math.sqrt(tf.maximum(w0, w1)) + 2
-
-            sy = h / self.crop_size[0]
-            sx = w / self.crop_size[1]
-            scale = tf.maximum(sx, sy)
-
-            z = tf.zeros_like(x0)
-            o = tf.ones_like(x0)
-
-            def tm(t):
-                t = tf.convert_to_tensor(t)
-                t = tf.transpose(t, [2, 0, 1])
-                return t
-
-            def const(x):
-                return o * x
-
-            t0 = tm([[o, z, x0-1], [z, o, y0-1], [z, z, o]])
-            t1 = tm([[tf.cos(angles), -tf.sin(angles), z], [tf.sin(angles), tf.cos(angles), z], [z, z, o]])
-            if self.use_gaussian_mask:
-                t2 = tm([[scale, z, z], [z, scale, z], [z, z, o]])
-
-                xsize = w / scale
-                ysize = h / scale
-
-                mu_w = xsize / 2
-                mu_h = ysize / 2
-                sigma_w = xsize / 4
-                sigma_h = ysize / 4
-                mask_params = tf.stack([mu_h, sigma_h, mu_w, sigma_w], 1)
-            else:
-                t2 = tm([[sx, z, z], [z, sy, z], [z, z, o]])
-                mask_params = tf.zeros((1,))
-
-            transforms = t0 @ t1 @ t2
-            transforms = transforms[:, :2, :]
-
-            features = tf.expand_dims(features, 0)
-            num_crops = tf.shape(transforms)[0]
-            for crop_idx in tf.range(num_crops):
-                t = transforms[crop_idx, ...]
-                t = tf.expand_dims(t, 0)
-
-                cropped_features = stn.spatial_transformer_network(features, t, out_dims=self.crop_size)
-
-                if self.use_gaussian_mask:
-                    mp = tf.expand_dims(mask_params[crop_idx, ...], 0)
-                    cropped_features = generate_gaussian_mask(cropped_features, mp)
-
-                selected_features = selected_features.write(written, cropped_features)
-                written += 1
+            selected_features, written = self.sample_crops_for_single_image(features, poly, selected_features, written)
 
         selected_features = selected_features.concat()
 
