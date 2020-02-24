@@ -195,7 +195,7 @@ def train():
     dictionary_size, dict_table, pad_value = anchors_gen.create_lookup_table(FLAGS.dictionary)
 
     image_size = FLAGS.image_size
-    params = encoder.create_params(model_name, image_size, crop_size, max_sequence_len, dictionary_size, pad_value, dtype, FLAGS.use_gaussian_mask)
+    params = encoder.create_params(FLAGS.model_name, image_size, FLAGS.crop_size, FLAGS.max_sequence_len, dictionary_size, pad_value, dtype, FLAGS.use_gaussian_mask)
     model = encoder.Encoder(params)
 
     dummy_input = tf.ones((FLAGS.batch_size, image_size, image_size, 3), dtype=dtype)
