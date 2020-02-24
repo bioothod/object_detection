@@ -52,8 +52,10 @@ parser.add_argument('--save_examples', type=int, default=0, help='Number of exam
 parser.add_argument('--max_sequence_len', type=int, default=64, help='Maximum word length, also number of RNN attention timesteps')
 parser.add_argument('--reset_on_lr_update', action='store_true', help='Whether to reset to the best model after learning rate update')
 parser.add_argument('--use_predicted_polys_epochs', type=int, default=-1, help='After how many epochs to use predicted polynome coordinates for feature crops, negative means never')
+parser.add_argument('--warmup_objdet_epochs', type=int, default=100, help='Start using normal (1.0) objdet loss scale after this epoch, use heavily diminished before that')
 parser.add_argument('--max_word_batch', type=int, default=64, help='Maximum batch of word')
 parser.add_argument('--disable_rotation_augmentation', action='store_true', help='Whether to disable rotation/flipping augmentation')
+parser.add_argument('--use_gaussian_mask', action='store_true', help='Whether to preserve aspect ratio when sampling cropped feature map and mask unrelated parts of the crop with the sharply decaying gaussian')
 
 default_char_dictionary="!\"#&\'\\()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 parser.add_argument('--dictionary', type=str, default=default_char_dictionary, help='Dictionary to use')
@@ -193,7 +195,8 @@ def train():
     dictionary_size, dict_table, pad_value = anchors_gen.create_lookup_table(FLAGS.dictionary)
 
     image_size = FLAGS.image_size
-    model = encoder.create_model(FLAGS.model_name, image_size, FLAGS.crop_size, FLAGS.max_sequence_len, dictionary_size, pad_value, dtype)
+    params = encoder.create_params(model_name, image_size, crop_size, max_sequence_len, dictionary_size, pad_value, dtype, FLAGS.use_gaussian_mask)
+    model = encoder.Encoder(params)
 
     dummy_input = tf.ones((FLAGS.batch_size, image_size, image_size, 3), dtype=dtype)
 
@@ -391,7 +394,11 @@ def train():
         text_loss = metric.text_recognition_loss(true_word_obj, true_words, true_lengths, rnn_outputs, rnn_outputs_ar, is_training)
         objdet_loss = metric.object_detection_loss(true_word_obj, true_word_poly, logits, is_training)
 
-        return objdet_loss*1e-3, text_loss
+        objdet_scale = 1e-3
+        if epoch_var > FLAGS.warmup_objdet_epochs:
+            objdet_scale = 1.
+
+        return objdet_loss*objdet_scale, text_loss
 
 
     @tf.function
@@ -632,6 +639,10 @@ def train():
                 num_epochs_without_improvement = 0
                 learning_rate_multiplier = initial_learning_rate_multiplier
 
+        if FLAGS.warmup_objdet_epochs >= 0:
+            if epoch_var.numpy() == FLAGS.warmup_objdet_epochs:
+                logger.info('epoch: {}, global_step: {}, starting to use normal objdet scale (1.0) instead of warmup diminished one'.format(
+                    int(epoch_var.numpy()), global_step.numpy()))
 
         if FLAGS.use_predicted_polys_epochs >= 0:
             if epoch_var.numpy() == FLAGS.use_predicted_polys_epochs:
