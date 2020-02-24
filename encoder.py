@@ -219,7 +219,7 @@ class Encoder(tf.keras.Model):
             raise NameError('unsupported model name {}'.format(params.model_name))
 
         self.crop_size = params.crop_size
-        self.use_gaussian_mask = False
+        self.use_gauss_mask = False
 
         self.rnn_layer = attention.RNNLayer(params, self.max_sequence_len, params.dictionary_size, params.pad_value)
         self.head = Head(params, classes)
@@ -232,7 +232,7 @@ class Encoder(tf.keras.Model):
         true_words = tf.boolean_mask(true_words_full, word_obj_mask_full)
         true_lengths = tf.boolean_mask(true_lengths_full, word_obj_mask_full)
 
-        logger.info('RNN features: {}, crop_size: {}, use_gaussian_mask: {}'.format(features_full.shape, list(self.crop_size), self.use_gaussian_mask))
+        logger.info('RNN features: {}, crop_size: {}, use_gauss_mask: {}'.format(features_full.shape, list(self.crop_size), self.use_gauss_mask))
         feature_size = tf.cast(tf.shape(features_full)[1], dtype)
 
         batch_size = tf.shape(features_full)[0]
@@ -298,7 +298,7 @@ class Encoder(tf.keras.Model):
 
             t0 = tm([[o, z, x0-1], [z, o, y0-1], [z, z, o]])
             t1 = tm([[tf.cos(angles), -tf.sin(angles), z], [tf.sin(angles), tf.cos(angles), z], [z, z, o]])
-            if self.use_gaussian_mask:
+            if self.use_gauss_mask:
                 t2 = tm([[scale, z, z], [z, scale, z], [z, z, o]])
 
                 xsize = w / scale
@@ -324,7 +324,7 @@ class Encoder(tf.keras.Model):
 
                 cropped_features = stn.spatial_transformer_network(features, t, out_dims=self.crop_size)
 
-                if self.use_gaussian_mask:
+                if self.use_gauss_mask:
                     mp = tf.expand_dims(mask_params[crop_idx, ...], 0)
                     cropped_features = generate_gaussian_mask(cropped_features, mp)
 
