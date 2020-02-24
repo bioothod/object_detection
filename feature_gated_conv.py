@@ -95,13 +95,13 @@ class GatedBlockResidual(tf.keras.layers.Layer):
         return outputs
 
 class BlockPool(tf.keras.layers.Layer):
-    def __init__(self, params, num_features, want_dropout=True, **kwargs):
+    def __init__(self, params, num_features, want_dropout=True, strides=(2, 2), **kwargs):
         super().__init__(**kwargs)
 
         self.conv = TextConv(params,
                         num_features,
                         kernel_size=(3, 3),
-                        strides=(2, 2),
+                        strides=strides,
                         padding='SAME')
 
         self.dropout = None
@@ -126,7 +126,7 @@ class BlockConvUpsampling(tf.keras.layers.Layer):
         for num_features in features:
             self.conv_blocks.append(TextConv(params, num_features, kernel_size=kernel_size, strides=(1, 1), padding='SAME'))
 
-            if kernel_size == (1 ,1):
+            if kernel_size == (1, 1):
                 kernel_size = (3, 3)
             else:
                 kernel_size = (1, 1)
@@ -170,7 +170,7 @@ class FeatureExtractor(tf.keras.Model):
         self.blocks.append(GatedBlockResidual(params, [256, 256], name='l4_res0_raw2'))
         self.blocks.append(BlockPool(params, 512, name='l4_pool_output2'))
 
-        self.raw0_upsampling = BlockConvUpsampling(params, [256] , want_upsampling=False)
+        self.raw0_upsampling = BlockConvUpsampling(params, [256], want_upsampling=False)
         self.raw1_upsampling = BlockConvUpsampling(params, [256])
         self.raw2_upsampling = BlockConvUpsampling(params, [256])
 
