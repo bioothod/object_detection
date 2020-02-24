@@ -189,7 +189,7 @@ def train():
         writer = tf.summary.create_file_writer(logdir)
         writer.set_as_default()
 
-    global_step = tf.Variable(1, dtype=tf.int64, name='global_step', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
+    global_step = tf.Variable(0, dtype=tf.int64, name='global_step', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
     learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
 
     dictionary_size, dict_table, pad_value = anchors_gen.create_lookup_table(FLAGS.dictionary)
@@ -383,7 +383,6 @@ def train():
             scatter_idx_concat = tf.concat([scatter_batch_idx, scatter_idx], 1)
 
             tf.print('true_words reduced:', num_words, '->', num_updates)
-            #tf.print('scatter_idx_concat:', scatter_idx_concat)
 
             true_word_obj = tf.scatter_nd(scatter_idx_concat, ones, [batch_size, feature_size])
 
