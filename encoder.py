@@ -219,6 +219,7 @@ class Encoder(tf.keras.Model):
             raise NameError('unsupported model name {}'.format(params.model_name))
 
         self.crop_size = params.crop_size
+        self.use_gaussian_mask = False
 
         self.rnn_layer = attention.RNNLayer(params, self.max_sequence_len, params.dictionary_size, params.pad_value)
         self.head = Head(params, classes)
@@ -231,7 +232,7 @@ class Encoder(tf.keras.Model):
         true_words = tf.boolean_mask(true_words_full, word_obj_mask_full)
         true_lengths = tf.boolean_mask(true_lengths_full, word_obj_mask_full)
 
-        logger.info('RNN features: {}, crop_size: {}'.format(features_full.shape, list(self.crop_size)))
+        logger.info('RNN features: {}, crop_size: {}, use_gaussian_mask: {}'.format(features_full.shape, list(self.crop_size), self.use_gaussian_mask))
         feature_size = tf.cast(tf.shape(features_full)[1], dtype)
 
         batch_size = tf.shape(features_full)[0]
@@ -297,19 +298,23 @@ class Encoder(tf.keras.Model):
 
             t0 = tm([[o, z, x0-1], [z, o, y0-1], [z, z, o]])
             t1 = tm([[tf.cos(angles), -tf.sin(angles), z], [tf.sin(angles), tf.cos(angles), z], [z, z, o]])
-            t2 = tm([[scale, z, z], [z, scale, z], [z, z, o]])
+            if self.use_gaussian_mask:
+                t2 = tm([[scale, z, z], [z, scale, z], [z, z, o]])
+
+                xsize = w / scale
+                ysize = h / scale
+
+                mu_w = xsize / 2
+                mu_h = ysize / 2
+                sigma_w = xsize / 4
+                sigma_h = ysize / 4
+                mask_params = tf.stack([mu_h, sigma_h, mu_w, sigma_w], 1)
+            else:
+                t2 = tm([[sx, z, z], [z, sy, z], [z, z, o]])
+                mask_params = tf.zeros((1,))
 
             transforms = t0 @ t1 @ t2
             transforms = transforms[:, :2, :]
-
-            xsize = w / scale
-            ysize = h / scale
-
-            mu_w = xsize / 2
-            mu_h = ysize / 2
-            sigma_w = xsize / 4
-            sigma_h = ysize / 4
-            mask_params = tf.stack([mu_h, sigma_h, mu_w, sigma_w], 1)
 
             features = tf.expand_dims(features, 0)
             num_crops = tf.shape(transforms)[0]
@@ -317,10 +322,11 @@ class Encoder(tf.keras.Model):
                 t = transforms[crop_idx, ...]
                 t = tf.expand_dims(t, 0)
 
-                mp = tf.expand_dims(mask_params[crop_idx, ...], 0)
-
                 cropped_features = stn.spatial_transformer_network(features, t, out_dims=self.crop_size)
-                cropped_features = generate_gaussian_mask(cropped_features, mp)
+
+                if self.use_gaussian_mask:
+                    mp = tf.expand_dims(mask_params[crop_idx, ...], 0)
+                    cropped_features = generate_gaussian_mask(cropped_features, mp)
 
                 selected_features = selected_features.write(written, cropped_features)
                 written += 1
