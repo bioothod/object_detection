@@ -2,6 +2,8 @@ import logging
 
 import tensorflow as tf
 
+import feature_gated_conv as ft
+
 logger = logging.getLogger('detection')
 
 def scaled_dot_product_attention(query, key, value, mask):
@@ -122,8 +124,7 @@ class AttentionCell(tf.keras.layers.Layer):
     def __init__(self, params, attention_feature_dim, num_heads, dictionary_size, **kwargs):
         super(AttentionCell, self).__init__(self, **kwargs)
 
-        self.attention_layer0 = AttentionBlock(params, attention_feature_dim, num_heads, name='att0')
-        self.attention_layer1 = AttentionBlock(params, attention_feature_dim, num_heads, name='att1')
+        self.attention_layer = AttentionBlock(params, attention_feature_dim, num_heads, name='att0')
         self.attention_pooling = tf.keras.layers.GlobalAveragePooling1D()
 
         self.wc = tf.keras.layers.Dense(attention_feature_dim, name='wc')
@@ -136,31 +137,25 @@ class AttentionCell(tf.keras.layers.Layer):
     def call(self, char_dist, features, state, training):
         state_with_time = tf.expand_dims(state, 1)
 
-        weighted_features0 = self.attention_layer0(features, state_with_time, training)
-        weighted_pooled_features0 = self.attention_pooling(weighted_features0)
+        weighted_features = self.attention_layer(features, state_with_time, training)
+        weighted_pooled_features = self.attention_pooling(weighted_features)
 
         weighted_char_dist = self.wc(char_dist)
 
-        if False:
-            state1 = weighted_char_dist + weighted_pooled_features0
-            state_with_time1 = tf.expand_dims(state1, 1)
-            weighted_features1 = self.attention_layer1(weighted_features0, state_with_time1, training)
-            weighted_pooled_features1 = self.attention_pooling(weighted_features1)
-            net_out = weighted_pooled_features1
-        else:
-            net_input = weighted_char_dist + weighted_pooled_features0
+        net_input = weighted_char_dist + weighted_pooled_features
 
-            net_out = self.dense_dropout(net_input, training=training)
-            net_out = self.dense0(net_out)
+        net_out = self.dense_dropout(net_input, training=training)
+        net_out = self.dense0(net_out)
 
         output_char_dist = self.wo(net_out)
         output_char_dist = tf.nn.softmax(output_char_dist, axis=1)
 
-        return output_char_dist, weighted_pooled_features0
+        return output_char_dist, weighted_pooled_features
 
 def add_spatial_encoding(features):
     batch_size = tf.shape(features)[0]
-    _, h, w, _ = features.shape.as_list()
+    h = tf.shape(features)[1]
+    w = tf.shape(features)[2]
 
     x, y = tf.meshgrid(tf.range(w), tf.range(h))
 
@@ -175,30 +170,34 @@ class RNNLayer(tf.keras.Model):
     def __init__(self, params, max_sequence_len, dictionary_size, pad_value, **kwargs):
         super(RNNLayer, self).__init__(self, **kwargs)
 
-        self.bn = tf.keras.layers.BatchNormalization(
-            axis=params.channel_axis,
-            momentum=params.batch_norm_momentum,
-            epsilon=params.batch_norm_epsilon)
-
         self.start_token = pad_value
         self.max_sequence_len = max_sequence_len
         self.dictionary_size = dictionary_size
 
+        self.stem = ft.TextConv(params, 128, name='stem')
+        self.res0 = ft.GatedBlockResidual(params, [64, 128], name='res0')
+        self.pool0 = ft.BlockPool(params, 256, strides=(2, 1), name='pool0')
+        self.res1 = ft.GatedBlockResidual(params, [128, 256], name='res1')
+        self.pool1 = ft.BlockPool(params, 512, strides=(2, 1), name='pool1')
+
         self.attention_feature_dim = 256
         num_heads = 8
 
-        self.conv_features = tf.keras.layers.Conv2D(self.attention_feature_dim, kernel_size=(1, 1), strides=(1, 1), padding='SAME', activation=params.relu_fn)
         self.attention_cell = AttentionCell(params, self.attention_feature_dim, num_heads, dictionary_size)
 
     def call(self, image_features, gt_tokens, gt_lens, training):
-        image_features = self.bn(image_features, training=training)
-        spatial_features = add_spatial_encoding(image_features)
+        img = self.stem(image_features, training)
+        img = self.res0(img, training)
+        img = self.pool0(img, training)
+        img = self.res1(img, training)
+        img = self.pool1(img, training)
+
+        spatial_features = add_spatial_encoding(img)
 
         batch_size = tf.shape(spatial_features)[0]
 
         #logger.info('image_features: {}, spatial features: {} -> {}'.format(image_features.shape, spatial_features.shape, reshaped_features.shape))
 
-        spatial_features = self.conv_features(spatial_features)
         features = tf.reshape(spatial_features, [batch_size, -1, self.attention_feature_dim])
 
         null_token = tf.tile([self.start_token], [batch_size])
