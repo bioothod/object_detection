@@ -219,7 +219,7 @@ def train():
                                                                        true_word_obj, true_word_poly, true_words, true_lengths,
                                                                        anchors_all, training=True, use_predicted_polys=True)
     line_length = 128
-    #model.body.summary(line_length=line_length, print_fn=lambda line: logger.info(line))
+    model.body.summary(line_length=line_length, print_fn=lambda line: logger.info(line))
     model.rnn_layer.summary(line_length=line_length, print_fn=lambda line: logger.info(line))
     model.summary(line_length=line_length, print_fn=lambda line: logger.info(line))
 
@@ -325,7 +325,7 @@ def train():
         logger.info('epoch: {}, global_step: {}, forcing epoch number {}'.format(int(epoch_var.numpy()), global_step.numpy(), FLAGS.force_epoch))
         epoch_var.assign(FLAGS.force_epoch)
 
-    metric = loss.LossMetricAggregator(FLAGS.max_sequence_len, dictionary_size, FLAGS.batch_size * num_replicas)
+    metric = loss.LossMetricAggregator(FLAGS.max_sequence_len, dictionary_size, FLAGS.batch_size)
 
     anchors_all_batched = tf.expand_dims(anchors_all, 0)
     anchors_all_batched = tf.tile(anchors_all_batched, [FLAGS.batch_size, 1, 1])
