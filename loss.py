@@ -40,8 +40,8 @@ class TextMetric:
         self.dictionary_size = dictionary_size
         self.max_sequence_len = max_sequence_len
 
-        #self.ce = tf.keras.losses.CategoricalCrossentropy(from_logits=from_logits, reduction=tf.keras.losses.Reduction.NONE, label_smoothing=label_smoothing)
-        self.ce = FocalLoss(from_logits=from_logits, label_smoothing=label_smoothing, sigmoid_ce=False, reduction=tf.keras.losses.Reduction.NONE, name='text_focal_loss')
+        self.ce = tf.keras.losses.CategoricalCrossentropy(from_logits=from_logits, reduction=tf.keras.losses.Reduction.NONE, label_smoothing=label_smoothing)
+        #self.ce = FocalLoss(from_logits=from_logits, label_smoothing=label_smoothing, sigmoid_ce=False, reduction=tf.keras.losses.Reduction.NONE, name='text_focal_loss')
 
         self.word_loss = tf.keras.metrics.Mean()
         self.full_loss = tf.keras.metrics.Mean()
