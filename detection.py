@@ -104,10 +104,11 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
     image -= 128
     image /= 128
 
-    if is_training:
-        image, word_poly = preprocess.preprocess_for_train(image, word_poly, image_size, FLAGS.disable_rotation_augmentation)
-
     text_labels = tf.strings.split(features['true_labels'], '<SEP>')
+
+    if is_training:
+        image, word_poly, text_labels = preprocess.preprocess_for_train(image, word_poly, text_labels, image_size, FLAGS.disable_rotation_augmentation)
+
     text_split = tf.strings.unicode_split(text_labels, 'UTF-8')
 
     text_lenghts = text_split.row_lengths()

@@ -128,31 +128,89 @@ def random_expand(image, polys, ratio):
 
     return big_canvas, polys
 
+@tf.function
+def random_crop(image, polys, text_labels):
+    height, width, depth = _ImageDimensions(image, rank=3)
+
+    float_height, float_width = tf.cast(height, polys.dtype), tf.cast(width, polys.dtype)
+
+    for i in tf.range(20):
+        crop_x0 = tf.random.uniform([], minval=0, maxval=0.7) * float_width
+        crop_y0 = tf.random.uniform([], minval=0, maxval=0.7) * float_height
+
+        crop_width_max = float_width - crop_x0
+        crop_x1 = tf.random.uniform([], minval=crop_width_max/2, maxval=crop_width_max) + crop_x0
+        
+        crop_height_max = float_height - crop_y0
+        crop_y1 = tf.random.uniform([], minval=crop_height_max/2, maxval=crop_height_max) + crop_y0
+
+        x = polys[..., 0]
+        y = polys[..., 1]
+
+        xmin = tf.reduce_min(x, 1)
+        xmax = tf.reduce_max(x, 1)
+        ymin = tf.reduce_min(y, 1)
+        ymax = tf.reduce_max(y, 1)
+
+        has_x0 = tf.math.less_equal(crop_x0, xmin)
+        has_x1 = tf.math.greater_equal(crop_x1, xmax)
+        has_y0 = tf.math.less_equal(crop_y0, ymin)
+        has_y1 = tf.math.greater_equal(crop_y1, ymax)
+
+        overlap_mask = tf.logical_and(tf.logical_and(has_x0, has_x1), tf.logical_and(has_y0, has_y1))
+
+        if tf.math.count_nonzero(overlap_mask) != 0:
+            polys = tf.boolean_mask(polys, overlap_mask)
+
+            x = polys[..., 0]
+            y = polys[..., 1]
+
+            x = (x - crop_x0) / (crop_x1 - crop_x0) * float_width
+            y = (y - crop_y0) / (crop_y1 - crop_y0) * float_height
+            polys = tf.stack([x, y], -1)
+
+            text_labels = tf.boolean_mask(text_labels, overlap_mask)
+
+            crop_x0 = tf.cast(crop_x0, tf.int32)
+            crop_x1 = tf.cast(crop_x1, tf.int32)
+            crop_y0 = tf.cast(crop_y0, tf.int32)
+            crop_y1 = tf.cast(crop_y1, tf.int32)
+
+            image = tf.image.crop_to_bounding_box(image, crop_y0, crop_x0, crop_y1 - crop_y0, crop_x1 - crop_x0)
+            image = tf.image.resize(image, [height, width])
+            break
+
+    return image, polys, text_labels
+
 def rotate_points(points, theta):
     rotation_matrix = tf.stack([tf.cos(theta), -tf.sin(theta), tf.sin(theta), tf.cos(theta)], axis=0)
     rotation_matrix = tf.reshape(rotation_matrix, (2, 2))
     return tf.matmul(points, rotation_matrix)
 
-def preprocess_for_train(image, word_poly, image_size, disable_rotation_augmentation):
+def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rotation_augmentation):
     dtype = image.dtype
 
-    if tf.random.uniform([], 0, 1) > 0.5:
+    if False and tf.random.uniform([], 0, 1) > 0.5:
         image = apply_with_random_selector(image,
                 lambda x, ordering: distort_color(x, ordering, fast_mode=False),
                 num_cases=4)
 
-    if tf.random.uniform([], 0, 1) > 0.5:
-        ratio = tf.random.uniform([], minval=1.01, maxval=1.2, dtype=word_poly.dtype)
+    resize_rnd = tf.random.uniform([], 0, 1)
+    if resize_rnd > 0.3:
+        if resize_rnd > 0.6:
+            ratio = tf.random.uniform([], minval=1.01, maxval=1.3, dtype=word_poly.dtype)
 
-        poly_rel = word_poly / image_size
-        image, new_poly = random_expand(image, poly_rel, ratio)
-        image = tf.image.resize(image, [image_size, image_size])
-        image = tf.cast(image, dtype)
-        word_poly = new_poly * image_size
+            poly_rel = word_poly / image_size
+            image, new_poly = random_expand(image, poly_rel, ratio)
+            image = tf.image.resize(image, [image_size, image_size])
+            image = tf.cast(image, dtype)
+            word_poly = new_poly * image_size
+        else:
+            image, word_poly, text_labels = random_crop(image, word_poly, text_labels)
 
     if not disable_rotation_augmentation and tf.random.uniform([], 0, 1) > 0.5:
-        angle_min = -4. / 180 * 3.1415
-        angle_max = 4. / 180 * 3.1415
+        angle_min = -5. / 180 * 3.1415
+        angle_max = 5. / 180 * 3.1415
 
         angle = tf.random.uniform([], minval=angle_min, maxval=angle_max, dtype=tf.float32)
 
@@ -163,7 +221,7 @@ def preprocess_for_train(image, word_poly, image_size, disable_rotation_augmenta
         word_poly = rotate_points(word_poly, angle)
         word_poly += [image_size/2, image_size/2]
 
-    return image, word_poly
+    return image, word_poly, text_labels
 
 def pad_resize_image(image, dims):
     h = tf.shape(image)[0]
