@@ -238,7 +238,7 @@ def train():
 
         np.random.shuffle(filenames)
 
-        ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=6)
+        ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
         ds = ds.map(lambda record: unpack_tfrecord(record, anchors_all,
                         image_size, FLAGS.max_sequence_len, dict_table, pad_value,
                         is_training, FLAGS.data_format, dtype),
