@@ -6,7 +6,7 @@ logger = logging.getLogger('detection')
 
 class TextConv(tf.keras.layers.Layer):
     def __init__(self, params, num_features, kernel_size=(3, 3), strides=(1, 1), padding='SAME', **kwargs):
-        super(TextConv, self).__init__(self, **kwargs)
+        super().__init__(**kwargs)
         self.relu_fn = params.relu_fn or local_swish
 
         self.conv = tf.keras.layers.Conv2D(
@@ -32,7 +32,7 @@ class TextConv(tf.keras.layers.Layer):
 
 class GatedConv(tf.keras.layers.Layer):
     def __init__(self, params, num_features, kernel_size=(3, 3), strides=(1, 1), padding='SAME', **kwargs):
-        super(GatedConv, self).__init__(self, **kwargs)
+        super().__init__(**kwargs)
         self.conv0 = tf.keras.layers.Conv2D(
                 num_features,
                 kernel_size=kernel_size,
@@ -150,7 +150,7 @@ class BlockConvUpsampling(tf.keras.layers.Layer):
 
 class FeatureExtractor(tf.keras.Model):
     def __init__(self, params, **kwargs):
-        super(FeatureExtractor, self).__init__(self, **kwargs)
+        super().__init__(**kwargs)
 
         self.blocks = []
 
