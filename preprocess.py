@@ -150,9 +150,9 @@ def preprocess_for_train(image, word_poly, image_size, disable_rotation_augmenta
         image = tf.cast(image, dtype)
         word_poly = new_poly * image_size
 
-    if tf.random.uniform([], 0, 1) > 0.5:
-        angle_min = -10. / 180 * 3.1415
-        angle_max = 10. / 180 * 3.1415
+    if not disable_rotation_augmentation and tf.random.uniform([], 0, 1) > 0.5:
+        angle_min = -2. / 180 * 3.1415
+        angle_max = 2. / 180 * 3.1415
 
         angle = tf.random.uniform([], minval=angle_min, maxval=angle_max, dtype=tf.float32)
 
