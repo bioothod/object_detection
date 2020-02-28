@@ -40,14 +40,15 @@ parser.add_argument('--min_eval_metric', default=0.2, type=float, help='Minimal 
 parser.add_argument('--epochs_lr_update', default=10, type=int, help='Maximum number of epochs without improvement used to reset or decrease learning rate')
 parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16 training/inference')
 parser.add_argument('--dataset_type', type=str, choices=['tfrecords'], default='tfrecords', help='Dataset type')
-parser.add_argument('--skip_tfrecrods_after_epochs', default=50, type=float, help='Drop tfrecords from --train_tfrecord_dir_skip after this many epochs')
-parser.add_argument('--train_tfrecord_dir_skip', type=str, action='append', help='Directory containing training TFRecords, which will be dropped after --skip_tfrecrods_after_epochs epochs')
+parser.add_argument('--warmup_tfrecrods_epochs', default=50, type=float, help='Drop tfrecords from --train_tfrecord_dir_warmup after this many epochs')
+parser.add_argument('--train_tfrecord_dir_warmup', type=str, action='append', help='Directory containing training TFRecords, which will be dropped after --warmup_tfrecrods_epochs epochs')
 parser.add_argument('--train_tfrecord_dir', type=str, required=True, action='append', help='Directory containing training TFRecords')
 parser.add_argument('--eval_tfrecord_dir', type=str, required=True, action='append', help='Directory containing evaluation TFRecords')
 parser.add_argument('--image_size', type=int, required=True, help='Use this image size, if 0 - use default')
 parser.add_argument('--crop_size', type=str, default='8x24', help='Use this sizes for feature crops')
 parser.add_argument('--steps_per_eval_epoch', default=30, type=int, help='Number of steps per evaluation run')
 parser.add_argument('--steps_per_train_epoch', default=200, type=int, help='Number of steps per train run')
+parser.add_argument('--steps_per_warmup_epoch', default=1000, type=int, help='Number of steps per train warmup run')
 parser.add_argument('--save_examples', type=int, default=0, help='Number of example images to save and exit')
 parser.add_argument('--max_sequence_len', type=int, default=64, help='Maximum word length, also number of RNN attention timesteps')
 parser.add_argument('--reset_on_lr_update', action='store_true', help='Whether to reset to the best model after learning rate update')
@@ -230,12 +231,20 @@ def train():
     logger.info('image_size: {}, model output sizes: {}, max_word_batch: {}, crop_size: {}'.format(image_size, [s.numpy() for s in model.output_sizes], FLAGS.max_word_batch, list(model.crop_size)))
 
     def create_dataset_from_tfrecord(name, dataset_dirs, is_training):
-        filenames = []
-        for dirname in dataset_dirs:
+        def scan_dirs(dirname):
+            filenames = []
             for fn in os.listdir(dirname):
                 fn = os.path.join(dirname, fn)
                 if os.path.isfile(fn):
                     filenames.append(fn)
+                elif os.path.isdir(fn) or os.path.islink(fn):
+                    filenames += scan_dirs(fn)
+
+            return filenames
+
+        filenames = []
+        for dirname in dataset_dirs:
+            filenames += scan_dirs(dirname)
 
         np.random.shuffle(filenames)
 
@@ -270,19 +279,16 @@ def train():
         return ds
 
     if FLAGS.dataset_type == 'tfrecords':
-        train_objdet_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir, is_training=True)
-        train_objdet_dataset_with_skip = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir + FLAGS.train_tfrecord_dir_skip, is_training=True)
-        eval_objdet_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, is_training=False)
+        train_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir, is_training=True)
+        train_warmup_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir_warmup, is_training=True)
+        eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, is_training=False)
 
     if FLAGS.save_examples > 0:
-        draw_bboxes(image_size, train_objdet_dataset, FLAGS.save_examples, anchors_all, FLAGS.dictionary, FLAGS.max_sequence_len)
+        draw_bboxes(image_size, train_dataset, FLAGS.save_examples, anchors_all, FLAGS.dictionary, FLAGS.max_sequence_len)
         exit(0)
 
-    steps_per_train_epoch = FLAGS.steps_per_train_epoch
-    steps_per_eval_epoch = FLAGS.steps_per_eval_epoch
-
-    logger.info('steps_per_train_epoch: {}, steps_per_eval_epoch: {}, dictionary_size: {}'.format(
-        steps_per_train_epoch, steps_per_eval_epoch, dictionary_size))
+    logger.info('steps_per_train_epoch: {}, steps_per_warmup_epoch: {}, steps_per_eval_epoch: {}, dictionary_size: {}'.format(
+        FLAGS.steps_per_train_epoch, FLAGS.steps_per_warmup_epoch, FLAGS.steps_per_eval_epoch, dictionary_size))
 
     opt = tfa.optimizers.RectifiedAdam(lr=learning_rate, min_lr=FLAGS.min_learning_rate)
     opt = tfa.optimizers.Lookahead(opt, sync_period=6, slow_step_size=0.5)
@@ -547,7 +553,7 @@ def train():
             metric.reset_states()
             logger.info('there is a checkpoint {}, running initial validation'.format(restore_path))
 
-            eval_steps = run_epoch('eval', eval_objdet_dataset, eval_step, steps_per_eval_epoch, broadcast_variables=False)
+            eval_steps = run_epoch('eval', eval_dataset, eval_step, FLAGS.steps_per_eval_epoch, broadcast_variables=False)
             best_metric = validation_metric()
             logger.info('initial validation: {}, metric: {:.3f}'.format(metric.str_result(False), best_metric))
 
@@ -567,10 +573,10 @@ def train():
         metric.reset_states()
         want_reset = False
 
-        if epoch_var.numpy() < FLAGS.skip_tfrecrods_after_epochs:
-            train_steps = run_epoch('train', train_objdet_dataset_with_skip, train_step, steps_per_train_epoch, (epoch == 0))
+        if epoch_var.numpy() < FLAGS.warmup_tfrecrods_epochs:
+            train_steps = run_epoch('train', train_warmup_dataset, train_step, FLAGS.steps_per_warmup_epoch, (epoch == 0))
         else:
-            if epoch_var.numpy() == FLAGS.skip_tfrecrods_after_epochs and epoch != 0:
+            if epoch_var.numpy() == FLAGS.warmup_tfrecrods_epochs and epoch != 0:
                 logger.info('removing warmup data from datasets: lr: {} -> {}'.format(learning_rate.numpy(), FLAGS.initial_learning_rate))
 
                 num_epochs_without_improvement = 0
@@ -578,9 +584,9 @@ def train():
                 learning_rate.assign(FLAGS.initial_learning_rate)
                 want_reset = True
 
-            train_steps = run_epoch('train', train_objdet_dataset, train_step, steps_per_train_epoch, (epoch == 0))
+            train_steps = run_epoch('train', train_dataset, train_step, FLAGS.steps_per_train_epoch, (epoch == 0))
 
-        eval_steps = run_epoch('eval', eval_objdet_dataset, eval_step, steps_per_eval_epoch, broadcast_variables=False)
+        eval_steps = run_epoch('eval', eval_dataset, eval_step, FLAGS.steps_per_eval_epoch, broadcast_variables=False)
 
         epoch_var.assign_add(1)
 
