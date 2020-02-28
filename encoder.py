@@ -18,7 +18,7 @@ GlobalParams = collections.namedtuple('GlobalParams', [
     'batch_norm_momentum', 'batch_norm_epsilon', 'data_format',
     'relu_fn',
     'spatial_dims', 'channel_axis', 'model_name',
-    'obj_score_threshold', 'lstm_dropout', 'spatial_dropout',
+    'lstm_dropout', 'spatial_dropout',
     'dictionary_size', 'max_sequence_len', 'pad_value',
     'image_size', 'num_anchors', 'crop_size',
     'dtype', 'use_gaussian_mask'
@@ -112,17 +112,17 @@ class Head(tf.keras.layers.Layer):
         super().__init__(**kwargs)
 
         self.s2_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
-        self.s2_input = EncoderConvList(params, [512])
+        self.s2_input = EncoderConvList(params, [512, 512])
         self.s2_output = ObjectDetectionLayer(params, num_classes, name="detection_layer_2")
         self.up2 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
 
         self.s1_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
-        self.s1_input = EncoderConvList(params, [256])
+        self.s1_input = EncoderConvList(params, [256, 256])
         self.s1_output = ObjectDetectionLayer(params, num_classes, name="detection_layer_1")
         self.up1 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
 
         self.s0_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
-        self.s0_input = EncoderConvList(params, [128])
+        self.s0_input = EncoderConvList(params, [128, 128])
         self.s0_output = ObjectDetectionLayer(params, num_classes, name="detection_layer_0")
 
         self.pads = [None]
@@ -248,11 +248,11 @@ class Encoder(tf.keras.Model):
 
         h0 = (x0 - x3)**2 + (y0 - y3)**2
         h1 = (x1 - x2)**2 + (y1 - y2)**2
-        h = tf.math.sqrt(tf.maximum(h0, h1)) + 2
+        h = tf.math.sqrt(tf.maximum(h0, h1))
 
         w0 = (x0 - x1)**2 + (y0 - y1)**2
         w1 = (x2 - x3)**2 + (y2 - y3)**2
-        w = tf.math.sqrt(tf.maximum(w0, w1)) + 2
+        w = tf.math.sqrt(tf.maximum(w0, w1))
 
         sy = h / self.crop_size[0]
         sx = w / self.crop_size[1]
@@ -269,7 +269,7 @@ class Encoder(tf.keras.Model):
         def const(x):
             return o * x
 
-        t0 = tm([[o, z, x0-1], [z, o, y0-1], [z, z, o]])
+        t0 = tm([[o, z, x0], [z, o, y0], [z, z, o]])
         t1 = tm([[tf.cos(angles), -tf.sin(angles), z], [tf.sin(angles), tf.cos(angles), z], [z, z, o]])
         if self.use_gaussian_mask:
             t2 = tm([[scale, z, z], [z, scale, z], [z, z, o]])
@@ -395,9 +395,8 @@ def create_params(model_name, image_size, crop_size, max_sequence_len, dictionar
         'channel_axis': channel_axis,
         'spatial_dims': spatial_dims,
         'model_name': model_name,
-        'obj_score_threshold': 0.3,
-        'lstm_dropout': 0.3,
-        'spatial_dropout': 0.3,
+        'lstm_dropout': 0.2,
+        'spatial_dropout': 0.2,
         'dictionary_size': dictionary_size,
         'max_sequence_len': max_sequence_len,
         'pad_value': pad_value,
