@@ -3,6 +3,7 @@ import logging
 import tensorflow as tf
 
 import feature_gated_conv as ft
+import letters
 
 logger = logging.getLogger('detection')
 
@@ -69,7 +70,7 @@ class MultiHeadAttention(tf.keras.layers.Layer):
         # final linear layer
         outputs = self.dense(concat_attention)
 
-        return outputs
+        return outputs, concat_attention
 
 class AttentionBlock(tf.keras.layers.Layer):
     def __init__(self, params, attention_feature_dim, num_heads, **kwargs):
@@ -86,9 +87,6 @@ class AttentionBlock(tf.keras.layers.Layer):
         self.dropout = tf.keras.layers.Dropout(rate=params.spatial_dropout)
         self.mha = MultiHeadAttention(attention_feature_dim, num_heads, name='mha')
 
-        self.dense0 = tf.keras.layers.Dense(units=attention_feature_dim, name='dense0')
-        self.dense1 = tf.keras.layers.Dense(units=attention_feature_dim, name='dense1')
-        self.dense_dropout = tf.keras.layers.Dropout(rate=params.spatial_dropout)
         if params.dtype == tf.float32:
             self.dense_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6)
         else:
@@ -102,80 +100,75 @@ class AttentionBlock(tf.keras.layers.Layer):
     def call(self, features, state, training):
         x = self.norm(features, training=training)
         x = self.dropout(x, training=training)
-        x = self.mha(x, state, training)
+        x, s = self.mha(x, state, training)
         attention_out = x + features
-        return attention_out
+        return attention_out, s
 
-        x = self.dense_norm(x, training=training)
-        x = self.dense_dropout(x, training=training)
+class PositionalEncoding(tf.keras.layers.Layer):
+    def __init__(self, position, d_model):
+        super(PositionalEncoding, self).__init__()
+        self.pos_encoding = self.positional_encoding(position, d_model)
 
-        x = self.dense0(x)
-        x = self.relu_fn(x)
-        x = self.dense1(x)
-        x = self.relu_fn(x)
+    def get_angles(self, position, i, d_model):
+        angles = 1 / tf.pow(10000., (2. * (i // 2)) / tf.cast(d_model, tf.float32, name='cast_pe_0'))
+        return position * angles
 
-        dense_out = x + attention_out
+    def positional_encoding(self, position, d_model):
+        angle_rads = self.get_angles(
+            position=tf.range(position, dtype=tf.float32)[:, tf.newaxis],
+            i=tf.range(d_model, dtype=tf.float32)[tf.newaxis, :],
+            d_model=d_model)
+        # apply sin to even index in the array
+        sines = tf.math.sin(angle_rads[:, 0::2])
+        # apply cos to odd index in the array
+        cosines = tf.math.cos(angle_rads[:, 1::2])
 
-        #logger.info('attention_block: attention_out: {}, x: {}'.format(attention_out.shape, x.shape))
+        pos_encoding = tf.concat([sines, cosines], axis=-1)
+        pos_encoding = pos_encoding[tf.newaxis, ...]
+        return tf.cast(pos_encoding, tf.float32, name='cast_pe_1')
 
-        return dense_out
+    def call(self, inputs):
+        return inputs + self.pos_encoding[:, :tf.shape(inputs)[1], :]
 
 class AttentionCell(tf.keras.layers.Layer):
     def __init__(self, params, attention_feature_dim, num_heads, dictionary_size, **kwargs):
-        super(AttentionCell, self).__init__(self, **kwargs)
-
-        self.attention_layer = AttentionBlock(params, attention_feature_dim, num_heads, name='att0')
-        self.attention_pooling = tf.keras.layers.GlobalAveragePooling1D()
+        super().__init__(**kwargs)
 
         self.wc = tf.keras.layers.Dense(attention_feature_dim, name='wc')
 
-        self.dense_dropout = tf.keras.layers.Dropout(rate=params.spatial_dropout)
-        self.dense0 = tf.keras.layers.Dense(attention_feature_dim, name='dense0')
+        self.attention_layer = AttentionBlock(params, attention_feature_dim, num_heads, name='att0')
+        self.attention_state_pooling = tf.keras.layers.GlobalAveragePooling1D()
+
+        self.letters_net = letters.LettersDetector(params, attention_feature_dim)
 
         self.wo = tf.keras.layers.Dense(dictionary_size, name='wo')
 
     def call(self, char_dist, features, state, training):
-        state_with_time = tf.expand_dims(state, 1)
-
-        weighted_features = self.attention_layer(features, state_with_time, training)
-        weighted_pooled_features = self.attention_pooling(weighted_features)
-
         weighted_char_dist = self.wc(char_dist)
+        att_state = state + weighted_char_dist
+        state_with_time = tf.expand_dims(att_state, 1)
 
-        net_input = weighted_char_dist + weighted_pooled_features
+        weighted_features, att_state = self.attention_layer(features, state_with_time, training)
 
-        net_out = self.dense_dropout(net_input, training=training)
-        net_out = self.dense0(net_out)
+        letter_features = self.letters_net(weighted_features, training)
 
-        output_char_dist = self.wo(net_out)
+        att_pooled_state = self.attention_state_pooling(att_state)
+
+        output_char_dist = self.wo(letter_features)
         output_char_dist = tf.nn.softmax(output_char_dist, axis=1)
 
-        return output_char_dist, weighted_pooled_features
-
-def add_spatial_encoding(features):
-    batch_size = tf.shape(features)[0]
-    h = tf.shape(features)[1]
-    w = tf.shape(features)[2]
-
-    x, y = tf.meshgrid(tf.range(w), tf.range(h))
-
-    w_loc = tf.one_hot(x, w, dtype=features.dtype)
-    h_loc = tf.one_hot(y, h, dtype=features.dtype)
-    loc = tf.concat([h_loc, w_loc], 2)
-    loc = tf.tile(tf.expand_dims(loc, 0), [batch_size, 1, 1, 1])
-
-    return tf.concat([features, loc], 3)
+        return output_char_dist, att_pooled_state
 
 class RNNLayer(tf.keras.Model):
     def __init__(self, params, max_sequence_len, dictionary_size, pad_value, **kwargs):
-        super(RNNLayer, self).__init__(self, **kwargs)
+        super().__init__(**kwargs)
 
         self.start_token = pad_value
         self.max_sequence_len = max_sequence_len
         self.dictionary_size = dictionary_size
 
-        self.attention_feature_dim = 256
-        num_heads = 8
+        self.attention_feature_dim = 128
+        num_heads = 4
 
         self.res0 = ft.GatedBlockResidual(params, [128, 256], name='res0')
         self.pool0 = ft.BlockPool(params, 128, strides=(2, 1), name='pool0')
@@ -183,12 +176,14 @@ class RNNLayer(tf.keras.Model):
         self.pool1 = ft.BlockPool(params, 128, strides=(2, 1), name='pool1')
         self.res2 = ft.GatedBlockResidual(params, [64, 128], name='res2')
         self.pool2 = ft.BlockPool(params, 128, strides=(2, 1), name='pool2')
-        self.attention_conv = ft.TextConv(params, self.attention_feature_dim, kernel_size=1, strides=1)
+
+        self.positional_encoding = PositionalEncoding(params.crop_size[1], self.attention_feature_dim)
+
+        self.attention_conv = ft.TextConv(params, self.attention_feature_dim, kernel_size=(1, 1), strides=(1, 1))
 
         self.attention_cell = AttentionCell(params, self.attention_feature_dim, num_heads, dictionary_size)
 
     def call(self, image_features, gt_tokens, gt_lens, training):
-        #img = self.stem(image_features, training)
         img = self.res0(image_features, training)
         img = self.pool0(img, training)
         img = self.res1(img, training)
@@ -196,15 +191,14 @@ class RNNLayer(tf.keras.Model):
         img = self.res2(img, training)
         img = self.pool2(img, training)
 
-        spatial_features = add_spatial_encoding(img)
+        pos_features = self.positional_encoding(img)
+        conv_features = self.attention_conv(pos_features, training)
 
-        spatial_features = self.attention_conv(spatial_features, training)
-
-        batch_size = tf.shape(spatial_features)[0]
+        batch_size = tf.shape(conv_features)[0]
 
         #logger.info('image_features: {}, img: {}, spatial features: {}'.format(image_features.shape, img.shape, spatial_features.shape))
 
-        features = tf.reshape(spatial_features, [batch_size, -1, self.attention_feature_dim])
+        features = tf.reshape(conv_features, [batch_size, -1, self.attention_feature_dim])
 
         null_token = tf.tile([self.start_token], [batch_size])
         def init():
