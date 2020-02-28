@@ -25,6 +25,7 @@ import tfrecord_writer
 parser = argparse.ArgumentParser()
 parser.add_argument('--gt_dir', type=str, action='append', help='Path to ICDAR 2017 ground truth dir')
 parser.add_argument('--image_dir', type=str, action='append', help='Path to ICDAR 2017 image dir')
+parser.add_argument('--format', type=str, required=True, help='Format: 2015 or any other')
 parser.add_argument('--num_images_per_tfrecord', type=int, default=10000, help='Number of images in single tfsecord')
 parser.add_argument('--output_dir', type=str, required=True, help='Directory to save tfrecords')
 parser.add_argument('--logfile', type=str, help='Logfile')
@@ -78,21 +79,32 @@ def scan_annotations(gt_dir, writer, image_fns):
         full_path = os.path.join(gt_dir, gt_fn)
         with open(full_path, 'r') as fin:
             for line in fin:
-                comm = line.split(',')
-                points = comm[:8]
-                lang = comm[8]
-                text = ','.join(comm[9:])
+                try:
+                    if FLAGS.format == '2015':
+                        comm = line.split(',')
+                        points = comm[:8]
+                        text = ','.join(comm[8:])
 
-                if lang != 'Latin':
+                        text.encode('ascii')
+                    else:
+                        comm = line.split(',')
+                        points = comm[:8]
+                        lang = comm[8]
+                        text = ','.join(comm[9:])
+
+                        if lang != 'Latin':
+                            continue
+
+                    text = [t.strip() for t in text.split()]
+                    text = ''.join(text)
+
+                    if text == '###':
+                        continue
+
+                    points = np.array(points, dtype=np.float32)
+                except:
                     continue
 
-                text = [t.strip() for t in text.split()]
-                text = ''.join(text)
-
-                if text == '###':
-                    continue
-
-                points = np.array(points, dtype=np.float32)
                 x = points[..., 0::2]
                 y = points[..., 1::2]
 
