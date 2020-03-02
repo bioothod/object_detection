@@ -47,7 +47,6 @@ parser.add_argument('--dataset_type', type=str, choices=['files', 'mscoco_tfreco
 parser.add_argument('--image_size', type=int, required=True, help='Use this image size, if 0 - use default')
 parser.add_argument('--crop_size', type=str, default='8x24', help='Use this sizes for feature crops')
 parser.add_argument('--max_sequence_len', default=32, type=int, help='Maximum sequence length')
-parser.add_argument('--use_gaussian_mask', action='store_true', help='Whether to preserve aspect ratio when sampling cropped feature map and mask unrelated parts of the crop with the sharply decaying gaussian')
 parser.add_argument('filenames', type=str, nargs='*', help='Numeric label : file path')
 
 default_char_dictionary="!\"#&\'\\()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -442,7 +441,7 @@ def run_inference():
 
     dictionary_size, dict_table, pad_value = anchors_gen.create_lookup_table(FLAGS.dictionary)
 
-    params = encoder.create_params(FLAGS.model_name, FLAGS.image_size, FLAGS.crop_size, FLAGS.max_sequence_len, dictionary_size, pad_value, dtype, FLAGS.use_gaussian_mask)
+    params = encoder.create_params(FLAGS.model_name, FLAGS.image_size, FLAGS.crop_size, FLAGS.max_sequence_len, dictionary_size, pad_value, dtype)
     model = encoder.Encoder(params)
     if model.output_sizes is None:
         dummy_input = tf.ones((int(FLAGS.batch_size), image_size, image_size, 3), dtype=dtype)

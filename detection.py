@@ -56,7 +56,6 @@ parser.add_argument('--use_predicted_polys_epochs', type=int, default=-1, help='
 parser.add_argument('--warmup_objdet_epochs', type=int, default=100, help='Start using normal (1.0) objdet loss scale after this epoch, use heavily diminished before that')
 parser.add_argument('--max_word_batch', type=int, default=64, help='Maximum batch of word')
 parser.add_argument('--disable_rotation_augmentation', action='store_true', help='Whether to disable rotation/flipping augmentation')
-parser.add_argument('--use_gaussian_mask', action='store_true', help='Whether to preserve aspect ratio when sampling cropped feature map and mask unrelated parts of the crop with the sharply decaying gaussian')
 
 default_char_dictionary="!\"#&\'\\()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 parser.add_argument('--dictionary', type=str, default=default_char_dictionary, help='Dictionary to use')
@@ -197,7 +196,7 @@ def train():
     dictionary_size, dict_table, pad_value = anchors_gen.create_lookup_table(FLAGS.dictionary)
 
     image_size = FLAGS.image_size
-    params = encoder.create_params(FLAGS.model_name, image_size, FLAGS.crop_size, FLAGS.max_sequence_len, dictionary_size, pad_value, dtype, FLAGS.use_gaussian_mask)
+    params = encoder.create_params(FLAGS.model_name, image_size, FLAGS.crop_size, FLAGS.max_sequence_len, dictionary_size, pad_value, dtype)
     model = encoder.Encoder(params)
 
     dummy_input = tf.ones((FLAGS.batch_size, image_size, image_size, 3), dtype=dtype)
