@@ -406,15 +406,6 @@ def train():
 
         return objdet_loss*objdet_scale, text_loss
 
-    gradient_stats = {}
-    for v in model.trainable_variables:
-        gvar = tf.Variable(tf.ones_like(v)*0.01, dtype=tf.float32, name='variance/{}'.format(v.name))
-        gmean = tf.Variable(tf.zeros_like(v), dtype=tf.float32, name='mean/{}'.format(v.name))
-        gradient_stats[v.name] = {
-            'mean': gmean,
-            'variance': gvar,
-        }
-
     @tf.function
     def eval_step(filenames, images, true_values):
         objdet_loss, text_loss = calculate_metrics(images, False, true_values)
@@ -457,41 +448,14 @@ def train():
                 if g.dtype == tf.float16:
                     logger.info('grad: {}, var: {}'.format(g, v))
 
-                gs = gradient_stats[v.name]
-                gmean = gs['mean']
-                gvar = gs['variance']
-
                 if hvd.rank() == 0 and tf.math.floormod(global_step, 20) == 0:
                     if 'kernel' in v.name:
                         tf.summary.scalar('{}_variables/{}'.format(prefix, v.name), tf.reduce_mean(tf.abs(v)), step=global_step)
                         tf.summary.scalar('{}_gradients/{}'.format(prefix, v.name), tf.reduce_mean(tf.abs(g)), step=global_step)
-                        tf.summary.scalar('{}_gradient_mean/{}'.format(prefix, v.name), tf.reduce_mean(tf.abs(gmean)), step=global_step)
-                        tf.summary.scalar('{}_gradient_variance/{}'.format(prefix, v.name), tf.reduce_mean(tf.abs(gvar)), step=global_step)
                         #tf.summary.histogram('{}/gradients/{}'.format(prefix, v.name), g, step=global_step)
 
                 #if epoch_var < 10:
                 #    g += tf.random.normal(stddev=stddev, mean=0., shape=g.shape)
-
-
-
-                gs = gmean + 2*gvar
-
-                decay = 0.99
-
-                diff = gmean - g
-                gmean_diff = (1 - decay) * diff
-                if tf.math.count_nonzero(tf.math.is_nan(gmean_diff)) == 0:
-                    gmean.assign_sub(gmean_diff)
-
-                diff = tf.abs(diff)
-                gvar_diff = gvar - diff
-                gvar_diff = (1 - decay) * gvar_diff
-                if tf.math.count_nonzero(tf.math.is_nan(gvar_diff)) == 0:
-                    gvar.assign_sub(gvar_diff)
-
-                g = tf.clip_by_value(g, -gs, gs)
-
-
 
                 ret_gradients.append(g)
                 ret_vars.append(v)
