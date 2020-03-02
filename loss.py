@@ -46,6 +46,7 @@ class TextMetric:
         self.word_loss = tf.keras.metrics.Mean()
         self.full_loss = tf.keras.metrics.Mean()
 
+        self.word3_acc = tf.keras.metrics.CategoricalAccuracy()
         self.word_acc = tf.keras.metrics.CategoricalAccuracy()
         self.full_acc = tf.keras.metrics.CategoricalAccuracy()
 
@@ -63,12 +64,14 @@ class TextMetric:
         true_lengths = tf.expand_dims(true_lengths, 1)
         true_lengths = tf.tile(true_lengths, [1, self.max_sequence_len])
         #logger.info('true_texts: {}, true_texts_oh: {}, logits: {}, weights: {}'.format(true_texts.shape, true_texts_oh.shape, logits.shape, weights.shape))
-        weights = tf.where(weights < true_lengths, tf.ones_like(weights, dtype=dtype), tf.zeros_like(weights, dtype=dtype))
+        weights_word = tf.where(weights < true_lengths, tf.ones_like(weights, dtype=dtype), tf.zeros_like(weights, dtype=dtype))
+        weights_3 = tf.where(weights < 3, tf.ones_like(weights, dtype=dtype), tf.zeros_like(weights, dtype=dtype))
 
-        word_loss = self.ce(y_true=true_texts_oh, y_pred=logits, sample_weight=weights)
+        word_loss = self.ce(y_true=true_texts_oh, y_pred=logits, sample_weight=weights_word)
         full_loss = self.ce(y_true=true_texts_oh, y_pred=logits)
 
-        self.word_acc.update_state(true_texts_oh, logits, sample_weight=weights)
+        self.word_acc.update_state(true_texts_oh, logits, sample_weight=weights_word)
+        self.word3_acc.update_state(true_texts_oh, logits, sample_weight=weights_3)
         self.full_acc.update_state(true_texts_oh, logits)
 
         self.word_loss.update_state(word_loss)
@@ -92,7 +95,8 @@ class TextMetric:
                 self.full_loss.result())
 
         if want_acc:
-            return '{:.4f}/{:.4f}'.format(
+            return '{:.4f}/{:.4f}/{:.4f}'.format(
+                self.word3_acc.result(),
                 self.word_acc.result(),
                 self.full_acc.result())
 
@@ -102,6 +106,7 @@ class TextMetric:
         self.word_loss.reset_states()
         self.full_loss.reset_states()
 
+        self.word3_acc.reset_states()
         self.word_acc.reset_states()
         self.full_acc.reset_states()
 
