@@ -26,32 +26,6 @@ __handler = logging.StreamHandler()
 __handler.setFormatter(__fmt)
 logger.addHandler(__handler)
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--eval_coco_annotations', type=str, help='Path to MS COCO dataset: annotations json file')
-parser.add_argument('--eval_coco_data_dir', type=str, default='/', help='Path to MS COCO dataset: image directory')
-parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch')
-parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel preprocessing jobs')
-parser.add_argument('--num_classes', type=int, required=True, help='Number of the output classes in the model')
-parser.add_argument('--max_ret', type=int, default=100, help='Maximum number of returned boxes')
-parser.add_argument('--min_score', type=float, default=0.7, help='Minimal class probability')
-parser.add_argument('--min_obj_score', type=float, default=0.3, help='Minimal class probability')
-parser.add_argument('--min_size', type=float, default=10, help='Minimal size of the bounding box')
-parser.add_argument('--iou_threshold', type=float, default=0.45, help='Minimal IoU threshold for non-maximum suppression')
-parser.add_argument('--output_dir', type=str, required=True, help='Path to directory, where images will be stored')
-parser.add_argument('--checkpoint', type=str, help='Load model weights from this file')
-parser.add_argument('--checkpoint_dir', type=str, help='Load model weights from the latest checkpoint in this directory')
-parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='Model name')
-parser.add_argument('--data_format', type=str, default='channels_last', choices=['channels_first', 'channels_last'], help='Data format: [channels_first, channels_last]')
-parser.add_argument('--do_not_step_labels', action='store_true', help='Whether to reduce labels by 1, i.e. when 0 is background class')
-parser.add_argument('--skip_checkpoint_assertion', action='store_true', help='Skip checkpoint assertion, needed for older models on objdet3/4')
-parser.add_argument('--no_channel_swap', action='store_true', help='When set, do not perform rgb-bgr conversion, needed, when using files as input')
-parser.add_argument('--freeze', action='store_true', help='Save frozen protobuf near checkpoint')
-parser.add_argument('--do_not_save_images', action='store_true', help='Do not save images with bounding boxes')
-parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
-parser.add_argument('--dataset_type', type=str, choices=['files', 'tfrecords', 'filelist'], default='files', help='Dataset type')
-parser.add_argument('filenames', type=str, nargs='*', help='Numeric label : file path')
-FLAGS = parser.parse_args()
-
 def normalize_image(image, dtype):
     image = tf.cast(image, dtype)
 
@@ -189,15 +163,12 @@ def non_max_suppression(coords, scores, max_ret, iou_threshold):
     return pick
     #return tf.gather(coords, pick), tf.gather(scores, pick)
 
-def per_image_supression(logits, image_size, num_classes):
+def per_image_supression(logits, image_size, num_classes, min_obj_score, min_score, min_size, max_ret, iou_threshold):
     coords, scores, labels, objectness = logits
 
     non_background_index = tf.where(tf.logical_and(
-                                        tf.greater(objectness, FLAGS.min_obj_score),
-                                        tf.greater(scores, FLAGS.min_score)))
-    #non_background_index = tf.where(tf.greater(scores, FLAGS.min_score))
-    #non_background_index = tf.where(tf.greater(scores * objectness, FLAGS.min_score))
-    #non_background_index = tf.where(tf.greater(scores * objectness, 0.3))
+                                        tf.greater(objectness, min_obj_score),
+                                        tf.greater(scores, min_score)))
 
     non_background_index = tf.squeeze(non_background_index, 1)
 
@@ -225,7 +196,7 @@ def per_image_supression(logits, image_size, num_classes):
         w = tf.squeeze(w, 1)
         h = tf.squeeze(h, 1)
 
-        small_cond = tf.logical_and(h >= FLAGS.min_size, w >= FLAGS.min_size)
+        small_cond = tf.logical_and(h >= min_size, w >= min_size)
         large_cond = tf.logical_and(h < image_size*2, w < image_size*2)
         index = tf.where(tf.logical_and(small_cond, large_cond))
         selected_scores = tf.gather(selected_scores, index)
@@ -258,9 +229,9 @@ def per_image_supression(logits, image_size, num_classes):
         #scores_to_sort = selected_scores * selected_objs
         scores_to_sort = selected_objs
         if True:
-            selected_indexes = tf.image.non_max_suppression(coords_yx, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
+            selected_indexes = tf.image.non_max_suppression(coords_yx, scores_to_sort, max_ret, iou_threshold=iou_threshold)
         else:
-            selected_indexes = non_max_suppression(coords_yx, scores_to_sort, FLAGS.max_ret, iou_threshold=FLAGS.iou_threshold)
+            selected_indexes = non_max_suppression(coords_yx, scores_to_sort, max_ret, iou_threshold=iou_threshold)
 
         #logger.info('selected_indexes: {}, selected_coords: {}, selected_scores: {}'.format(selected_indexes, selected_coords, selected_scores))
         selected_coords = tf.gather(coords_yx, selected_indexes)
@@ -284,7 +255,7 @@ def per_image_supression(logits, image_size, num_classes):
 
     #scores_to_sort = ret_scores * ret_objs
     scores_to_sort = ret_objs
-    _, best_index = tf.math.top_k(scores_to_sort, tf.minimum(FLAGS.max_ret, tf.shape(ret_scores)[0]), sorted=True)
+    _, best_index = tf.math.top_k(scores_to_sort, tf.minimum(max_ret, tf.shape(ret_scores)[0]), sorted=True)
 
     best_scores = tf.gather(ret_scores, best_index)
     best_coords = tf.gather(ret_coords, best_index)
@@ -293,7 +264,7 @@ def per_image_supression(logits, image_size, num_classes):
 
     #logger.info('best_coords: {}, best_scores: {}, best_cat_ids: {}'.format(best_coords, best_scores, best_cat_ids))
 
-    to_add = tf.maximum(FLAGS.max_ret - tf.shape(best_scores)[0], 0)
+    to_add = tf.maximum(max_ret - tf.shape(best_scores)[0], 0)
     best_coords = tf.pad(best_coords, [[0, to_add], [0, 0]] , 'CONSTANT', constant_values=0)
     best_scores = tf.pad(best_scores, [[0, to_add]], 'CONSTANT', constant_values=0)
     best_objs = tf.pad(best_objs, [[0, to_add]], 'CONSTANT', constant_values=0)
@@ -305,7 +276,7 @@ def per_image_supression(logits, image_size, num_classes):
 
     return best_coords, best_scores, best_objs, best_cat_ids
 
-def eval_step_logits(model, images, image_size, num_classes, all_anchors, all_grid_xy, all_ratios):
+def eval_step_logits(model, images, image_size, num_classes, all_anchors, all_grid_xy, all_ratios, min_obj_score, min_score, min_size, max_ret, iou_threshold):
     pred_values = model(images, training=False)
 
     pred_objs = tf.math.sigmoid(pred_values[..., 4])
@@ -322,18 +293,19 @@ def eval_step_logits(model, images, image_size, num_classes, all_anchors, all_gr
 
     pred_bboxes = tf.concat([pred_xy, pred_wh], axis=-1)
 
-    return tf.map_fn(lambda out: per_image_supression(out, image_size, num_classes),
+    return tf.map_fn(lambda out: per_image_supression(out, image_size, num_classes, min_obj_score, min_score, min_size, max_ret, iou_threshold),
                      (pred_bboxes, pred_scores, pred_labels, pred_objs),
-                     parallel_iterations=FLAGS.num_cpus,
+                     parallel_iterations=16,
                      back_prop=False,
                      dtype=(tf.float32, tf.float32, tf.float32, tf.int32))
 
-def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_anchors, all_grid_xy, all_ratios, cat_names):
+def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_anchors, all_grid_xy, all_ratios, cat_names, FLAGS):
     num_files = 0
     dump_js = []
     for filenames, images in dataset:
         start_time = time.time()
-        coords_batch, scores_batch, objs_batch, cat_ids_batch = eval_step_logits(model, images, image_size, num_classes, all_anchors, all_grid_xy, all_ratios)
+        coords_batch, scores_batch, objs_batch, cat_ids_batch = eval_step_logits(model, images, image_size, num_classes, all_anchors, all_grid_xy, all_ratios,
+                FLAGS.min_obj_score, FLAGS.min_score, FLAGS.min_size, FLAGS.max_ret, FLAGS.iou_threshold)
         num_files += len(filenames)
         time_per_image_ms = (time.time() - start_time) / len(filenames) * 1000
 
@@ -413,7 +385,7 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_a
         json.dump(dump_js, fout)
 
 
-def run_inference():
+def run_inference(FLAGS):
     os.makedirs(FLAGS.output_dir, exist_ok=True)
     handler = logging.FileHandler(os.path.join(FLAGS.output_dir, 'infdet.log'), 'a')
     handler.setFormatter(__fmt)
@@ -445,54 +417,6 @@ def run_inference():
     else:
         status.assert_existing_objects_matched().expect_partial()
     logger.info("Restored from external checkpoint {}".format(checkpoint_prefix))
-
-    if FLAGS.freeze:
-        dummy_image = tf.zeros((1, image_size, image_size, 3))
-        _ = model(dummy_image, training=False)
-
-        weights = []
-        for v in model.variables:
-            #logger.info(v.name)
-            weights.append(v.numpy())
-
-        with tf.compat.v1.Session() as sess:
-            model = encoder.create_model(FLAGS.model_name, FLAGS.num_classes)
-
-            dtype = tf.float32
-
-            images = tf.keras.layers.Input(shape=(image_size * image_size * 3), name='input/images_rgb', dtype=tf.uint8)
-            images = tf.reshape(images, [-1, image_size, image_size, 3])
-            images = normalize_image(images, dtype)
-
-            coords_batch, scores_batch, objs_batch, cat_ids_batch = eval_step_logits(model, images, image_size, num_classes, all_anchors_graph, all_grid_xy_graph, all_ratios_graph)
-
-            coords_batch = tf.identity(coords_batch, name='output/coords')
-            scores_batch = tf.identity(scores_batch, name='output/scores')
-            objs_batch = tf.identity(objs_batch, name='output/objectness')
-            cat_ids_batch = tf.identity(cat_ids_batch, name='output/category_ids')
-            output_names = ['output/coords', 'output/scores', 'output/objectness', 'output/category_ids']
-
-            sess.run([tf.compat.v1.global_variables_initializer(), tf.compat.v1.local_variables_initializer()])
-
-            recover_ops = []
-            for v, weight in zip(model.variables, weights):
-                op = tf.compat.v1.assign(v, weight)
-                recover_ops.append(op)
-
-            sess.run(recover_ops)
-
-            logger.info("Restored from external checkpoint {} {} variables".format(checkpoint_prefix, len(recover_ops)))
-
-            output_graph_def = tf.compat.v1.graph_util.convert_variables_to_constants(sess, sess.graph.as_graph_def(), output_names)
-
-            output = '{}-{}.frozen.pb'.format(checkpoint_prefix, tf.__version__)
-            filename = tf.io.write_graph(output_graph_def, os.path.dirname(output), os.path.basename(output), as_text=False)
-
-            print('Saved graph as {}'.format(os.path.abspath(filename)))
-            return
-
-
-
 
     cat_names = {}
 
@@ -539,9 +463,34 @@ def run_inference():
 
     logger.info('Dataset has been created: num_images: {}, num_classes: {}, model_name: {}'.format(num_images, num_classes, FLAGS.model_name))
 
-    run_eval(model, ds, num_images, image_size, FLAGS.num_classes, FLAGS.output_dir, all_anchors, all_grid_xy, all_ratios, cat_names)
+    run_eval(model, ds, num_images, image_size, FLAGS.num_classes, FLAGS.output_dir, all_anchors, all_grid_xy, all_ratios, cat_names, FLAGS)
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--eval_coco_annotations', type=str, help='Path to MS COCO dataset: annotations json file')
+    parser.add_argument('--eval_coco_data_dir', type=str, default='/', help='Path to MS COCO dataset: image directory')
+    parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch')
+    parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel preprocessing jobs')
+    parser.add_argument('--num_classes', type=int, required=True, help='Number of the output classes in the model')
+    parser.add_argument('--max_ret', type=int, default=100, help='Maximum number of returned boxes')
+    parser.add_argument('--min_score', type=float, default=0.7, help='Minimal class probability')
+    parser.add_argument('--min_obj_score', type=float, default=0.3, help='Minimal class probability')
+    parser.add_argument('--min_size', type=float, default=10, help='Minimal size of the bounding box')
+    parser.add_argument('--iou_threshold', type=float, default=0.45, help='Minimal IoU threshold for non-maximum suppression')
+    parser.add_argument('--output_dir', type=str, required=True, help='Path to directory, where images will be stored')
+    parser.add_argument('--checkpoint', type=str, help='Load model weights from this file')
+    parser.add_argument('--checkpoint_dir', type=str, help='Load model weights from the latest checkpoint in this directory')
+    parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='Model name')
+    parser.add_argument('--data_format', type=str, default='channels_last', choices=['channels_first', 'channels_last'], help='Data format: [channels_first, channels_last]')
+    parser.add_argument('--do_not_step_labels', action='store_true', help='Whether to reduce labels by 1, i.e. when 0 is background class')
+    parser.add_argument('--skip_checkpoint_assertion', action='store_true', help='Skip checkpoint assertion, needed for older models on objdet3/4')
+    parser.add_argument('--no_channel_swap', action='store_true', help='When set, do not perform rgb-bgr conversion, needed, when using files as input')
+    parser.add_argument('--do_not_save_images', action='store_true', help='Do not save images with bounding boxes')
+    parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
+    parser.add_argument('--dataset_type', type=str, choices=['files', 'tfrecords', 'filelist'], default='files', help='Dataset type')
+    parser.add_argument('filenames', type=str, nargs='*', help='Numeric label : file path')
+    FLAGS = parser.parse_args()
+
     np.set_printoptions(formatter={'float': '{:0.4f}'.format, 'int': '{:4d}'.format}, linewidth=250, suppress=True, threshold=np.inf)
 
     if not FLAGS.checkpoint and not FLAGS.checkpoint_dir:
@@ -549,7 +498,7 @@ if __name__ == '__main__':
         exit(-1)
 
     try:
-        run_inference()
+        run_inference(FLAGS)
     except Exception as e:
         exc_type, exc_value, exc_traceback = sys.exc_info()
 
