@@ -2,8 +2,11 @@ import argparse
 import json
 import os
 import random
+import shutil
 
 def scan_tags(input_dir, images={}, annotations={}, categories={}):
+    copied = 0
+
     for fn in os.listdir(input_dir):
         image_filename_full = os.path.join(input_dir, fn)
 
@@ -31,8 +34,14 @@ def scan_tags(input_dir, images={}, annotations={}, categories={}):
 
                 for x in js:
                     name = x['name']
+                    if FLAGS.copy_category and FLAGS.output_dir:
+                        if name == FLAGS.copy_category:
+                            shutil.copy(image_filename_full, FLAGS.output_dir)
+                            copied += 1
+
                     boxes = x['rectangles']
-                    if boxes is not None:
+                    if not boxes:
+                    else:
                         if name not in categories:
                             cat_id = len(categories)
                             categories[name] = {
@@ -59,6 +68,8 @@ def scan_tags(input_dir, images={}, annotations={}, categories={}):
                                 'bbox': [xmin, ymin, xmax-xmin, ymax-ymin],
                             }
 
+    print('input_dir: {}, images: {}, annotations: {}, categories: {}, copied: {}'.format(input_dir, len(images), len(annotations), len(categories), copied))
+
     return images, annotations, categories
 
 categories = {
@@ -80,8 +91,10 @@ categories = {
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--annotations_file', required=True, type=str, help='Path to store annotations json file')
+    parser.add_argument('--annotations_file', type=str, help='Path to store annotations json file')
     parser.add_argument('--input_dir', required=True, type=str, help='Image data directory')
+    parser.add_argument('--copy_category', type=str, help='Copy image category into this dir')
+    parser.add_argument('--output_dir', type=str, help='Copy image category into this dir')
     FLAGS = parser.parse_args()
 
 
@@ -99,5 +112,6 @@ if __name__ == '__main__':
     }
 
     print('images: {}, tags: {}'.format(len(images), len(categories)))
-    with open(FLAGS.annotations_file, 'w') as f:
-        json.dump(output, f)
+    if FLAGS.annotations_file:
+        with open(FLAGS.annotations_file, 'w') as f:
+            json.dump(output, f)
