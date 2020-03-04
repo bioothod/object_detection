@@ -175,7 +175,7 @@ class EfnHead(tf.keras.layers.Layer):
 
         return stage2_output, stage1_output, stage0_output
 
-class EfnYolo(tf.keras.layers.Layer):
+class EfnYolo(tf.keras.Model):
     def __init__(self, params, num_classes, **kwargs):
         super(EfnYolo, self).__init__(**kwargs)
 
