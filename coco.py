@@ -11,7 +11,7 @@ import numpy as np
 from matplotlib.collections import PatchCollection
 from matplotlib.patches import Polygon
 
-from pycocotools import mask as maskUtils
+#from pycocotools import mask as maskUtils
 
 import albumentations as A
 
