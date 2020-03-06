@@ -128,7 +128,7 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
 
     return filename, image, true_values
 
-def draw_bboxes(image_size, train_dataset, num_examples, all_anchors, dictionary, max_sequence_len):
+def draw_bboxes(image_size, train_dataset, num_examples, all_anchors, dictionary, pad_value, max_sequence_len):
     data_dir = os.path.join(FLAGS.train_dir, 'tmp')
     os.makedirs(data_dir, exist_ok=True)
 
@@ -139,23 +139,24 @@ def draw_bboxes(image_size, train_dataset, num_examples, all_anchors, dictionary
 
         dst = os.path.join(data_dir, filename_base) + '.png'
 
-        image_filename = '/shared2/object_detection/datasets/text/synth_text/SynthText/{}'.format(filename)
-        if False:
-            image = cv2.imread(image_filename)
-            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        else:
-            image = image.numpy()
-            image = image * 128 + 128
-            image = image.astype(np.uint8)
+        image = image.numpy()
+        image = image * 128 + 128
+        image = image.astype(np.uint8)
 
         true_word_obj, word_poly, text_labels, lengths = anchors_gen.unpack_true_values(true_values, all_anchors, image.shape, image_size, max_sequence_len)
 
         word_poly = word_poly.numpy()
-        text_labels = text_labels.numpy()
+        text_labels = text_labels.numpy().astype(np.int32)
 
         new_anns = []
         for poly, text in zip(word_poly, text_labels):
-            new_anns.append((None, poly, None))
+            text_str = ''
+            for text_idx in text[0]:
+                if text_idx != pad_value and text_idx <= len(dictionary):
+                    text_str += dictionary[text_idx - 1]
+
+            #logger.info('{}: {}: {}'.format(filename, text_str, poly))
+            new_anns.append((None, poly, text_str))
 
         image_draw.draw_im(image, new_anns, dst, {})
 
@@ -284,7 +285,7 @@ def train():
         eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, is_training=False)
 
     if FLAGS.save_examples > 0:
-        draw_bboxes(image_size, train_dataset, FLAGS.save_examples, anchors_all, FLAGS.dictionary, FLAGS.max_sequence_len)
+        draw_bboxes(image_size, train_dataset, FLAGS.save_examples, anchors_all, FLAGS.dictionary, pad_value, FLAGS.max_sequence_len)
         exit(0)
 
     logger.info('steps_per_train_epoch: {}, steps_per_warmup_epoch: {}, steps_per_eval_epoch: {}, dictionary_size: {}'.format(
