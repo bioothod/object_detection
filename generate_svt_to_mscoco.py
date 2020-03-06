@@ -55,10 +55,10 @@ def scan_annotations(xml_ann, writer):
 
         text_nodes = image_node.find('taggedRectangles')
         for tn in text_nodes:
-            x0 = tn.attrib['x']
-            y0 = tn.attrib['y']
-            h = tn.attrib['height']
-            w = tn.attrib['width']
+            x0 = int(tn.attrib['x'])
+            y0 = int(tn.attrib['y'])
+            h = int(tn.attrib['height'])
+            w = int(tn.attrib['width'])
 
             text = tn.find('tag').text
 
@@ -77,15 +77,9 @@ def scan_annotations(xml_ann, writer):
                 wp_xy = polygon.minimum_rotated_rectangle.exterior.coords.xy
                 wp = np.array([[x, y] for x, y in zip(*wp_xy)])[1:, :]
 
-            xmin = x.min()
-            xmax = x.max()
-            ymin = y.min()
-            ymax = y.max()
 
-            cx = (xmax + xmin) / 2
-            cy = (ymax + ymin) / 2
-            h = ymax - ymin
-            w = xmax - xmin
+            cx = x0 + w/2
+            cy = y0 + h/2
 
             bb = np.array([cx, cy, h, w], dtype=np.float32)
 
