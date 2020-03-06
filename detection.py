@@ -56,6 +56,7 @@ parser.add_argument('--use_predicted_polys_epochs', type=int, default=-1, help='
 parser.add_argument('--warmup_objdet_epochs', type=int, default=100, help='Start using normal (1.0) objdet loss scale after this epoch, use heavily diminished before that')
 parser.add_argument('--max_word_batch', type=int, default=64, help='Maximum batch of word')
 parser.add_argument('--disable_rotation_augmentation', action='store_true', help='Whether to disable rotation/flipping augmentation')
+parser.add_argument('--use_random_augmentation', action='store_true', help='Use efficientnet random augmentation')
 
 default_char_dictionary="!\"#&\'\\()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 parser.add_argument('--dictionary', type=str, default=default_char_dictionary, help='Dictionary to use')
@@ -107,7 +108,7 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
     text_labels = tf.strings.split(features['true_labels'], '<SEP>')
 
     if is_training:
-        image, word_poly, text_labels = preprocess.preprocess_for_train(image, word_poly, text_labels, image_size, FLAGS.disable_rotation_augmentation)
+        image, word_poly, text_labels = preprocess.preprocess_for_train(image, word_poly, text_labels, image_size, FLAGS.disable_rotation_augmentation, FLAGS.use_random_augmentation)
 
     text_split = tf.strings.unicode_split(text_labels, 'UTF-8')
 

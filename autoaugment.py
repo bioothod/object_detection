@@ -458,7 +458,7 @@ def _randomly_negate_tensor(tensor):
     return final_tensor
 
 
-def _rotate_level_to_arg(level, max_angle):
+def _rotate_level_to_arg(level, max_angle=30):
     level = (level/_MAX_LEVEL) * float(max_angle)
     level = _randomly_negate_tensor(level)
     return (level,)

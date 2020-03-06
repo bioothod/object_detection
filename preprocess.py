@@ -2,6 +2,7 @@ import tensorflow as tf
 from tensorflow.python.ops import control_flow_ops
 
 import tensorflow_addons as tfa
+import autoaugment
 
 def _ImageDimensions(image, rank = 3):
     """Returns the dimensions of an image tensor.
@@ -42,7 +43,7 @@ def apply_with_random_selector(x, func, num_cases):
         for case in range(num_cases)])[0]
 
 
-def distort_color(image, color_ordering=0, fast_mode=True, scope='distort_color'):
+def distort_color(image, color_ordering=0, fast_mode=False, scope='distort_color'):
     """Distort the color of a Tensor image.
 
     Each color distortion is non-commutative and thus ordering of the color ops
@@ -187,13 +188,22 @@ def rotate_points(points, theta):
     rotation_matrix = tf.reshape(rotation_matrix, (2, 2))
     return tf.matmul(points, rotation_matrix)
 
-def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rotation_augmentation):
+def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rotation_augmentation, use_random_augmentation):
     dtype = image.dtype
 
-    if False and tf.random.uniform([], 0, 1) > 0.5:
-        image = apply_with_random_selector(image,
-                lambda x, ordering: distort_color(x, ordering, fast_mode=False),
-                num_cases=4)
+    if tf.random.uniform([], 0, 1) > 0.5:
+        if use_random_augmentation:
+            randaug_num_layers = 2
+            randaug_magnitude = 28
+
+            image = tf.cast(image, tf.uint8)
+            image = autoaugment.distort_image_with_randaugment(image, randaug_num_layers, randaug_magnitude)
+            image = tf.cast(image, dtype)
+        else:
+            image = apply_with_random_selector(image,
+                    lambda x, ordering: distort_color(x, ordering, fast_mode=False),
+                    num_cases=4)
+            image = tf.cast(image, dtype)
 
     resize_rnd = tf.random.uniform([], 0, 1)
     if resize_rnd > 0.3:
