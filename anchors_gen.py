@@ -194,6 +194,9 @@ def unpack_true_values(true_values, all_anchors, current_image_shape, image_size
 
     word_index = tf.where(true_word_obj != 0)
 
+    true_words = tf.gather(true_words, word_index)
+    true_lenghts = tf.gather(true_lenghts, word_index)
+
     word_poly = tf.gather(true_word_poly, word_index)
     word_poly = tf.reshape(word_poly, [-1, 4, 2])
 
