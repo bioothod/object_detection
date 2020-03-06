@@ -99,8 +99,7 @@ def distort_color(image, color_ordering=0, fast_mode=False, scope='distort_color
             else:
                 raise ValueError('color_ordering must be in [0, 3]')
 
-        # The random_* ops do not necessarily clamp.
-        return tf.clip_by_value(image, -1.0, 1.0)
+        return image
 
 def random_expand(image, polys, ratio):
     height, width, depth = _ImageDimensions(image, rank=3)
@@ -193,8 +192,8 @@ def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rota
 
     if tf.random.uniform([], 0, 1) > 0.5:
         if use_random_augmentation:
-            randaug_num_layers = 2
-            randaug_magnitude = 28
+            randaug_num_layers = 1
+            randaug_magnitude = 11
 
             image = tf.cast(image, tf.uint8)
             image = autoaugment.distort_image_with_randaugment(image, randaug_num_layers, randaug_magnitude)
@@ -208,7 +207,7 @@ def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rota
     resize_rnd = tf.random.uniform([], 0, 1)
     if resize_rnd > 0.3:
         if resize_rnd > 0.6:
-            ratio = tf.random.uniform([], minval=1.01, maxval=1.3, dtype=word_poly.dtype)
+            ratio = tf.random.uniform([], minval=1.1, maxval=2., dtype=word_poly.dtype)
 
             poly_rel = word_poly / image_size
             image, new_poly = random_expand(image, poly_rel, ratio)
