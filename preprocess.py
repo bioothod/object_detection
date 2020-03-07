@@ -108,7 +108,7 @@ def random_expand(image, polys, ratio):
 
     canvas_width, canvas_height = tf.cast(float_width * ratio, tf.int32), tf.cast(float_height * ratio, tf.int32)
 
-    mean_color_of_image = [0.5, 0.5, 0.5]
+    mean_color_of_image = [128, 128, 128]
 
     x = tf.random.uniform([], minval=0, maxval=canvas_width - width, dtype=tf.int32)
     y = tf.random.uniform([], minval=0, maxval=canvas_height - height, dtype=tf.int32)
@@ -131,6 +131,7 @@ def random_expand(image, polys, ratio):
 @tf.function
 def random_crop(image, polys, text_labels):
     height, width, depth = _ImageDimensions(image, rank=3)
+    dtype = image.dtype
 
     float_height, float_width = tf.cast(height, polys.dtype), tf.cast(width, polys.dtype)
 
@@ -178,6 +179,7 @@ def random_crop(image, polys, text_labels):
 
             image = tf.image.crop_to_bounding_box(image, crop_y0, crop_x0, crop_y1 - crop_y0, crop_x1 - crop_x0)
             image = tf.image.resize(image, [height, width])
+            image = tf.cast(image, dtype)
             break
 
     return image, polys, text_labels
@@ -190,12 +192,25 @@ def rotate_points(points, theta):
 def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rotation_augmentation, use_random_augmentation):
     dtype = image.dtype
 
+    resize_rnd = tf.random.uniform([], 0, 1)
+    if resize_rnd > 0.3:
+        if resize_rnd > 0.6:
+            ratio = tf.random.uniform([], minval=1.1, maxval=2., dtype=word_poly.dtype)
+
+            current_image_size = tf.cast(tf.shape(image)[1], word_poly.dtype)
+            poly_rel = word_poly / current_image_size
+            image, new_poly = random_expand(image, poly_rel, ratio)
+            image = tf.image.resize(image, [image_size, image_size])
+            image = tf.cast(image, dtype)
+            word_poly = new_poly * image_size
+        else:
+            image, word_poly, text_labels = random_crop(image, word_poly, text_labels)
+
     if tf.random.uniform([], 0, 1) > 0.5:
         if use_random_augmentation:
             randaug_num_layers = 1
             randaug_magnitude = 11
 
-            image = tf.cast(image, tf.uint8)
             image = autoaugment.distort_image_with_randaugment(image, randaug_num_layers, randaug_magnitude)
             image = tf.cast(image, dtype)
         else:
@@ -203,19 +218,6 @@ def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rota
                     lambda x, ordering: distort_color(x, ordering, fast_mode=False),
                     num_cases=4)
             image = tf.cast(image, dtype)
-
-    resize_rnd = tf.random.uniform([], 0, 1)
-    if resize_rnd > 0.3:
-        if resize_rnd > 0.6:
-            ratio = tf.random.uniform([], minval=1.1, maxval=2., dtype=word_poly.dtype)
-
-            poly_rel = word_poly / image_size
-            image, new_poly = random_expand(image, poly_rel, ratio)
-            image = tf.image.resize(image, [image_size, image_size])
-            image = tf.cast(image, dtype)
-            word_poly = new_poly * image_size
-        else:
-            image, word_poly, text_labels = random_crop(image, word_poly, text_labels)
 
     if not disable_rotation_augmentation and tf.random.uniform([], 0, 1) > 0.5:
         angle_min = -5. / 180 * 3.1415
@@ -226,9 +228,10 @@ def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rota
         image = tfa.image.rotate(image, angle, interpolation='BILINEAR')
 
         angle = tf.cast(angle, word_poly.dtype)
-        word_poly -= [image_size/2, image_size/2]
+        current_image_size = tf.cast(tf.shape(image)[1], word_poly.dtype)
+        word_poly -= [current_image_size/2, current_image_size/2]
         word_poly = rotate_points(word_poly, angle)
-        word_poly += [image_size/2, image_size/2]
+        word_poly += [current_image_size/2, current_image_size/2]
 
     return image, word_poly, text_labels
 

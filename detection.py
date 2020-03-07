@@ -75,6 +75,8 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
     image = features['image']
     image = tf.image.decode_jpeg(image, channels=3)
 
+    text_labels = tf.strings.split(features['true_labels'], '<SEP>')
+
     word_poly = tf.io.decode_raw(features['word_poly'], tf.float32)
     word_poly = tf.reshape(word_poly, [-1, 4, 2])
 
@@ -95,9 +97,14 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
     add = tf.stack([xdiff, ydiff])
     word_poly += add
 
+    if is_training:
+        image, word_poly, text_labels = preprocess.preprocess_for_train(image, word_poly, text_labels, image_size, FLAGS.disable_rotation_augmentation, FLAGS.use_random_augmentation)
+
+
+    new_image_size = tf.cast(tf.shape(image)[1], tf.float32)
     image = tf.image.resize(image, [image_size, image_size])
 
-    scale = image_size / mx
+    scale = image_size / new_image_size
     word_poly *= scale
     word_poly = tf.cast(word_poly, dtype)
 
@@ -105,10 +112,6 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
     image -= 128
     image /= 128
 
-    text_labels = tf.strings.split(features['true_labels'], '<SEP>')
-
-    if is_training:
-        image, word_poly, text_labels = preprocess.preprocess_for_train(image, word_poly, text_labels, image_size, FLAGS.disable_rotation_augmentation, FLAGS.use_random_augmentation)
 
     text_split = tf.strings.unicode_split(text_labels, 'UTF-8')
 
