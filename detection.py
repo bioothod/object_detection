@@ -57,6 +57,7 @@ parser.add_argument('--warmup_objdet_epochs', type=int, default=100, help='Start
 parser.add_argument('--max_word_batch', type=int, default=64, help='Maximum batch of word')
 parser.add_argument('--disable_rotation_augmentation', action='store_true', help='Whether to disable rotation/flipping augmentation')
 parser.add_argument('--use_random_augmentation', action='store_true', help='Use efficientnet random augmentation')
+parser.add_argument('--only_test', action='store_true', help='Exist after running initial validation')
 
 default_char_dictionary="!\"#&\'\\()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 parser.add_argument('--dictionary', type=str, default=default_char_dictionary, help='Dictionary to use')
@@ -98,8 +99,7 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
     word_poly += add
 
     if is_training:
-        image, word_poly, text_labels = preprocess.preprocess_for_train(image, word_poly, text_labels, image_size, FLAGS.disable_rotation_augmentation, FLAGS.use_random_augmentation)
-
+        image, word_poly, text_labels = preprocess.preprocess_for_train(image, word_poly, text_labels, image_size, FLAGS.disable_rotation_augmentation, FLAGS.use_random_augmentation, dtype)
 
     new_image_size = tf.cast(tf.shape(image)[1], tf.float32)
     image = tf.image.resize(image, [image_size, image_size])
@@ -107,11 +107,6 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
     scale = image_size / new_image_size
     word_poly *= scale
     word_poly = tf.cast(word_poly, dtype)
-
-    image = tf.cast(image, dtype)
-    image -= 128
-    image /= 128
-
 
     text_split = tf.strings.unicode_split(text_labels, 'UTF-8')
 
@@ -284,7 +279,9 @@ def train():
 
     if FLAGS.dataset_type == 'tfrecords':
         train_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir, is_training=True)
-        train_warmup_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir_warmup, is_training=True)
+        train_warmup_dataset = None
+        if FLAGS.train_tfrecord_dir_warmup and len(FLAGS.train_tfrecord_dir_warmup) != 0:
+            train_warmup_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir_warmup, is_training=True)
         eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, is_training=False)
 
     if FLAGS.save_examples > 0:
@@ -332,7 +329,7 @@ def train():
 
     if FLAGS.use_predicted_polys_epochs >= 0:
         if epoch_var.numpy() >= FLAGS.use_predicted_polys_epochs:
-            logger.info('epoch: {}, global_step: {}, use_predicted_polys_epochs: {}, will use predicted polygones for dimensions'.format(
+            logger.info('epoch: {}, global_step: {}, use_predicted_polys_epochs: {}, will use predicted polygons for dimensions'.format(
                 int(epoch_var.numpy()), global_step.numpy(), FLAGS.use_predicted_polys_epochs))
 
     if FLAGS.force_epoch:
@@ -560,6 +557,10 @@ def train():
             best_metric = validation_metric()
             logger.info('initial validation: {}, metric: {:.3f}'.format(metric.str_result(False), best_metric))
 
+            if FLAGS.only_test:
+                logger.info('Exiting...')
+                exit(0)
+
         if best_metric < FLAGS.min_eval_metric:
             logger.info('setting minimal evaluation metric {:.3f} -> {} from command line arguments'.format(best_metric, FLAGS.min_eval_metric))
             best_metric = FLAGS.min_eval_metric
@@ -576,7 +577,7 @@ def train():
         metric.reset_states()
         want_reset = False
 
-        if epoch_var.numpy() < FLAGS.warmup_tfrecrods_epochs:
+        if epoch_var.numpy() < FLAGS.warmup_tfrecrods_epochs and train_warmup_dataset:
             train_steps = run_epoch('train', train_warmup_dataset, train_step, FLAGS.steps_per_warmup_epoch, (epoch == 0))
         else:
             if epoch_var.numpy() == FLAGS.warmup_tfrecrods_epochs and epoch != 0:
@@ -655,7 +656,7 @@ def train():
 
         if FLAGS.use_predicted_polys_epochs >= 0:
             if epoch_var.numpy() == FLAGS.use_predicted_polys_epochs:
-                logger.info('epoch: {}, global_step: {}, starting to use predicted polygones for dimensions, will reset model to the best available'.format(
+                logger.info('epoch: {}, global_step: {}, starting to use predicted polygons for dimensions, will reset model to the best available'.format(
                     int(epoch_var.numpy()), global_step.numpy()))
 
                 want_reset = True
