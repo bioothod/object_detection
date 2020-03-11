@@ -65,7 +65,7 @@ class TextMetric:
         true_lengths = tf.tile(true_lengths, [1, self.max_sequence_len])
         #logger.info('true_texts: {}, true_texts_oh: {}, logits: {}, weights: {}'.format(true_texts.shape, true_texts_oh.shape, logits.shape, weights.shape))
         weights_word = tf.where(weights < true_lengths, tf.ones_like(weights, dtype=dtype), tf.zeros_like(weights, dtype=dtype))
-        weights_3 = tf.where(weights < 3, tf.ones_like(weights, dtype=dtype), tf.zeros_like(weights, dtype=dtype))
+        weights_3 = tf.where(weights < 1, tf.ones_like(weights, dtype=dtype), tf.zeros_like(weights, dtype=dtype))
 
         word_loss = self.ce(y_true=true_texts_oh, y_pred=logits, sample_weight=weights_word)
         full_loss = self.ce(y_true=true_texts_oh, y_pred=logits)
@@ -234,8 +234,26 @@ class LossMetricAggregator:
         # losses
 
         # distance loss
-        word_dist_loss = self.mae(true_word_poly, pred_word_poly)
-        m.word_dist_loss.update_state(word_dist_loss)
+
+        pred_word_poly = tf.reshape(pred_word_poly, [-1, 4, 2])
+        true_word_poly = tf.reshape(true_word_poly, [-1, 4, 2])
+
+        word_dist_loss = tf.ones(tf.shape(true_word_poly)[0], dtype=tf.float32) * 1024
+        for offset in tf.range(4):
+            l = tf.zeros(tf.shape(true_word_poly)[0], dtype=tf.float32)
+            for idx in tf.range(4):
+                axis = idx + offset
+                if axis >= 4:
+                    axis -= 4
+
+                x = tf.math.abs(true_word_poly[:, axis, :] - pred_word_poly[:, idx, :])
+                x = tf.reduce_sum(x, -1)
+                l += x
+
+            word_dist_loss = tf.minimum(word_dist_loss, l)
+
+
+        m.word_dist_loss.update_state(tf.reduce_mean(word_dist_loss) / 8)
         word_dist_loss = tf.nn.compute_average_loss(word_dist_loss, global_batch_size=self.global_batch_size)
         dist_loss = word_dist_loss
 
