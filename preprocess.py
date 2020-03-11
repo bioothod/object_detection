@@ -1,8 +1,12 @@
+import logging
+
 import tensorflow as tf
 from tensorflow.python.ops import control_flow_ops
 
 import tensorflow_addons as tfa
 import autoaugment
+
+logger = logging.getLogger('detection')
 
 def _ImageDimensions(image, rank = 3):
     """Returns the dimensions of an image tensor.
@@ -61,13 +65,14 @@ def distort_color(image, color_ordering=0, fast_mode=False, scope='distort_color
     Raises:
       ValueError: if color_ordering not in [0, 3]
     """
+
     with tf.name_scope(scope):
-        saturation_lower = 0.7
-        saturation_upper = 1.5
-        brightness_max_delta = 16. / 255
+        saturation_lower = 0.9
+        saturation_upper = 1.2
+        brightness_max_delta = 8 / 255
         hue_max_delta = 0.2
-        contrast_lower = 0.7
-        contrast_upper = 1.5
+        contrast_lower = 0.9
+        contrast_upper = 1.2
         if fast_mode:
             if color_ordering == 0:
                 image = tf.image.random_brightness(image, max_delta=brightness_max_delta)
@@ -99,7 +104,7 @@ def distort_color(image, color_ordering=0, fast_mode=False, scope='distort_color
             else:
                 raise ValueError('color_ordering must be in [0, 3]')
 
-        return image
+        return tf.clip_by_value(image, 0, 1)
 
 def random_expand(image, polys, ratio):
     height, width, depth = _ImageDimensions(image, rank=3)
@@ -189,11 +194,14 @@ def rotate_points(points, theta):
     rotation_matrix = tf.reshape(rotation_matrix, (2, 2))
     return tf.matmul(points, rotation_matrix)
 
-def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rotation_augmentation, use_random_augmentation):
-    dtype = image.dtype
+def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rotation_augmentation, use_random_augmentation, dtype):
+    # image is tf.uint8
+
+    image = tf.cast(image, dtype)
 
     resize_rnd = tf.random.uniform([], 0, 1)
     if resize_rnd > 0.3:
+
         if resize_rnd > 0.6:
             ratio = tf.random.uniform([], minval=1.1, maxval=2., dtype=word_poly.dtype)
 
@@ -211,17 +219,27 @@ def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rota
             randaug_num_layers = 1
             randaug_magnitude = 11
 
+            image = tf.cast(image, tf.uint8)
             image = autoaugment.distort_image_with_randaugment(image, randaug_num_layers, randaug_magnitude)
             image = tf.cast(image, dtype)
         else:
+            # image must be in [0, 1] range for this function
+            image /= 255
+
+            fast_mode = False
+            num_cases = 4
+            if fast_mode:
+                num_cases = 2
+
             image = apply_with_random_selector(image,
-                    lambda x, ordering: distort_color(x, ordering, fast_mode=False),
-                    num_cases=4)
-            image = tf.cast(image, dtype)
+                    lambda x, ordering: distort_color(x, ordering, fast_mode=fast_mode),
+                    num_cases=num_cases)
+
+            image *= 255
 
     if not disable_rotation_augmentation and tf.random.uniform([], 0, 1) > 0.5:
-        angle_min = -5. / 180 * 3.1415
-        angle_max = 5. / 180 * 3.1415
+        angle_min = -4. / 180 * 3.1415
+        angle_max = 4. / 180 * 3.1415
 
         angle = tf.random.uniform([], minval=angle_min, maxval=angle_max, dtype=tf.float32)
 
@@ -232,6 +250,11 @@ def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rota
         word_poly -= [current_image_size/2, current_image_size/2]
         word_poly = rotate_points(word_poly, angle)
         word_poly += [current_image_size/2, current_image_size/2]
+
+    image = tf.cast(image, dtype)
+    image -= 128
+    image /= 128
+
 
     return image, word_poly, text_labels
 
