@@ -159,6 +159,20 @@ class AttentionCell(tf.keras.layers.Layer):
 
         return output_char_dist, att_pooled_state
 
+def add_spatial_encoding(features):
+    batch_size = tf.shape(features)[0]
+    h = tf.shape(features)[1]
+    w = tf.shape(features)[2]
+
+    x, y = tf.meshgrid(tf.range(w), tf.range(h))
+
+    w_loc = tf.one_hot(x, w, dtype=features.dtype)
+    h_loc = tf.one_hot(y, h, dtype=features.dtype)
+    loc = tf.concat([h_loc, w_loc], 2)
+    loc = tf.tile(tf.expand_dims(loc, 0), [batch_size, 1, 1, 1])
+
+    return tf.concat([features, loc], 3)
+
 class RNNLayer(tf.keras.Model):
     def __init__(self, params, max_sequence_len, dictionary_size, pad_value, **kwargs):
         super().__init__(**kwargs)
@@ -177,7 +191,7 @@ class RNNLayer(tf.keras.Model):
         self.res2 = ft.GatedBlockResidual(params, [64, 128], name='res2')
         self.pool2 = ft.BlockPool(params, 128, strides=(2, 1), name='pool2')
 
-        self.positional_encoding = PositionalEncoding(params.crop_size[1], self.attention_feature_dim)
+        #self.positional_encoding = PositionalEncoding(params.crop_size[1], self.attention_feature_dim)
 
         self.attention_conv = ft.TextConv(params, self.attention_feature_dim, kernel_size=(1, 1), strides=(1, 1))
 
@@ -191,7 +205,8 @@ class RNNLayer(tf.keras.Model):
         img = self.res2(img, training)
         img = self.pool2(img, training)
 
-        pos_features = self.positional_encoding(img)
+        pos_features = add_spatial_encoding(img)
+        #pos_features = self.positional_encoding(img)
         conv_features = self.attention_conv(pos_features, training)
 
         batch_size = tf.shape(conv_features)[0]
