@@ -86,13 +86,13 @@ def scan_annotations(gt_dir, writer, image_fns):
                     if FLAGS.format == 'train':
                         comm = line.split()
                         points = comm[:4]
-                        text = ' '.join(comm[4:]).strip('"')
+                        text = ' '.join(comm[4:])
 
                         text.encode('ascii')
-                    else:
+                    elif FLAGS.format == 'test':
                         comm = line.split(',')
                         points = comm[:4]
-                        text = ' '.join(comm[4:]).strip('"')
+                        text = ' '.join(comm[4:])
 
                         text.encode('ascii')
 
@@ -106,6 +106,12 @@ def scan_annotations(gt_dir, writer, image_fns):
                     ymax = p[3]
                 except:
                     continue
+
+                text = [t.strip() for t in text.split()]
+                if FLAGS.format == 'test':
+                    text = [t.strip('"') for t in text]
+                text = ''.join(text)
+                logger.info('{}: {}'.format(gt_fn, text))
 
                 cx = (xmax + xmin) / 2
                 cy = (ymax + ymin) / 2

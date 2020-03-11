@@ -87,7 +87,7 @@ def scan_annotations(json_ann, writer, image_fns):
                 continue
 
             text = [t.strip() for t in text.split()]
-            text = ''.join(text)
+            text = ' '.join(text)
 
             points = obj['points']
             points = np.array(points, dtype=np.float32)
