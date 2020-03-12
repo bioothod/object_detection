@@ -565,7 +565,7 @@ def train():
                 exit(0)
 
         if best_metric < FLAGS.min_eval_metric:
-            logger.info('setting minimal evaluation metric {:.3f} -> {} from command line arguments'.format(best_metric, FLAGS.min_eval_metric))
+            logger.info('setting minimal evaluation metric {:.4f} -> {} from command line arguments'.format(best_metric, FLAGS.min_eval_metric))
             best_metric = FLAGS.min_eval_metric
 
     num_vars = len(model.trainable_variables)
@@ -584,7 +584,7 @@ def train():
             train_steps = run_epoch('train', train_warmup_dataset, train_step, FLAGS.steps_per_warmup_epoch, (epoch == 0))
         else:
             if epoch_var.numpy() == FLAGS.warmup_tfrecrods_epochs and epoch != 0:
-                logger.info('removing warmup data from datasets: lr: {} -> {}'.format(learning_rate.numpy(), FLAGS.initial_learning_rate))
+                logger.info('removing warmup data from datasets: lr: {:.2e} -> {:.2e}'.format(learning_rate.numpy(), FLAGS.initial_learning_rate))
 
                 num_epochs_without_improvement = 0
                 learning_rate_multiplier = initial_learning_rate_multiplier
@@ -601,8 +601,8 @@ def train():
 
         new_metric = validation_metric()
 
-        logger.info('epoch: {}, train: steps: {}, lr: {:.2e}, train: {}, eval: {}, val_metric: {:.4f}/{:.4f}'.format(
-            int(epoch_var.numpy()), global_step.numpy(),
+        logger.info('epoch: {}/{}, train: steps: {}, lr: {:.2e}, train: {}, eval: {}, val_metric: {:.4f}/{:.4f}'.format(
+            int(epoch_var.numpy()), num_epochs_without_improvement, global_step.numpy(),
             learning_rate.numpy(),
             metric.str_result(True), metric.str_result(False),
             new_metric, best_metric))
@@ -635,8 +635,8 @@ def train():
                 if FLAGS.reset_on_lr_update:
                     want_reset = True
 
-                logger.info('epoch: {}, global_step: {}, epochs without metric improvement: {}, best metric: {:.5f}, updating learning rate: {:.2e} -> {:.2e}, will reset: {}'.format(
-                    int(epoch_var.numpy()), global_step.numpy(), num_epochs_without_improvement, best_metric, learning_rate.numpy(), new_lr, want_reset))
+                logger.info('epoch: {}/{}, global_step: {}, epochs without metric improvement: {}, best metric: {:.5f}, updating learning rate: {:.2e} -> {:.2e}, will reset: {}'.format(
+                    int(epoch_var.numpy()), num_epochs_without_improvement, global_step.numpy(), num_epochs_without_improvement, best_metric, learning_rate.numpy(), new_lr, want_reset))
                 num_epochs_without_improvement = 0
                 if learning_rate_multiplier > 0.1:
                     learning_rate_multiplier /= 2
@@ -646,21 +646,21 @@ def train():
                 new_lr = FLAGS.initial_learning_rate
                 want_reset = True
 
-                logger.info('epoch: {}, global_step: {}, epochs without metric improvement: {}, best metric: {:.5f}, resetting learning rate: {:.2e} -> {:.2e}, will reset: {}'.format(
-                    int(epoch_var.numpy()), global_step.numpy(), num_epochs_without_improvement, best_metric, learning_rate.numpy(), new_lr, want_reset))
+                logger.info('epoch: {}/{}, global_step: {}, epochs without metric improvement: {}, best metric: {:.5f}, resetting learning rate: {:.2e} -> {:.2e}, will reset: {}'.format(
+                    int(epoch_var.numpy()), num_epochs_without_improvement, global_step.numpy(), num_epochs_without_improvement, best_metric, learning_rate.numpy(), new_lr, want_reset))
 
                 num_epochs_without_improvement = 0
                 learning_rate_multiplier = initial_learning_rate_multiplier
 
         if FLAGS.warmup_objdet_epochs >= 0:
             if epoch_var.numpy() == FLAGS.warmup_objdet_epochs:
-                logger.info('epoch: {}, global_step: {}, starting to use normal objdet scale (1.0) instead of warmup diminished one'.format(
-                    int(epoch_var.numpy()), global_step.numpy()))
+                logger.info('epoch: {}/{}, global_step: {}, starting to use normal objdet scale (1.0) instead of warmup diminished one'.format(
+                    int(epoch_var.numpy()), num_epochs_without_improvement, global_step.numpy()))
 
         if FLAGS.use_predicted_polys_epochs >= 0:
             if epoch_var.numpy() == FLAGS.use_predicted_polys_epochs:
-                logger.info('epoch: {}, global_step: {}, starting to use predicted polygons for dimensions, will reset model to the best available'.format(
-                    int(epoch_var.numpy()), global_step.numpy()))
+                logger.info('epoch: {}/{}, global_step: {}, starting to use predicted polygons for dimensions, will reset model to the best available'.format(
+                    int(epoch_var.numpy()), num_epochs_without_improvement, global_step.numpy()))
 
                 want_reset = True
 
@@ -669,8 +669,8 @@ def train():
             if restore_path:
                 epoch_num = epoch_var.numpy()
                 step_num = global_step.numpy()
-                logger.info('epoch: {}, global_step: {}, best metric: {:.5f}, learning rate: {:.2e} -> {:.2e}, restoring best checkpoint: {}'.format(
-                    int(epoch_var.numpy()), global_step.numpy(), best_metric, learning_rate.numpy(), new_lr, best_saved_path))
+                logger.info('epoch: {}/{}, global_step: {}, best metric: {:.5f}, learning rate: {:.2e} -> {:.2e}, restoring best checkpoint: {}'.format(
+                    int(epoch_var.numpy()), num_epochs_without_improvement, global_step.numpy(), best_metric, learning_rate.numpy(), new_lr, best_saved_path))
 
                 checkpoint.restore(best_saved_path)
 
