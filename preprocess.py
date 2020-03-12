@@ -115,8 +115,15 @@ def random_expand(image, polys, ratio):
 
     mean_color_of_image = [128, 128, 128]
 
-    x = tf.random.uniform([], minval=0, maxval=canvas_width - width, dtype=tf.int32)
-    y = tf.random.uniform([], minval=0, maxval=canvas_height - height, dtype=tf.int32)
+    if canvas_width == width:
+        x = 0
+    else:
+        x = tf.random.uniform([], minval=0, maxval=canvas_width - width, dtype=tf.int32)
+
+    if canvas_height == height:
+        y = 0
+    else:
+        y = tf.random.uniform([], minval=0, maxval=canvas_height - height, dtype=tf.int32)
 
     paddings = tf.convert_to_tensor([[y, canvas_height - height - y], [x, canvas_width - width - x]])
 
