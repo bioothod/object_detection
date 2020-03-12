@@ -100,9 +100,12 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
 
     if is_training:
         image, word_poly, text_labels = preprocess.preprocess_for_train(image, word_poly, text_labels, image_size, FLAGS.disable_rotation_augmentation, FLAGS.use_random_augmentation, dtype)
+    else:
+        image = preprocess.preprocess_for_evaluation(image, image_size, dtype)
 
     new_image_size = tf.cast(tf.shape(image)[1], tf.float32)
     image = tf.image.resize(image, [image_size, image_size])
+    image = tf.cast(image, dtype)
 
     scale = image_size / new_image_size
     word_poly *= scale

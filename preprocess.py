@@ -262,8 +262,13 @@ def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rota
     image -= 128
     image /= 128
 
-
     return image, word_poly, text_labels
+
+def preprocess_for_evaluation(image, image_size, dtype):
+    image = tf.cast(image, dtype)
+    image -= 128
+    image /= 128
+    return image
 
 def pad_resize_image(image, dims):
     h = tf.shape(image)[0]
