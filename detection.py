@@ -672,6 +672,9 @@ def train():
                 logger.info('epoch: {}/{}, global_step: {}, best metric: {:.5f}, learning rate: {:.2e} -> {:.2e}, restoring best checkpoint: {}'.format(
                     int(epoch_var.numpy()), num_epochs_without_improvement, global_step.numpy(), best_metric, learning_rate.numpy(), new_lr, best_saved_path))
 
+                num_epochs_without_improvement = 0
+                learning_rate_multiplier = initial_learning_rate_multiplier
+
                 checkpoint.restore(best_saved_path)
 
                 epoch_var.assign(epoch_num)
