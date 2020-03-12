@@ -134,30 +134,18 @@ class AttentionCell(tf.keras.layers.Layer):
     def __init__(self, params, attention_feature_dim, num_heads, dictionary_size, **kwargs):
         super().__init__(**kwargs)
 
-        self.wc = tf.keras.layers.Dense(attention_feature_dim, name='wc')
-
         self.attention_layer = AttentionBlock(params, attention_feature_dim, num_heads, name='att0')
         self.attention_state_pooling = tf.keras.layers.GlobalAveragePooling1D()
 
-        self.letters_net = letters.LettersDetector(params, attention_feature_dim)
-
         self.wo = tf.keras.layers.Dense(dictionary_size, name='wo')
 
-    def call(self, char_dist, features, state, training):
-        weighted_char_dist = self.wc(char_dist)
-        att_state = state + weighted_char_dist
-        state_with_time = tf.expand_dims(att_state, 1)
+    def call(self, features, training):
+        weighted_features, att_state = self.attention_layer(features, features, training)
 
-        weighted_features, att_state = self.attention_layer(features, state_with_time, training)
-
-        letter_features = self.letters_net(weighted_features, training)
-
-        att_pooled_state = self.attention_state_pooling(att_state)
-
-        output_char_dist = self.wo(letter_features)
+        output_char_dist = self.wo(weighted_features)
         output_char_dist = tf.nn.softmax(output_char_dist, axis=1)
 
-        return output_char_dist, att_pooled_state
+        return output_char_dist
 
 def add_spatial_encoding(features):
     batch_size = tf.shape(features)[0]
@@ -191,7 +179,7 @@ class RNNLayer(tf.keras.Model):
         self.res2 = ft.GatedBlockResidual(params, [64, 128], name='res2')
         self.pool2 = ft.BlockPool(params, 128, strides=(2, 1), name='pool2')
 
-        #self.positional_encoding = PositionalEncoding(params.crop_size[1], self.attention_feature_dim)
+        self.positional_encoding = PositionalEncoding(params.crop_size[1], self.attention_feature_dim)
 
         self.attention_conv = ft.TextConv(params, self.attention_feature_dim, kernel_size=(1, 1), strides=(1, 1))
 
@@ -205,8 +193,8 @@ class RNNLayer(tf.keras.Model):
         img = self.res2(img, training)
         img = self.pool2(img, training)
 
-        pos_features = add_spatial_encoding(img)
-        #pos_features = self.positional_encoding(img)
+        #pos_features = add_spatial_encoding(img)
+        pos_features = self.positional_encoding(img)
         conv_features = self.attention_conv(pos_features, training)
 
         batch_size = tf.shape(conv_features)[0]
@@ -215,38 +203,6 @@ class RNNLayer(tf.keras.Model):
 
         features = tf.reshape(conv_features, [batch_size, -1, self.attention_feature_dim])
 
-        null_token = tf.tile([self.start_token], [batch_size])
-        def init():
-            char_dists = tf.TensorArray(image_features.dtype, size=self.max_sequence_len)
+        char_dists = self.attention_cell(features, training)
 
-            char_dist = tf.one_hot(null_token, self.dictionary_size, dtype=image_features.dtype)
-            initial_state = tf.zeros((batch_size, tf.shape(features)[-1]), dtype=features.dtype)
-
-            return initial_state, char_dist, char_dists
-
-
-        state, char_dist, char_dists = init()
-        state_ar, char_dist_ar, char_dists_ar = init()
-
-        for idx in range(self.max_sequence_len):
-            if idx != 0:
-                if training:
-                    char_dist = tf.one_hot(gt_tokens[:, idx-1], self.dictionary_size, dtype=image_features.dtype)
-
-            if training:
-                char_dist, state = self.attention_cell(char_dist, features, state, training)
-                char_dists = char_dists.write(idx, char_dist)
-
-            char_dist_ar, state_ar = self.attention_cell(char_dist_ar, features, state_ar, training)
-            char_dists_ar = char_dists_ar.write(idx, char_dist_ar)
-
-        out_ar = char_dists_ar.stack()
-        out_ar = tf.transpose(out_ar, [1, 0, 2])
-
-        if training:
-            out = char_dists.stack()
-            out = tf.transpose(out, [1, 0, 2])
-        else:
-            out = out_ar
-
-        return out, out_ar
+        return char_dists, char_dists
