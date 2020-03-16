@@ -239,8 +239,10 @@ def train():
     rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(logits, rnn_features,
                                                                        true_word_obj, true_word_poly, true_words, true_lengths,
                                                                        anchors_all, training=True, use_predicted_polys=True)
+
     line_length = 128
-    model.body.summary(line_length=line_length, print_fn=lambda line: logger.info(line))
+    if not FLAGS.model_name.startswith('efficientnet'):
+        model.body.summary(line_length=line_length, print_fn=lambda line: logger.info(line))
     model.rnn_layer.summary(line_length=line_length, print_fn=lambda line: logger.info(line))
     model.summary(line_length=line_length, print_fn=lambda line: logger.info(line))
 
