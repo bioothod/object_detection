@@ -718,6 +718,7 @@ if __name__ == '__main__':
         logger.addHandler(__handler)
 
     FLAGS = parser.parse_args()
+    logger.info('start: {}'.format(' '.join(sys.argv)))
 
     try:
         train()
