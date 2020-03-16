@@ -378,7 +378,7 @@ def create_params(model_name, image_size, crop_size, max_sequence_len, dictionar
         'spatial_dims': spatial_dims,
         'model_name': model_name,
         'lstm_dropout': 0.2,
-        'spatial_dropout': 0.2,
+        'spatial_dropout': 0.3,
         'dictionary_size': dictionary_size,
         'max_sequence_len': max_sequence_len,
         'pad_value': pad_value,
