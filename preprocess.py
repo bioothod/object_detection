@@ -201,19 +201,18 @@ def rotate_points(points, theta):
     rotation_matrix = tf.reshape(rotation_matrix, (2, 2))
     return tf.matmul(points, rotation_matrix)
 
-def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rotation_augmentation, use_random_augmentation, dtype):
-    # image is tf.uint8
-
-    image = tf.cast(image, dtype)
+def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rotation_augmentation, use_augmentation, dtype):
+    # image is dtype already
 
     resize_rnd = tf.random.uniform([], 0, 1)
     if resize_rnd > 0.3:
-
         if resize_rnd > 0.6:
             ratio = tf.random.uniform([], minval=1.1, maxval=2., dtype=word_poly.dtype)
 
-            current_image_size = tf.cast(tf.shape(image)[1], word_poly.dtype)
-            poly_rel = word_poly / current_image_size
+            current_image_height = tf.cast(tf.shape(image)[0], word_poly.dtype)
+            current_image_width = tf.cast(tf.shape(image)[1], word_poly.dtype)
+            scale = tf.stack([current_image_width, current_image_height], -1)
+            poly_rel = word_poly / scale
             image, new_poly = random_expand(image, poly_rel, ratio)
             image = tf.image.resize(image, [image_size, image_size])
             image = tf.cast(image, dtype)
@@ -221,19 +220,19 @@ def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rota
         else:
             image, word_poly, text_labels = random_crop(image, word_poly, text_labels)
 
-    if tf.random.uniform([], 0, 1) > 0.5:
-        if use_random_augmentation:
+    if use_augmentation and tf.random.uniform([], 0, 1) > 0.5:
+        if use_augmentation == 'random':
             randaug_num_layers = 1
             randaug_magnitude = 11
 
             image = tf.cast(image, tf.uint8)
             image = autoaugment.distort_image_with_randaugment(image, randaug_num_layers, randaug_magnitude)
             image = tf.cast(image, dtype)
-        else:
+        elif use_augmentation == 'color':
             # image must be in [0, 1] range for this function
             image /= 255
 
-            fast_mode = False
+            fast_mode = True
             num_cases = 4
             if fast_mode:
                 num_cases = 2

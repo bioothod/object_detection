@@ -56,7 +56,7 @@ parser.add_argument('--use_predicted_polys_epochs', type=int, default=-1, help='
 parser.add_argument('--warmup_objdet_epochs', type=int, default=100, help='Start using normal (1.0) objdet loss scale after this epoch, use heavily diminished before that')
 parser.add_argument('--max_word_batch', type=int, default=64, help='Maximum batch of word')
 parser.add_argument('--disable_rotation_augmentation', action='store_true', help='Whether to disable rotation/flipping augmentation')
-parser.add_argument('--use_random_augmentation', action='store_true', help='Use efficientnet random augmentation')
+parser.add_argument('--use_augmentation', choices=['random', 'v0', 'color', 'height_resize'], help='Use efficientnet random/v0/distort augmentation')
 parser.add_argument('--only_test', action='store_true', help='Exist after running initial validation')
 
 default_char_dictionary="!\"#&\'\\()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -75,11 +75,25 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
 
     image = features['image']
     image = tf.image.decode_jpeg(image, channels=3)
+    image = tf.cast(image, dtype)
 
     text_labels = tf.strings.split(features['true_labels'], '<SEP>')
 
     word_poly = tf.io.decode_raw(features['word_poly'], tf.float32)
     word_poly = tf.reshape(word_poly, [-1, 4, 2])
+
+    if is_training and FLAGS.use_augmentation == 'height_resize' and tf.random.uniform([], 0, 1) > 0.5:
+        resize_rnd = tf.random.uniform([], 0.5, 2, dtype=word_poly.dtype)
+        orig_image_width = tf.shape(image)[1]
+
+        orig_image_height = tf.cast(tf.shape(image)[0], tf.float32)
+        new_image_height = resize_rnd * orig_image_height
+
+        image = tf.image.resize(image, [tf.cast(new_image_height, tf.int64), orig_image_width], preserve_aspect_ratio=False)
+        image = tf.cast(image, dtype)
+
+        scale = tf.stack([1, resize_rnd])
+        word_poly = word_poly * scale
 
     orig_image_height = tf.cast(tf.shape(image)[0], tf.float32)
     orig_image_width = tf.cast(tf.shape(image)[1], tf.float32)
@@ -99,7 +113,7 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
     word_poly += add
 
     if is_training:
-        image, word_poly, text_labels = preprocess.preprocess_for_train(image, word_poly, text_labels, image_size, FLAGS.disable_rotation_augmentation, FLAGS.use_random_augmentation, dtype)
+        image, word_poly, text_labels = preprocess.preprocess_for_train(image, word_poly, text_labels, image_size, FLAGS.disable_rotation_augmentation, FLAGS.use_augmentation, dtype)
     else:
         image = preprocess.preprocess_for_evaluation(image, image_size, dtype)
 
