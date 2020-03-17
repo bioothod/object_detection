@@ -269,7 +269,7 @@ def train():
 
         np.random.shuffle(filenames)
 
-        ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
+        ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=1)
         ds = ds.map(lambda record: unpack_tfrecord(record, anchors_all,
                         image_size, FLAGS.max_sequence_len, dict_table, pad_value,
                         is_training, FLAGS.data_format, dtype),
@@ -706,7 +706,7 @@ def train():
 if __name__ == '__main__':
     hvd.init()
 
-    random_seed = int.from_bytes(os.urandom(4), 'big')
+    random_seed = int.from_bytes(os.urandom(4), 'big') + hvd.rank()
 
     random.seed(random_seed)
     tf.random.set_seed(random_seed)
