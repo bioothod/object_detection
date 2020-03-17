@@ -109,34 +109,35 @@ def distort_color(image, color_ordering=0, fast_mode=False, scope='distort_color
 def random_expand(image, polys, ratio):
     height, width, depth = _ImageDimensions(image, rank=3)
 
-    float_height, float_width = tf.cast(height, ratio.dtype), tf.cast(width, ratio.dtype)
+    float_height = tf.cast(height, ratio.dtype)
+    float_width = tf.cast(width, ratio.dtype)
 
-    canvas_width, canvas_height = tf.cast(float_width * ratio, tf.int32), tf.cast(float_height * ratio, tf.int32)
+    canvas_width = tf.cast(float_width * ratio, tf.int32)
+    canvas_height = tf.cast(float_height * ratio, tf.int32)
 
-    mean_color_of_image = [128, 128, 128]
+    canvas_size = tf.maximum(canvas_height, canvas_width)
 
-    if canvas_width == width:
+    mean_color_of_image = [128., 128., 128.]
+
+    if canvas_size == width:
         x = 0
     else:
-        x = tf.random.uniform([], minval=0, maxval=canvas_width - width, dtype=tf.int32)
+        x = tf.random.uniform([], minval=0, maxval=canvas_size-width, dtype=tf.int32)
 
-    if canvas_height == height:
+    if canvas_size == height:
         y = 0
     else:
-        y = tf.random.uniform([], minval=0, maxval=canvas_height - height, dtype=tf.int32)
+        y = tf.random.uniform([], minval=0, maxval=canvas_size-height, dtype=tf.int32)
 
-    paddings = tf.convert_to_tensor([[y, canvas_height - height - y], [x, canvas_width - width - x]])
+    paddings = tf.convert_to_tensor([[y, canvas_size-height-y], [x, canvas_size-width-x]])
 
-    big_canvas = tf.stack([tf.pad(image[:, :, 0], paddings, "CONSTANT", constant_values = mean_color_of_image[0]),
-                          tf.pad(image[:, :, 1], paddings, "CONSTANT", constant_values = mean_color_of_image[1]),
-                          tf.pad(image[:, :, 2], paddings, "CONSTANT", constant_values = mean_color_of_image[2])], axis=-1)
+    big_canvas = tf.stack([tf.pad(image[:, :, 0], paddings, "CONSTANT", constant_values=mean_color_of_image[0]),
+                           tf.pad(image[:, :, 1], paddings, "CONSTANT", constant_values=mean_color_of_image[1]),
+                           tf.pad(image[:, :, 2], paddings, "CONSTANT", constant_values=mean_color_of_image[2])],
+                    axis=-1)
 
-    scale = tf.cast(tf.stack([width, height]), polys.dtype)
-    offset = tf.cast(tf.stack([x, y]), polys.dtype)
-    absolute_polys = polys * scale + offset 
-
-    new_scale = tf.cast(tf.stack([canvas_width, canvas_height]), polys.dtype)
-    polys = absolute_polys / new_scale
+    canvas_offset = tf.cast(tf.stack([x, y]), polys.dtype)
+    polys += canvas_offset
 
     return big_canvas, polys
 
@@ -201,22 +202,39 @@ def rotate_points(points, theta):
     rotation_matrix = tf.reshape(rotation_matrix, (2, 2))
     return tf.matmul(points, rotation_matrix)
 
-def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rotation_augmentation, use_augmentation, dtype):
-    # image is dtype already
+def preprocess_for_train(image, word_poly, text_labels, image_size, rotation_augmentation, use_augmentation, dtype):
+    # image is a squared dtype already
 
     resize_rnd = tf.random.uniform([], 0, 1)
-    if resize_rnd > 0.3:
-        if resize_rnd > 0.6:
-            ratio = tf.random.uniform([], minval=1.1, maxval=2., dtype=word_poly.dtype)
+    if resize_rnd > 0.35:
+        x = word_poly[..., 0]
+        y = word_poly[..., 1]
+        max_ratio = 1.3
 
-            current_image_height = tf.cast(tf.shape(image)[0], word_poly.dtype)
-            current_image_width = tf.cast(tf.shape(image)[1], word_poly.dtype)
-            scale = tf.stack([current_image_width, current_image_height], -1)
-            poly_rel = word_poly / scale
-            image, new_poly = random_expand(image, poly_rel, ratio)
-            image = tf.image.resize(image, [image_size, image_size])
-            image = tf.cast(image, dtype)
-            word_poly = new_poly * image_size
+        min_size = 8
+
+        dx = tf.cast(tf.shape(image)[1], tf.float32)
+        dy = tf.cast(tf.shape(image)[0], tf.float32)
+
+        dx = tf.minimum(dx, tf.abs(x[..., 0] - x[..., 1]))
+        dx = tf.minimum(dx, tf.abs(x[..., 1] - x[..., 2]))
+        dx = tf.minimum(dx, tf.abs(x[..., 2] - x[..., 3]))
+        dx = tf.minimum(dx, tf.abs(x[..., 3] - x[..., 0]))
+
+        dy = tf.minimum(dy, tf.abs(y[..., 0] - y[..., 1]))
+        dy = tf.minimum(dy, tf.abs(y[..., 1] - y[..., 2]))
+        dy = tf.minimum(dy, tf.abs(y[..., 2] - y[..., 3]))
+        dy = tf.minimum(dy, tf.abs(y[..., 3] - y[..., 0]))
+
+        dx = tf.reduce_min(dx)
+        dy = tf.reduce_min(dy)
+
+        min_dist = tf.minimum(dx, dy)
+
+        if min_dist >= max_ratio * min_size and resize_rnd > 0.7:
+            ratio = tf.random.uniform([], minval=1.01, maxval=max_ratio, dtype=word_poly.dtype)
+
+            image, word_poly = random_expand(image, word_poly, ratio)
         else:
             image, word_poly, text_labels = random_crop(image, word_poly, text_labels)
 
@@ -228,14 +246,16 @@ def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rota
             image = tf.cast(image, tf.uint8)
             image = autoaugment.distort_image_with_randaugment(image, randaug_num_layers, randaug_magnitude)
             image = tf.cast(image, dtype)
-        elif use_augmentation == 'color':
+        elif use_augmentation.startswith('color'):
             # image must be in [0, 1] range for this function
             image /= 255
 
-            fast_mode = True
-            num_cases = 4
-            if fast_mode:
+            if use_augmentation == 'color_fast_mode':
+                fast_mode = True
                 num_cases = 2
+            else:
+                fast_mode = False
+                num_cases = 4
 
             image = apply_with_random_selector(image,
                     lambda x, ordering: distort_color(x, ordering, fast_mode=fast_mode),
@@ -243,9 +263,9 @@ def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rota
 
             image *= 255
 
-    if not disable_rotation_augmentation and tf.random.uniform([], 0, 1) > 0.5:
-        angle_min = -4. / 180 * 3.1415
-        angle_max = 4. / 180 * 3.1415
+    if rotation_augmentation > 0 and tf.random.uniform([], 0, 1) > 0.5:
+        angle_min = -float(rotation_augmentation) / 180 * 3.1415
+        angle_max = float(rotation_augmentation) / 180 * 3.1415
 
         angle = tf.random.uniform([], minval=angle_min, maxval=angle_max, dtype=tf.float32)
 
@@ -264,7 +284,8 @@ def preprocess_for_train(image, word_poly, text_labels, image_size, disable_rota
     return image, word_poly, text_labels
 
 def preprocess_for_evaluation(image, image_size, dtype):
-    image = tf.cast(image, dtype)
+    # image is a squared dtype already
+
     image -= 128
     image /= 128
     return image

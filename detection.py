@@ -55,8 +55,9 @@ parser.add_argument('--reset_on_lr_update', action='store_true', help='Whether t
 parser.add_argument('--use_predicted_polys_epochs', type=int, default=-1, help='After how many epochs to use predicted polynome coordinates for feature crops, negative means never')
 parser.add_argument('--warmup_objdet_epochs', type=int, default=100, help='Start using normal (1.0) objdet loss scale after this epoch, use heavily diminished before that')
 parser.add_argument('--max_word_batch', type=int, default=64, help='Maximum batch of word')
-parser.add_argument('--disable_rotation_augmentation', action='store_true', help='Whether to disable rotation/flipping augmentation')
-parser.add_argument('--use_augmentation', choices=['random', 'v0', 'color', 'height_resize'], help='Use efficientnet random/v0/distort augmentation')
+parser.add_argument('--rotation_augmentation', type=int, default=-1, help='Angle for rotation augmentation')
+parser.add_argument('--use_augmentation', choices=['random', 'v0', 'color', 'color_fast_mode', 'height_resize'], help='Use efficientnet random/v0/distort augmentation')
+parser.add_argument('--use_pre_augmentation', choices=['height_resize'], help='Use pre augmentation')
 parser.add_argument('--only_test', action='store_true', help='Exist after running initial validation')
 
 default_char_dictionary="!\"#&\'\\()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -82,7 +83,7 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
     word_poly = tf.io.decode_raw(features['word_poly'], tf.float32)
     word_poly = tf.reshape(word_poly, [-1, 4, 2])
 
-    if is_training and FLAGS.use_augmentation == 'height_resize' and tf.random.uniform([], 0, 1) > 0.5:
+    if is_training and FLAGS.use_pre_augmentation == 'height_resize' and tf.random.uniform([], 0, 1) > 0.5:
         resize_rnd = tf.random.uniform([], 0.5, 2, dtype=word_poly.dtype)
         orig_image_width = tf.shape(image)[1]
 
@@ -113,16 +114,15 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
     word_poly += add
 
     if is_training:
-        image, word_poly, text_labels = preprocess.preprocess_for_train(image, word_poly, text_labels, image_size, FLAGS.disable_rotation_augmentation, FLAGS.use_augmentation, dtype)
+        image, word_poly, text_labels = preprocess.preprocess_for_train(image, word_poly, text_labels, image_size, FLAGS.rotation_augmentation, FLAGS.use_augmentation, dtype)
     else:
         image = preprocess.preprocess_for_evaluation(image, image_size, dtype)
 
-    new_image_size = tf.cast(tf.shape(image)[1], tf.float32)
+    current_image_size = tf.cast(tf.shape(image)[1], tf.float32)
     image = tf.image.resize(image, [image_size, image_size])
     image = tf.cast(image, dtype)
 
-    scale = image_size / new_image_size
-    word_poly *= scale
+    word_poly = word_poly / current_image_size * image_size
     word_poly = tf.cast(word_poly, dtype)
 
     text_split = tf.strings.unicode_split(text_labels, 'UTF-8')
@@ -184,6 +184,9 @@ def train():
     handler = logging.FileHandler(os.path.join(checkpoint_dir, 'train.log.{}'.format(hvd.rank())), 'a')
     handler.setFormatter(__fmt)
     logger.addHandler(handler)
+
+    logger.info('start: {}'.format(' '.join(sys.argv)))
+    logger.info('FLAGS: {}'.format(FLAGS))
 
     gpus = tf.config.experimental.list_physical_devices('GPU')
     for gpu in gpus:
@@ -720,7 +723,6 @@ if __name__ == '__main__':
         logger.addHandler(__handler)
 
     FLAGS = parser.parse_args()
-    logger.info('start: {}'.format(' '.join(sys.argv)))
 
     try:
         train()
