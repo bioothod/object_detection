@@ -206,12 +206,12 @@ def preprocess_for_train(image, word_poly, text_labels, image_size, rotation_aug
     # image is a squared dtype already
 
     resize_rnd = tf.random.uniform([], 0, 1)
-    if resize_rnd > 0.35:
+    if resize_rnd > 0.4:
         x = word_poly[..., 0]
         y = word_poly[..., 1]
         max_ratio = 1.3
 
-        min_size = 8
+        min_size = 16
 
         dx = tf.cast(tf.shape(image)[1], tf.float32)
         dy = tf.cast(tf.shape(image)[0], tf.float32)
@@ -232,7 +232,7 @@ def preprocess_for_train(image, word_poly, text_labels, image_size, rotation_aug
         min_dist = tf.minimum(dx, dy)
 
         if min_dist >= max_ratio * min_size and resize_rnd > 0.7:
-            ratio = tf.random.uniform([], minval=1.01, maxval=max_ratio, dtype=word_poly.dtype)
+            ratio = tf.random.uniform([], minval=1.01, maxval=max_ratio*min_size/min_dist, dtype=word_poly.dtype)
 
             image, word_poly = random_expand(image, word_poly, ratio)
         else:
