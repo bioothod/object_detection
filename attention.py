@@ -181,11 +181,13 @@ class RNNLayer(tf.keras.Model):
 
         self.positional_encoding = PositionalEncoding(params.crop_size[1], self.attention_feature_dim)
 
-        self.attention_conv = ft.TextConv(params, self.attention_feature_dim, kernel_size=(1, 1), strides=(1, 1))
+        #self.attention_conv = ft.TextConv(params, self.attention_feature_dim, kernel_size=(1, 1), strides=(1, 1))
 
         self.attention_cell = AttentionCell(params, self.attention_feature_dim, num_heads, dictionary_size)
 
     def call(self, image_features, gt_tokens, gt_lens, training):
+        batch_size = tf.shape(image_features)[0]
+
         img = self.res0(image_features, training)
         img = self.pool0(img, training)
         img = self.res1(img, training)
@@ -194,14 +196,15 @@ class RNNLayer(tf.keras.Model):
         img = self.pool2(img, training)
 
         #pos_features = add_spatial_encoding(img)
-        pos_features = self.positional_encoding(img)
-        conv_features = self.attention_conv(pos_features, training)
 
-        batch_size = tf.shape(conv_features)[0]
+        reshaped_img = tf.reshape(img, [batch_size, -1, tf.shape(img)[-1]])
+        pos_features = self.positional_encoding(reshaped_img)
+        #conv_features = self.attention_conv(pos_features, training)
+
 
         #logger.info('image_features: {}, img: {}, spatial features: {}'.format(image_features.shape, img.shape, spatial_features.shape))
 
-        features = tf.reshape(conv_features, [batch_size, -1, self.attention_feature_dim])
+        features = tf.reshape(pos_features, [batch_size, -1, self.attention_feature_dim])
 
         char_dists = self.attention_cell(features, training)
 
