@@ -298,17 +298,18 @@ class LossMetricAggregator:
             m = self.eval_metric
 
         # text CE loss
-        if training:
-            word_ce_loss, full_ce_loss = m.text_metric.update_state(true_words, true_lengths, y_pred_rnn)
-            text_ce_loss = word_ce_loss + full_ce_loss*0.01
-            text_ce_loss = tf.nn.compute_average_loss(text_ce_loss, global_batch_size=self.global_batch_size)
-        else:
-            text_ce_loss = 0
+        #if training:
+        #    word_ce_loss, full_ce_loss = m.text_metric.update_state(true_words, true_lengths, y_pred_rnn)
+        #    text_ce_loss = word_ce_loss + full_ce_loss*0.01
+        #    text_ce_loss = tf.nn.compute_average_loss(text_ce_loss, global_batch_size=self.global_batch_size)
+        #else:
+        #    text_ce_loss = 0
 
         word_ce_loss_ar, full_ce_loss_ar = m.text_metric_ar.update_state(true_words, true_lengths, y_pred_rnn_ar)
         text_ce_loss_ar = word_ce_loss_ar + full_ce_loss_ar*0.01
         text_ce_loss_ar = tf.nn.compute_average_loss(text_ce_loss_ar, global_batch_size=self.global_batch_size)
 
-        total_loss = text_ce_loss + text_ce_loss_ar
+        #total_loss = text_ce_loss + text_ce_loss_ar
+        total_loss = text_ce_loss_ar
 
         return total_loss
