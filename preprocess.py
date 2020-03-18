@@ -232,7 +232,7 @@ def preprocess_for_train(image, word_poly, text_labels, image_size, rotation_aug
         min_dist = tf.minimum(dx, dy)
 
         if min_dist >= max_ratio * min_size and resize_rnd > 0.7:
-            ratio = tf.random.uniform([], minval=1.01, maxval=max_ratio*min_size/min_dist, dtype=word_poly.dtype)
+            ratio = tf.random.uniform([], minval=1.01, maxval=min_dist/min_size, dtype=word_poly.dtype)
 
             image, word_poly = random_expand(image, word_poly, ratio)
         else:
