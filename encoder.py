@@ -162,41 +162,6 @@ class Head(tf.keras.layers.Layer):
 
         return [out2, out1, out0]
 
-def gaussian_mask(mu, sigma, dim, dim_tile):
-    r = tf.cast(tf.range(dim), tf.float32)
-    r = tf.expand_dims(r, 0)
-    r = tf.tile(r, [tf.shape(mu)[0], 1])
-
-    #sigma = tf.expand_dims(sigma, -1)
-    #mu = tf.expand_dims(mu, -1)
-
-    centers = r - mu
-    mask = tf.exp(-.5 * tf.square(centers / sigma))
-    mask = tf.expand_dims(mask, -1)
-    mask = tf.tile(mask, [1, 1, dim_tile])
-    #mask = mask / (tf.reduce_sum(mask, 1, keepdims=True) + 1e-8)
-    return mask
-
-def generate_gaussian_mask(image, mask_params):
-    h = tf.shape(image)[1]
-    w = tf.shape(image)[2]
-    c = tf.shape(image)[3]
-
-    mu_h, sigma_h, mu_w, sigma_w = tf.split(mask_params, 4, axis=-1)
-
-    mask_h = gaussian_mask(mu_h, sigma_h, h, w)
-    mask_w = gaussian_mask(mu_w, sigma_w, w, h)
-    mask_w = tf.transpose(mask_w, (0, 2, 1))
-
-    mask = mask_h * mask_w
-
-    mask = tf.expand_dims(mask, -1)
-    mask = tf.tile(mask, [1, 1, 1, c])
-
-    new_image = image * mask
-
-    return new_image
-
 class Encoder(tf.keras.Model):
     def __init__(self, params, **kwargs):
         super().__init__(**kwargs)
@@ -323,11 +288,14 @@ class Encoder(tf.keras.Model):
         return self.rnn_layer(selected_features, true_words, true_lengths, training)
 
 
-    def rnn_inference_from_true_values(self, class_outputs, raw_features, word_obj_mask, true_word_poly, true_words, true_lengths, anchors_all, training, use_predicted_polys):
+    def rnn_inference_from_true_values(self, class_outputs, raw_features, word_obj_mask, true_word_poly, true_words, true_lengths, anchors_all, training, use_predicted_polys, use_poly_augmentation):
         if use_predicted_polys:
             poly = class_outputs[..., 1 : 1 + 4*2]
         else:
             poly = true_word_poly
+
+    if training and use_poly_augmentation > 0:
+        word_poly = word_poly + tf.random.normal([tf.shape(word_poly)[0], 4, 2], mean=0, stddev=FLAGS.use_poly_augmentation)
 
         poly = tf.reshape(poly, [-1, tf.shape(poly)[1], 4, 2])
 

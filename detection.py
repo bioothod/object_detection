@@ -57,6 +57,7 @@ parser.add_argument('--warmup_objdet_epochs', type=int, default=200, help='Start
 parser.add_argument('--max_word_batch', type=int, default=256, help='Maximum batch of word')
 parser.add_argument('--rotation_augmentation', type=int, default=-1, help='Angle for rotation augmentation')
 parser.add_argument('--use_augmentation', choices=['random', 'v0', 'color', 'color_fast_mode', 'height_resize'], help='Use efficientnet random/v0/distort augmentation')
+parser.add_argument('--use_poly_augmentation', type=float, default=-1, help='Stddev for random normal distributed variable added to polygon coordinates')
 parser.add_argument('--use_pre_augmentation', choices=['height_resize'], help='Use pre augmentation')
 parser.add_argument('--only_test', action='store_true', help='Exist after running initial validation')
 
@@ -241,7 +242,8 @@ def train():
 
     rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(logits, rnn_features,
                                                                        true_word_obj, true_word_poly, true_words, true_lengths,
-                                                                       anchors_all, training=True, use_predicted_polys=True)
+                                                                       anchors_all, training=True, use_predicted_polys=True,
+                                                                       FLAGS.use_poly_augmentation)
 
     line_length = 128
     if not FLAGS.model_name.startswith('efficientnet'):
@@ -418,7 +420,8 @@ def train():
 
         rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(logits, rnn_features,
                                                                            true_word_obj, true_word_poly, true_words, true_lengths,
-                                                                           anchors_all, is_training, use_predicted_polys)
+                                                                           anchors_all, is_training, use_predicted_polys,
+                                                                           FLAGS.use_poly_augmentation)
 
         text_loss = metric.text_recognition_loss(true_word_obj, true_words, true_lengths, rnn_outputs, rnn_outputs_ar, is_training)
         objdet_loss = metric.object_detection_loss(true_word_obj, true_word_poly, logits, is_training)
