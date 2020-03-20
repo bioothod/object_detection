@@ -294,10 +294,10 @@ class Encoder(tf.keras.Model):
         else:
             poly = true_word_poly
 
-    if training and use_poly_augmentation > 0:
-        word_poly = word_poly + tf.random.normal([tf.shape(word_poly)[0], 4, 2], mean=0, stddev=FLAGS.use_poly_augmentation)
-
         poly = tf.reshape(poly, [-1, tf.shape(poly)[1], 4, 2])
+
+        if training and use_poly_augmentation > 0:
+            poly = poly + tf.random.normal(tf.shape(poly), mean=0, stddev=use_poly_augmentation)
 
         return self.rnn_inference(raw_features, word_obj_mask, poly, true_words, true_lengths, anchors_all, training)
 

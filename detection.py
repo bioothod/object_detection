@@ -56,7 +56,7 @@ parser.add_argument('--use_predicted_polys_epochs', type=int, default=-1, help='
 parser.add_argument('--warmup_objdet_epochs', type=int, default=200, help='Start using normal (1.0) objdet loss scale after this epoch, use heavily diminished before that')
 parser.add_argument('--max_word_batch', type=int, default=256, help='Maximum batch of word')
 parser.add_argument('--rotation_augmentation', type=int, default=-1, help='Angle for rotation augmentation')
-parser.add_argument('--use_augmentation', choices=['random', 'v0', 'color', 'color_fast_mode', 'height_resize'], help='Use efficientnet random/v0/distort augmentation')
+parser.add_argument('--use_augmentation', type=str, help='Use efficientnet random/v0/distort augmentation')
 parser.add_argument('--use_poly_augmentation', type=float, default=-1, help='Stddev for random normal distributed variable added to polygon coordinates')
 parser.add_argument('--use_pre_augmentation', choices=['height_resize'], help='Use pre augmentation')
 parser.add_argument('--only_test', action='store_true', help='Exist after running initial validation')
@@ -243,7 +243,7 @@ def train():
     rnn_outputs, rnn_outputs_ar = model.rnn_inference_from_true_values(logits, rnn_features,
                                                                        true_word_obj, true_word_poly, true_words, true_lengths,
                                                                        anchors_all, training=True, use_predicted_polys=True,
-                                                                       FLAGS.use_poly_augmentation)
+                                                                       use_poly_augmentation=FLAGS.use_poly_augmentation)
 
     line_length = 128
     if not FLAGS.model_name.startswith('efficientnet'):
@@ -269,7 +269,8 @@ def train():
         for dirname in dataset_dirs:
             filenames += scan_dirs(dirname)
 
-        np.random.shuffle(filenames)
+        if hvd.size() > 1:
+            filenames = np.array_split(filenames, hvd.size())[hvd.rank()]
 
         ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
         ds = ds.map(lambda record: unpack_tfrecord(record, anchors_all,
@@ -709,7 +710,8 @@ def train():
 if __name__ == '__main__':
     hvd.init()
 
-    random_seed = int.from_bytes(os.urandom(4), 'big') + hvd.rank()
+    #random_seed = int.from_bytes(os.urandom(4), 'big') + hvd.rank()
+    random_seed = 0
 
     random.seed(random_seed)
     tf.random.set_seed(random_seed)

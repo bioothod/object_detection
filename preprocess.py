@@ -239,29 +239,37 @@ def preprocess_for_train(image, word_poly, text_labels, image_size, rotation_aug
             image, word_poly, text_labels = random_crop(image, word_poly, text_labels)
 
     if use_augmentation and tf.random.uniform([], 0, 1) > 0.5:
-        if use_augmentation == 'random':
-            randaug_num_layers = 1
-            randaug_magnitude = 11
+        for aug in use_augmentation.split(','):
+            if aug == 'speckle':
+                image = image + image * tf.random.normal(tf.shape(image), mean=0, stddev=0.1)
+                image = tf.clip_by_value(image, 0, 255)
+            elif aug == 'v0':
+                image = tf.cast(image, tf.uint8)
+                image = autoaugment.distort_image_with_autoaugment(image, 'v0')
+                image = tf.cast(image, dtype)
+            elif aug == 'random':
+                randaug_num_layers = 1
+                randaug_magnitude = 11
 
-            image = tf.cast(image, tf.uint8)
-            image = autoaugment.distort_image_with_randaugment(image, randaug_num_layers, randaug_magnitude)
-            image = tf.cast(image, dtype)
-        elif use_augmentation.startswith('color'):
-            # image must be in [0, 1] range for this function
-            image /= 255
+                image = tf.cast(image, tf.uint8)
+                image = autoaugment.distort_image_with_randaugment(image, randaug_num_layers, randaug_magnitude)
+                image = tf.cast(image, dtype)
+            elif 'color' in aug:
+                # image must be in [0, 1] range for this function
+                image /= 255
 
-            if use_augmentation == 'color_fast_mode':
-                fast_mode = True
-                num_cases = 2
-            else:
-                fast_mode = False
-                num_cases = 4
+                if aug == 'color_fast_mode':
+                    fast_mode = True
+                    num_cases = 2
+                else:
+                    fast_mode = False
+                    num_cases = 4
 
-            image = apply_with_random_selector(image,
-                    lambda x, ordering: distort_color(x, ordering, fast_mode=fast_mode),
-                    num_cases=num_cases)
+                image = apply_with_random_selector(image,
+                        lambda x, ordering: distort_color(x, ordering, fast_mode=fast_mode),
+                        num_cases=num_cases)
 
-            image *= 255
+                image *= 255
 
     if rotation_augmentation > 0 and tf.random.uniform([], 0, 1) > 0.5:
         angle_min = -float(rotation_augmentation) / 180 * 3.1415
