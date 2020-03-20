@@ -269,7 +269,7 @@ def train():
         for dirname in dataset_dirs:
             filenames += scan_dirs(dirname)
 
-        if hvd.size() > 1:
+        if is_training and hvd.size() > 1 and len(filenames) > hvd.size():
             filenames = np.array_split(filenames, hvd.size())[hvd.rank()]
 
         ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
