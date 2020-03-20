@@ -269,6 +269,7 @@ def train():
         for dirname in dataset_dirs:
             filenames += scan_dirs(dirname)
 
+        total_filenames = len(filenames)
         if is_training and hvd.size() > 1 and len(filenames) > hvd.size():
             filenames = np.array_split(filenames, hvd.size())[hvd.rank()]
 
@@ -298,7 +299,7 @@ def train():
         ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
         ds = ds.batch(FLAGS.batch_size)
 
-        logger.info('{} object detection dataset has been created, tfrecords: {}'.format(name, len(filenames)))
+        logger.info('{} object detection dataset has been created, tfrecords: {}/{}'.format(name, len(filenames), total_filenames))
 
         return ds
 
