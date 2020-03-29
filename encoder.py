@@ -112,17 +112,17 @@ class Head(tf.keras.layers.Layer):
         super().__init__(**kwargs)
 
         self.s2_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
-        self.s2_input = EncoderConvList(params, [512, 512])
+        self.s2_input = EncoderConvList(params, [512, 256, 512])
         self.s2_output = ObjectDetectionLayer(params, num_classes, name="detection_layer_2")
         self.up2 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
 
         self.s1_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
-        self.s1_input = EncoderConvList(params, [256, 256])
+        self.s1_input = EncoderConvList(params, [256, 128, 256])
         self.s1_output = ObjectDetectionLayer(params, num_classes, name="detection_layer_1")
         self.up1 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
 
         self.s0_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
-        self.s0_input = EncoderConvList(params, [128, 128])
+        self.s0_input = EncoderConvList(params, [128, 64, 128])
         self.s0_output = ObjectDetectionLayer(params, num_classes, name="detection_layer_0")
 
         self.pads = [None]
@@ -297,7 +297,8 @@ class Encoder(tf.keras.Model):
         poly = tf.reshape(poly, [-1, tf.shape(poly)[1], 4, 2])
 
         if training and use_poly_augmentation > 0:
-            poly = poly + tf.random.normal(tf.shape(poly), mean=0, stddev=use_poly_augmentation)
+            #poly = poly + tf.random.normal(tf.shape(poly), mean=0, stddev=use_poly_augmentation)
+            poly = poly + tf.random.uniform(tf.shape(poly), -use_poly_augmentation, use_poly_augmentation)
 
         return self.rnn_inference(raw_features, word_obj_mask, poly, true_words, true_lengths, anchors_all, training)
 

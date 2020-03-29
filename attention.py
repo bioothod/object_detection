@@ -134,6 +134,8 @@ class AttentionCell(tf.keras.layers.Layer):
     def __init__(self, params, attention_feature_dim, num_heads, dictionary_size, **kwargs):
         super().__init__(**kwargs)
 
+        self.relu_fn = params.relu_fn
+
         self.attention_layer = AttentionBlock(params, attention_feature_dim, num_heads, name='att0')
         self.attention_state_pooling = tf.keras.layers.GlobalAveragePooling1D()
 
@@ -172,16 +174,17 @@ class RNNLayer(tf.keras.Model):
         self.attention_feature_dim = 128
         num_heads = 4
 
-        self.res0 = ft.GatedBlockResidual(params, [128, 256], name='res0')
+        self.res0 = ft.GatedBlockResidual(params, [256, 256], kernel_size2=(3, 6), name='res0')
         self.pool0 = ft.BlockPool(params, 128, strides=(2, 1), name='pool0')
-        self.res1 = ft.GatedBlockResidual(params, [64, 128], name='res1')
+        self.res1 = ft.GatedBlockResidual(params, [128, 128], kernel_size2=(2, 4), name='res1')
         self.pool1 = ft.BlockPool(params, 128, strides=(2, 1), name='pool1')
-        self.res2 = ft.GatedBlockResidual(params, [64, 128], name='res2')
+        self.res2 = ft.GatedBlockResidual(params, [128, 128], kernel_size2=(2, 4), name='res2')
         self.pool2 = ft.BlockPool(params, 128, strides=(2, 1), name='pool2')
 
         self.positional_encoding = PositionalEncoding(params.crop_size[1], self.attention_feature_dim)
 
         #self.attention_conv = ft.TextConv(params, self.attention_feature_dim, kernel_size=(1, 1), strides=(1, 1))
+        #self.attention_conv = letters.LettersConv(params, self.attention_feature_dim, kernel_size=1, strides=1)
 
         self.attention_cell = AttentionCell(params, self.attention_feature_dim, num_heads, dictionary_size)
 
@@ -198,13 +201,13 @@ class RNNLayer(tf.keras.Model):
         #pos_features = add_spatial_encoding(img)
 
         reshaped_img = tf.reshape(img, [batch_size, -1, tf.shape(img)[-1]])
-        pos_features = self.positional_encoding(reshaped_img)
-        #conv_features = self.attention_conv(pos_features, training)
+        features = self.positional_encoding(reshaped_img)
+        #features = self.attention_conv(features, training)
 
 
         #logger.info('image_features: {}, img: {}, spatial features: {}'.format(image_features.shape, img.shape, spatial_features.shape))
 
-        features = tf.reshape(pos_features, [batch_size, -1, self.attention_feature_dim])
+        #features = tf.reshape(conv_features, [batch_size, -1, self.attention_feature_dim])
 
         char_dists = self.attention_cell(features, training)
 
