@@ -202,7 +202,7 @@ def rotate_points(points, theta):
     rotation_matrix = tf.reshape(rotation_matrix, (2, 2))
     return tf.matmul(points, rotation_matrix)
 
-def preprocess_for_train(image, word_poly, text_labels, image_size, rotation_augmentation, use_augmentation, dtype):
+def preprocess_for_train(image, word_poly, text_labels, rotation_augmentation, use_augmentation, dtype):
     # image is a squared dtype already
 
     resize_rnd = tf.random.uniform([], 0, 1)
@@ -291,7 +291,7 @@ def preprocess_for_train(image, word_poly, text_labels, image_size, rotation_aug
 
     return image, word_poly, text_labels
 
-def preprocess_for_evaluation(image, image_size, dtype):
+def preprocess_for_evaluation(image, dtype):
     # image is a squared dtype already
 
     image -= 128
