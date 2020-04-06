@@ -3,6 +3,7 @@ numpy
 pandas
 scikit-learn
 Pillow
+python-magic
 tfa-nightly
 tensorflow-datasets
 matplotlib
