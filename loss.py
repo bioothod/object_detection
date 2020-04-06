@@ -126,7 +126,6 @@ class Metric:
         self.word_obj_whole_accuracy05 = tf.keras.metrics.BinaryAccuracy(threshold=0.5)
 
         self.text_metric = TextMetric(max_sequence_len, dictionary_size, label_smoothing=label_smoothing, from_logits=from_logits)
-        self.text_metric_ar = TextMetric(max_sequence_len, dictionary_size, label_smoothing=label_smoothing, from_logits=from_logits)
 
     def reset_states(self):
         self.total_loss.reset_states()
@@ -140,17 +139,14 @@ class Metric:
         self.word_obj_whole_accuracy05.reset_states()
 
         self.text_metric.reset_states()
-        self.text_metric_ar.reset_states()
 
     def str_result(self):
         if self.training:
-            return 'total_loss: {:.3e}, dist: {:.3f}, acc: {}, AR acc: {}, word_obj_acc: {:.3f}/{:.3f}/{:.4f}'.format(
+            return 'total_loss: {:.3e}, dist: {:.3f}, acc: {}, word_obj_acc: {:.3f}/{:.3f}/{:.4f}'.format(
                     self.total_loss.result(),
                     self.word_dist_loss.result(),
 
                     self.text_metric.str_result(want_acc=True),
-
-                    self.text_metric_ar.str_result(want_acc=True),
 
                     self.word_obj_accuracy02.result(),
                     self.word_obj_accuracy05.result(),
@@ -161,7 +157,7 @@ class Metric:
                     self.total_loss.result(),
                     self.word_dist_loss.result(),
 
-                    self.text_metric_ar.str_result(want_acc=True),
+                    self.text_metric.str_result(want_acc=True),
 
                     self.word_obj_accuracy02.result(),
                     self.word_obj_accuracy05.result(),
@@ -198,7 +194,7 @@ class LossMetricAggregator:
     def evaluation_result(self):
         m = self.eval_metric
         obj_acc = m.word_obj_accuracy02.result()
-        word_acc, full_acc = m.text_metric_ar.result(want_acc=True)
+        word_acc, full_acc = m.text_metric.result(want_acc=True)
 
         return word_acc
 
@@ -206,10 +202,10 @@ class LossMetricAggregator:
         self.train_metric.reset_states()
         self.eval_metric.reset_states()
 
-    def object_detection_loss(self, word_object_mask, true_word_poly, y_pred, training):
+    def object_detection_loss(self, word_object_mask, true_word_poly, logits, training):
         # predicted tensors
-        pred_word_obj = y_pred[..., 0]
-        pred_word_poly = y_pred[..., 1 : 9]
+        pred_word_obj = logits[..., 0]
+        pred_word_poly = logits[..., 1:9]
 
         pred_word_obj = tf.cast(pred_word_obj, tf.float32)
         pred_word_poly = tf.cast(pred_word_poly, tf.float32)
@@ -289,7 +285,7 @@ class LossMetricAggregator:
 
         return dist_loss + obj_loss
 
-    def text_recognition_loss(self, word_object_mask, true_words, true_lengths, y_pred_rnn, y_pred_rnn_ar, training):
+    def text_recognition_loss(self, word_object_mask, true_words, true_lengths, y_pred_rnn, training):
         true_words = tf.boolean_mask(true_words, word_object_mask)
         true_lengths = tf.boolean_mask(true_lengths, word_object_mask)
 
@@ -297,19 +293,8 @@ class LossMetricAggregator:
         if not training:
             m = self.eval_metric
 
-        # text CE loss
-        #if training:
-        #    word_ce_loss, full_ce_loss = m.text_metric.update_state(true_words, true_lengths, y_pred_rnn)
-        #    text_ce_loss = word_ce_loss + full_ce_loss*0.01
-        #    text_ce_loss = tf.nn.compute_average_loss(text_ce_loss, global_batch_size=self.global_batch_size)
-        #else:
-        #    text_ce_loss = 0
+        word_ce_loss, full_ce_loss = m.text_metric.update_state(true_words, true_lengths, y_pred_rnn)
+        text_ce_loss = word_ce_loss + full_ce_loss*0.01
+        text_ce_loss = tf.nn.compute_average_loss(text_ce_loss, global_batch_size=self.global_batch_size)
 
-        word_ce_loss_ar, full_ce_loss_ar = m.text_metric_ar.update_state(true_words, true_lengths, y_pred_rnn_ar)
-        text_ce_loss_ar = word_ce_loss_ar + full_ce_loss_ar*0.01
-        text_ce_loss_ar = tf.nn.compute_average_loss(text_ce_loss_ar, global_batch_size=self.global_batch_size)
-
-        #total_loss = text_ce_loss + text_ce_loss_ar
-        total_loss = text_ce_loss_ar
-
-        return total_loss
+        return text_ce_loss
