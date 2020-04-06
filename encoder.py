@@ -114,12 +114,12 @@ class Head(tf.keras.layers.Layer):
         self.s2_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
         self.s2_input = EncoderConvList(params, [512, 256, 512])
         self.s2_output = ObjectDetectionLayer(params, num_classes, name="detection_layer_2")
-        self.up2 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
+        self.up2 = tf.keras.layers.Conv2DTranspose(256, kernel_size=(3, 3), strides=2, padding='same', use_bias=False)
 
         self.s1_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
         self.s1_input = EncoderConvList(params, [256, 128, 256])
         self.s1_output = ObjectDetectionLayer(params, num_classes, name="detection_layer_1")
-        self.up1 = tf.keras.layers.UpSampling2D(2, interpolation='bilinear')
+        self.up1 = tf.keras.layers.Conv2DTranspose(128, kernel_size=(3, 3), strides=2, padding='same', use_bias=False)
 
         self.s0_dropout = tf.keras.layers.Dropout(params.spatial_dropout)
         self.s0_input = EncoderConvList(params, [128, 64, 128])
@@ -162,6 +162,69 @@ class Head(tf.keras.layers.Layer):
 
         return [out2, out1, out0]
 
+def sample_crops_for_single_image(features, feature_poly, crop_size, selected_features, written):
+    x = feature_poly[..., 0]
+    y = feature_poly[..., 1]
+    lx = (x[:, 0] + x[:, 3]) / 2
+    ly = (y[:, 0] + y[:, 3]) / 2
+
+    rx = (x[:, 1] + x[:, 2]) / 2
+    ry = (y[:, 1] + y[:, 2]) / 2
+
+    angles = tf.math.atan2(ry - ly, rx - lx)
+
+    x0 = x[:, 0]
+    y0 = y[:, 0]
+    x1 = x[:, 1]
+    y1 = y[:, 1]
+    x2 = x[:, 2]
+    y2 = y[:, 2]
+    x3 = x[:, 3]
+    y3 = y[:, 3]
+
+    h0 = (x0 - x3)**2 + (y0 - y3)**2
+    h1 = (x1 - x2)**2 + (y1 - y2)**2
+    h = tf.math.sqrt(tf.maximum(h0, h1))
+
+    w0 = (x0 - x1)**2 + (y0 - y1)**2
+    w1 = (x2 - x3)**2 + (y2 - y3)**2
+    w = tf.math.sqrt(tf.maximum(w0, w1))
+
+    sy = h / crop_size[0]
+    sx = w / crop_size[1]
+    scale = tf.maximum(sx, sy)
+
+    z = tf.zeros_like(x0)
+    o = tf.ones_like(x0)
+
+    def tm(t):
+        t = tf.convert_to_tensor(t)
+        t = tf.transpose(t, [2, 0, 1])
+        return t
+
+    def const(x):
+        return o * x
+
+    t0 = tm([[o, z, x0], [z, o, y0], [z, z, o]])
+    t1 = tm([[tf.cos(angles), -tf.sin(angles), z], [tf.sin(angles), tf.cos(angles), z], [z, z, o]])
+    t2 = tm([[sx, z, z], [z, sy, z], [z, z, o]])
+
+    transforms = t0 @ t1 @ t2
+    transforms = transforms[:, :2, :]
+
+    features = tf.expand_dims(features, 0)
+    num_crops = tf.shape(transforms)[0]
+    for crop_idx in tf.range(num_crops):
+        t = transforms[crop_idx, ...]
+        t = tf.expand_dims(t, 0)
+
+        cropped_features = stn.spatial_transformer_network(features, t, out_dims=crop_size)
+
+        selected_features = selected_features.write(written, cropped_features)
+        written += 1
+
+    return selected_features, written
+
 class Encoder(tf.keras.Model):
     def __init__(self, params, **kwargs):
         super().__init__(**kwargs)
@@ -185,81 +248,18 @@ class Encoder(tf.keras.Model):
 
         self.crop_size = params.crop_size
 
-        self.rnn_layer = attention.RNNLayer(params, self.max_sequence_len, params.dictionary_size, params.pad_value)
+        self.text_layer = attention.Decoder(params, self.max_sequence_len, params.dictionary_size, params.pad_value)
         self.head = Head(params, classes)
 
         self.output_sizes = None
 
-    def sample_crops_for_single_image(self, features, feature_poly, selected_features, written):
-        x = feature_poly[..., 0]
-        y = feature_poly[..., 1]
-        lx = (x[:, 0] + x[:, 3]) / 2
-        ly = (y[:, 0] + y[:, 3]) / 2
-
-        rx = (x[:, 1] + x[:, 2]) / 2
-        ry = (y[:, 1] + y[:, 2]) / 2
-
-        angles = tf.math.atan2(ry - ly, rx - lx)
-
-        x0 = x[:, 0]
-        y0 = y[:, 0]
-        x1 = x[:, 1]
-        y1 = y[:, 1]
-        x2 = x[:, 2]
-        y2 = y[:, 2]
-        x3 = x[:, 3]
-        y3 = y[:, 3]
-
-        h0 = (x0 - x3)**2 + (y0 - y3)**2
-        h1 = (x1 - x2)**2 + (y1 - y2)**2
-        h = tf.math.sqrt(tf.maximum(h0, h1))
-
-        w0 = (x0 - x1)**2 + (y0 - y1)**2
-        w1 = (x2 - x3)**2 + (y2 - y3)**2
-        w = tf.math.sqrt(tf.maximum(w0, w1))
-
-        sy = h / self.crop_size[0]
-        sx = w / self.crop_size[1]
-        scale = tf.maximum(sx, sy)
-
-        z = tf.zeros_like(x0)
-        o = tf.ones_like(x0)
-
-        def tm(t):
-            t = tf.convert_to_tensor(t)
-            t = tf.transpose(t, [2, 0, 1])
-            return t
-
-        def const(x):
-            return o * x
-
-        t0 = tm([[o, z, x0], [z, o, y0], [z, z, o]])
-        t1 = tm([[tf.cos(angles), -tf.sin(angles), z], [tf.sin(angles), tf.cos(angles), z], [z, z, o]])
-        t2 = tm([[sx, z, z], [z, sy, z], [z, z, o]])
-
-        transforms = t0 @ t1 @ t2
-        transforms = transforms[:, :2, :]
-
-        features = tf.expand_dims(features, 0)
-        num_crops = tf.shape(transforms)[0]
-        for crop_idx in tf.range(num_crops):
-            t = transforms[crop_idx, ...]
-            t = tf.expand_dims(t, 0)
-
-            cropped_features = stn.spatial_transformer_network(features, t, out_dims=self.crop_size)
-
-            selected_features = selected_features.write(written, cropped_features)
-            written += 1
-
-        return selected_features, written
-
-    def rnn_inference(self, features_full, word_obj_mask_full, poly_full, true_words_full, true_lengths_full, anchors_all, training):
+    def text_inference(self, features_full, word_obj_mask_full, poly_full, true_words_full, true_lengths_full, anchors_all, training):
         dtype = features_full.dtype
 
         true_words = tf.boolean_mask(true_words_full, word_obj_mask_full)
         true_lengths = tf.boolean_mask(true_lengths_full, word_obj_mask_full)
 
-        logger.info('RNN features: {}, crop_size: {}'.format(features_full.shape, list(self.crop_size)))
+        logger.info('text features: {}, crop_size: {}'.format(features_full.shape, list(self.crop_size)))
         feature_size = tf.cast(tf.shape(features_full)[1], dtype)
 
         batch_size = tf.shape(features_full)[0]
@@ -281,16 +281,16 @@ class Encoder(tf.keras.Model):
 
             poly = poly * feature_size / self.image_size
 
-            selected_features, written = self.sample_crops_for_single_image(features, poly, selected_features, written)
+            selected_features, written = sample_crops_for_single_image(features, poly, crop_size, selected_features, written)
 
         selected_features = selected_features.concat()
 
-        return self.rnn_layer(selected_features, true_words, true_lengths, training)
+        return self.text_layer(selected_features, true_words, true_lengths, training)
 
 
-    def rnn_inference_from_true_values(self, class_outputs, raw_features, word_obj_mask, true_word_poly, true_words, true_lengths, anchors_all, training, use_predicted_polys, use_poly_augmentation):
+    def text_inference_from_true_values(self, logits, raw_features, word_obj_mask, true_word_poly, true_words, true_lengths, anchors_all, training, use_predicted_polys, use_poly_augmentation):
         if use_predicted_polys:
-            poly = class_outputs[..., 1 : 1 + 4*2]
+            poly = logits[..., 1 : 1 + 4*2]
         else:
             poly = true_word_poly
 
@@ -300,7 +300,7 @@ class Encoder(tf.keras.Model):
             #poly = poly + tf.random.normal(tf.shape(poly), mean=0, stddev=use_poly_augmentation)
             poly = poly + tf.random.uniform(tf.shape(poly), -use_poly_augmentation, use_poly_augmentation)
 
-        return self.rnn_inference(raw_features, word_obj_mask, poly, true_words, true_lengths, anchors_all, training)
+        return self.text_inference(raw_features, word_obj_mask, poly, true_words, true_lengths, anchors_all, training)
 
     # word mask is per anchor, i.e. this is true word_obj
     def call(self, inputs, training):
