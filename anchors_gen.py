@@ -162,7 +162,7 @@ def find_bbox_anchor_for_poly(poly, anchors_all):
     poly_for_loss = tf.reshape(poly_for_loss, [-1, 8])
     return poly_for_loss, best_anchors_index
 
-def generate_true_values_for_anchors(word_poly, anchors_all, text_labels, text_lenghts, max_word_len):
+def generate_true_values_for_anchors(word_poly, anchors_all, text_labels_list, text_lengths, max_word_len):
     # input polygon shape [N, 4, 2]
     # output polygon shape [N, 4, 2]
     word_poly_for_loss, word_index = find_bbox_anchor_for_poly(word_poly, anchors_all)
@@ -172,15 +172,12 @@ def generate_true_values_for_anchors(word_poly, anchors_all, text_labels, text_l
     word_idx = tf.expand_dims(word_index, 1)
 
     # word_obj, word_poly, word, length
-    output_dims = 1 + 2*4 + max_word_len + 1
+    output_dims = 1 + 2*4 + max_word_len*len(text_labels_list) + 1
 
     num_true_anchors = anchors_all.shape[0]
     output = tf.zeros((num_true_anchors, output_dims), dtype=word_poly.dtype)
 
-    text_labels = tf.cast(text_labels, word_objs.dtype)
-    text_lenghts = tf.cast(text_lenghts, word_objs.dtype)
-
-    word_values_for_loss = tf.concat([word_objs, word_poly_for_loss, text_labels, text_lenghts], axis=1)
+    word_values_for_loss = tf.concat([word_objs, word_poly_for_loss] + text_labels_list + [text_lengths], axis=1)
 
     output = tf.tensor_scatter_nd_update(output, word_idx, word_values_for_loss)
 

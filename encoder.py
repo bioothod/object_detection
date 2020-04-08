@@ -253,11 +253,8 @@ class Encoder(tf.keras.Model):
 
         self.output_sizes = None
 
-    def text_inference(self, features_full, word_obj_mask_full, poly_full, true_words_full, true_lengths_full, anchors_all, training):
+    def text_inference(self, features_full, word_obj_mask_full, poly_full, anchors_all, training):
         dtype = features_full.dtype
-
-        true_words = tf.boolean_mask(true_words_full, word_obj_mask_full)
-        true_lengths = tf.boolean_mask(true_lengths_full, word_obj_mask_full)
 
         logger.info('text features: {}, crop_size: {}'.format(features_full.shape, list(self.crop_size)))
         feature_size = tf.cast(tf.shape(features_full)[1], dtype)
@@ -281,14 +278,14 @@ class Encoder(tf.keras.Model):
 
             poly = poly * feature_size / self.image_size
 
-            selected_features, written = sample_crops_for_single_image(features, poly, crop_size, selected_features, written)
+            selected_features, written = sample_crops_for_single_image(features, poly, self.crop_size, selected_features, written)
 
         selected_features = selected_features.concat()
 
-        return self.text_layer(selected_features, true_words, true_lengths, training)
+        return self.text_layer(selected_features, training)
 
 
-    def text_inference_from_true_values(self, logits, raw_features, word_obj_mask, true_word_poly, true_words, true_lengths, anchors_all, training, use_predicted_polys, use_poly_augmentation):
+    def text_inference_from_true_values(self, logits, raw_features, word_obj_mask, true_word_poly, anchors_all, training, use_predicted_polys, use_poly_augmentation):
         if use_predicted_polys:
             poly = logits[..., 1 : 1 + 4*2]
         else:
@@ -300,7 +297,7 @@ class Encoder(tf.keras.Model):
             #poly = poly + tf.random.normal(tf.shape(poly), mean=0, stddev=use_poly_augmentation)
             poly = poly + tf.random.uniform(tf.shape(poly), -use_poly_augmentation, use_poly_augmentation)
 
-        return self.text_inference(raw_features, word_obj_mask, poly, true_words, true_lengths, anchors_all, training)
+        return self.text_inference(raw_features, word_obj_mask, poly, anchors_all, training)
 
     # word mask is per anchor, i.e. this is true word_obj
     def call(self, inputs, training):

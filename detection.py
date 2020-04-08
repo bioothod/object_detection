@@ -114,6 +114,19 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
     add = tf.stack([xdiff, ydiff])
     word_poly += add
 
+    """
+    good_indexes = tf.TensorArray(tf.int32, size=0, dynamic_size=True)
+    written = 0
+    for idx in tf.range(tf.shape(text_labels)[0]):
+        if tf.strings.length(text_labels[idx]) < max_sequence_len:
+            good_indexes = good_indexes.write(written, idx)
+            written += 1
+
+    good_indexes = good_indexes.stack()
+    word_poly = tf.gather(word_poly, good_indexes)
+    text_labels = tf.gather(text_labels, good_indexes)
+    """
+
     if is_training:
         image, word_poly, text_labels = preprocess.preprocess_for_train(image, word_poly, text_labels, FLAGS.rotation_augmentation, FLAGS.use_augmentation, dtype)
     else:
@@ -126,40 +139,37 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
     word_poly = word_poly / current_image_size * image_size
     word_poly = tf.cast(word_poly, dtype)
 
-    good_indexes = tf.TensorArray(tf.int32, size=0, dynamic=True)
-    written = 0
-    for idx in tf.range(tf.shape(text_labels)[0]):
-        if tf.strings.lenght(text_labels[idx]) >= max_sequence_len:
-            continue
-
-        good_indexes = good_indexes.write(written, idx)
-        written += 1
-
-    good_indexes = good_indexes.concat()
-    word_poly = tf.gather(word_poly, good_indexes)
-    text_labels = tf.gather(text_labels, good_indexes)
-
     text_labels = tf.strings.regex_replace(text_labels, 'ù', 'u', replace_global=True)
     text_labels = tf.strings.regex_replace(text_labels, 'à', 'a', replace_global=True)
     text_labels = tf.strings.regex_replace(text_labels, 'ō', 'o', replace_global=True)
     text_labels = tf.strings.regex_replace(text_labels, 'ß', 'B', replace_global=True)
     text_labels = tf.strings.regex_replace(text_labels, 'é', 'e', replace_global=True)
 
-    text_split = tf.strings.unicode_split(text_labels, 'UTF-8')
+    text_labels_upper = tf.strings.upper(text_labels)
 
-    text_lenghts = text_split.row_lengths()
-    text_lenghts = tf.expand_dims(text_lenghts, 1)
+    def text_encode(text_labels):
+        text_split = tf.strings.unicode_split(text_labels, 'UTF-8')
 
-    encoded_values = dict_table.lookup(text_split.values)
-    rg = tf.RaggedTensor.from_row_splits(values=encoded_values, row_splits=text_split.row_splits)
-    encoded_padded_text = rg.to_tensor(default_value=pad_value)
-    encoded_padded_text = encoded_padded_text[..., :max_sequence_len]
+        text_lengths = text_split.row_lengths()
+        text_lengths = tf.expand_dims(text_lengths, 1)
 
-    to_add = max_sequence_len - tf.shape(encoded_padded_text)[1]
-    if to_add > 0:
-        encoded_padded_text = tf.pad(encoded_padded_text, [[0, 0], [0, to_add]], mode='CONSTANT', constant_values=pad_value)
+        encoded_values = dict_table.lookup(text_split.values)
+        rg = tf.RaggedTensor.from_row_splits(values=encoded_values, row_splits=text_split.row_splits)
+        encoded_padded_text = rg.to_tensor(default_value=pad_value)
+        encoded_padded_text = encoded_padded_text[..., :max_sequence_len]
 
-    true_values = anchors_gen.generate_true_values_for_anchors(word_poly, anchors_all, encoded_padded_text, text_lenghts, max_sequence_len)
+        to_add = max_sequence_len - tf.shape(encoded_padded_text)[1]
+        if to_add > 0:
+            encoded_padded_text = tf.pad(encoded_padded_text, [[0, 0], [0, to_add]], mode='CONSTANT', constant_values=pad_value)
+
+        encoded_padded_text = tf.cast(encoded_padded_text, dtype)
+        text_lengths = tf.cast(text_lengths, dtype)
+        return encoded_padded_text, text_lengths
+
+    encoded_padded_text0, text_lengths = text_encode(text_labels)
+    encoded_padded_text1, _ = text_encode(text_labels_upper)
+
+    true_values = anchors_gen.generate_true_values_for_anchors(word_poly, anchors_all, [encoded_padded_text0, encoded_padded_text1], text_lengths, max_sequence_len)
 
     return filename, image, true_values
 
@@ -253,17 +263,13 @@ def train():
 
     num_anchors = tf.shape(true_word_obj)[1]
 
-    true_words = tf.ones((FLAGS.batch_size, num_anchors, FLAGS.max_sequence_len), dtype=tf.int64)
-    true_lengths = tf.ones((FLAGS.batch_size, num_anchors), dtype=tf.int64)
-
     tidx = tf.range(num_anchors)
     tidx = tf.expand_dims(tidx, 0)
     tidx = tf.tile(tidx, [FLAGS.batch_size, 1])
     true_word_obj = tf.where(tidx < 256 // FLAGS.batch_size, 1, 0)
-    test_words = tf.math.count_nonzero(true_word_obj)
 
     text_outputs = model.text_inference_from_true_values(logits, raw_features,
-                                                            true_word_obj, true_word_poly, true_words, true_lengths,
+                                                            true_word_obj, true_word_poly,
                                                             anchors_all, training=True, use_predicted_polys=True,
                                                             use_poly_augmentation=FLAGS.use_poly_augmentation)
 
@@ -304,8 +310,9 @@ def train():
         def filter_fn(filename, image, true_values):
             true_word_obj = true_values[..., 0]
             true_word_poly = true_values[..., 1 : 9]
-            true_words = true_values[..., 9 : 9 + FLAGS.max_sequence_len]
-            true_lengths = true_values[..., 9 + FLAGS.max_sequence_len]
+            true_words0 = true_values[..., 9+0*FLAGS.max_sequence_len : 9+1*FLAGS.max_sequence_len]
+            true_words1 = true_values[..., 9+1*FLAGS.max_sequence_len : 9+2*FLAGS.max_sequence_len]
+            true_lengths = true_values[..., 9 + 2*FLAGS.max_sequence_len]
             true_lengths = tf.cast(true_lengths, tf.int64)
 
             index = tf.logical_and(tf.math.not_equal(true_lengths, 0),
@@ -392,11 +399,13 @@ def train():
     def calculate_metrics(images, is_training, true_values):
         true_word_obj = true_values[..., 0]
         true_word_poly = true_values[..., 1 : 9]
-        true_words = true_values[..., 9 : 9 + FLAGS.max_sequence_len]
-        true_lengths = true_values[..., 9 + FLAGS.max_sequence_len]
+        true_words0 = true_values[..., 9+0*FLAGS.max_sequence_len : 9+1*FLAGS.max_sequence_len]
+        true_words1 = true_values[..., 9+1*FLAGS.max_sequence_len : 9+2*FLAGS.max_sequence_len]
+        true_lengths = true_values[..., 9 + 2*FLAGS.max_sequence_len]
 
         true_word_obj = tf.cast(true_word_obj, tf.bool)
-        true_words = tf.cast(true_words, tf.int64)
+        true_words0 = tf.cast(true_words0, tf.int64)
+        true_words1 = tf.cast(true_words1, tf.int64)
         true_lengths = tf.cast(true_lengths, tf.int64)
         true_word_poly = tf.cast(true_word_poly, dtype)
 
@@ -410,7 +419,7 @@ def train():
         num_words = tf.math.count_nonzero(true_word_obj)
 
         if num_words > FLAGS.max_word_batch:
-            batch_size = tf.shape(true_words)[0]
+            batch_size = tf.shape(true_words0)[0]
             feature_size = tf.shape(true_word_obj)[1]
 
             idx = tf.range(feature_size)
@@ -443,11 +452,11 @@ def train():
             true_word_obj = tf.scatter_nd(scatter_idx_concat, ones, [batch_size, feature_size])
 
         text_outputs = model.text_inference_from_true_values(logits, raw_features,
-                                                                true_word_obj, true_word_poly, true_words, true_lengths,
+                                                                true_word_obj, true_word_poly,
                                                                 anchors_all, is_training, use_predicted_polys,
                                                                 FLAGS.use_poly_augmentation)
 
-        text_loss = metric.text_recognition_loss(true_word_obj, true_words, true_lengths, text_outputs, is_training)
+        text_loss = metric.text_recognition_loss(true_word_obj, true_words0, true_words1, true_lengths, text_outputs, is_training)
         objdet_loss = metric.object_detection_loss(true_word_obj, true_word_poly, logits, is_training)
 
         objdet_scale = 1e-3
@@ -555,9 +564,13 @@ def train():
                         tf.summary.scalar('{}/text_loss'.format(name), text_loss, step=global_step)
                         tf.summary.scalar('{}/objdet_loss'.format(name), objdet_loss, step=global_step)
 
-                        tf.summary.scalar('{}/text_acc3'.format(name), m.text_metric.word3_acc.result(), step=global_step)
-                        tf.summary.scalar('{}/text_acc'.format(name), m.text_metric.word_acc.result(), step=global_step)
-                        tf.summary.scalar('{}/text_acc_full'.format(name), m.text_metric.full_acc.result(), step=global_step)
+                        tf.summary.scalar('{}/0/text_acc3'.format(name), m.text_metric0.word3_acc.result(), step=global_step)
+                        tf.summary.scalar('{}/0/text_acc'.format(name), m.text_metric0.word_acc.result(), step=global_step)
+                        tf.summary.scalar('{}/0/text_acc_full'.format(name), m.text_metric0.full_acc.result(), step=global_step)
+
+                        tf.summary.scalar('{}/1/text_acc3'.format(name), m.text_metric1.word3_acc.result(), step=global_step)
+                        tf.summary.scalar('{}/1/text_acc'.format(name), m.text_metric1.word_acc.result(), step=global_step)
+                        tf.summary.scalar('{}/1/text_acc_full'.format(name), m.text_metric1.full_acc.result(), step=global_step)
 
                         tf.summary.scalar('{}/word_obj_acc_02'.format(name), m.word_obj_accuracy02.result(), step=global_step)
                         tf.summary.scalar('{}/word_obj_acc_05'.format(name), m.word_obj_accuracy05.result(), step=global_step)
@@ -574,9 +587,13 @@ def train():
                 break
 
         if hvd.rank() == 0:
-            tf.summary.scalar('{}/text_acc3'.format(name), m.text_metric.word3_acc.result(), step=global_step)
-            tf.summary.scalar('{}/text_acc'.format(name), m.text_metric.word_acc.result(), step=global_step)
-            tf.summary.scalar('{}/text_acc_full'.format(name), m.text_metric.full_acc.result(), step=global_step)
+            tf.summary.scalar('{}/0/text_acc3'.format(name), m.text_metric0.word3_acc.result(), step=global_step)
+            tf.summary.scalar('{}/0/text_acc'.format(name), m.text_metric0.word_acc.result(), step=global_step)
+            tf.summary.scalar('{}/0/text_acc_full'.format(name), m.text_metric0.full_acc.result(), step=global_step)
+
+            tf.summary.scalar('{}/1/text_acc3'.format(name), m.text_metric1.word3_acc.result(), step=global_step)
+            tf.summary.scalar('{}/1/text_acc'.format(name), m.text_metric1.word_acc.result(), step=global_step)
+            tf.summary.scalar('{}/1/text_acc_full'.format(name), m.text_metric1.full_acc.result(), step=global_step)
 
             tf.summary.scalar('{}/word_obj_acc_02'.format(name), m.word_obj_accuracy02.result(), step=global_step)
             tf.summary.scalar('{}/word_obj_acc_05'.format(name), m.word_obj_accuracy05.result(), step=global_step)
