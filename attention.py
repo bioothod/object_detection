@@ -163,7 +163,7 @@ def add_spatial_encoding(features):
 
     return tf.concat([features, loc], 3)
 
-class RNNLayer(tf.keras.Model):
+class Decoder(tf.keras.Model):
     def __init__(self, params, max_sequence_len, dictionary_size, pad_value, **kwargs):
         super().__init__(**kwargs)
 
@@ -174,11 +174,11 @@ class RNNLayer(tf.keras.Model):
         self.attention_feature_dim = 128
         num_heads = 4
 
-        self.res0 = ft.GatedBlockResidual(params, [256, 256], kernel_size2=(3, 6), name='res0')
-        self.pool0 = ft.BlockPool(params, 128, strides=(2, 1), name='pool0')
-        self.res1 = ft.GatedBlockResidual(params, [128, 128], kernel_size2=(2, 4), name='res1')
+        self.res0 = ft.GatedBlockResidual(params, [256, 256], kernel_size1=(1, 2), kernel_size2=(3, 6), name='res0')
+        self.pool0 = ft.BlockPool(params, 128, strides=(2, 2), name='pool0')
+        self.res1 = ft.GatedBlockResidual(params, [128, 128], kernel_size1=(1, 2), kernel_size2=(2, 4), name='res1')
         self.pool1 = ft.BlockPool(params, 128, strides=(2, 1), name='pool1')
-        self.res2 = ft.GatedBlockResidual(params, [128, 128], kernel_size2=(2, 4), name='res2')
+        self.res2 = ft.GatedBlockResidual(params, [128, 128], kernel_size1=(1, 2), kernel_size2=(2, 4), name='res2')
         self.pool2 = ft.BlockPool(params, 128, strides=(2, 1), name='pool2')
 
         self.positional_encoding = PositionalEncoding(params.crop_size[1], self.attention_feature_dim)
@@ -188,7 +188,7 @@ class RNNLayer(tf.keras.Model):
 
         self.attention_cell = AttentionCell(params, self.attention_feature_dim, num_heads, dictionary_size)
 
-    def call(self, image_features, gt_tokens, gt_lens, training):
+    def call(self, image_features, training):
         batch_size = tf.shape(image_features)[0]
 
         img = self.res0(image_features, training)
@@ -211,4 +211,4 @@ class RNNLayer(tf.keras.Model):
 
         char_dists = self.attention_cell(features, training)
 
-        return char_dists, char_dists
+        return char_dists

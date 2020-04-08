@@ -158,9 +158,9 @@ class FeatureExtractor(tf.keras.Model):
         self.blocks.append(BlockPool(params, 64, name='l0_pool'))
 
         self.blocks.append(GatedBlockResidual(params, [64, 64], kernel_size2=(4, 4), name='l1_res0'))
-        self.blocks.append(BlockPool(params, 64, name='l1_pool'))
+        self.blocks.append(BlockPool(params, 96, name='l1_pool'))
 
-        self.blocks.append(GatedBlockResidual(params, [64, 64], kernel_size2=(4, 4), name='l2_res0_raw0'))
+        self.blocks.append(GatedBlockResidual(params, [96, 96], kernel_size2=(4, 4), name='l2_res0_raw0'))
         self.blocks.append(BlockPool(params, 128, name='l2_pool_output0'))
 
         self.blocks.append(GatedBlockResidual(params, [128, 128], name='l3_res0_raw1'))
