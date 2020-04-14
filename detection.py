@@ -61,7 +61,7 @@ parser.add_argument('--use_poly_augmentation', type=float, default=-1, help='Std
 parser.add_argument('--use_pre_augmentation', choices=['height_resize'], help='Use pre augmentation')
 parser.add_argument('--only_test', action='store_true', help='Exist after running initial validation')
 
-default_char_dictionary="!\"#&\'\\()*+,- ./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz°"
+default_char_dictionary="!\"#&\'\\()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz°"
 parser.add_argument('--dictionary', type=str, default=default_char_dictionary, help='Dictionary to use')
 
 def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_table, pad_value, is_training, data_format, dtype):
@@ -144,6 +144,7 @@ def unpack_tfrecord(record, anchors_all, image_size, max_sequence_len, dict_tabl
     text_labels = tf.strings.regex_replace(text_labels, 'ō', 'o', replace_global=True)
     text_labels = tf.strings.regex_replace(text_labels, 'ß', 'B', replace_global=True)
     text_labels = tf.strings.regex_replace(text_labels, 'é', 'e', replace_global=True)
+    text_labels = tf.strings.regex_replace(text_labels, ' ', '', replace_global=True)
 
     text_labels_upper = tf.strings.upper(text_labels)
 
