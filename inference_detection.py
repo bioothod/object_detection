@@ -49,7 +49,7 @@ parser.add_argument('--crop_size', type=str, default='8x24', help='Use this size
 parser.add_argument('--max_sequence_len', default=32, type=int, help='Maximum sequence length')
 parser.add_argument('filenames', type=str, nargs='*', help='Numeric label : file path')
 
-default_char_dictionary="!\"#&\'\\()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+default_char_dictionary="!\"#&\'\\()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz°"
 parser.add_argument('--dictionary', type=str, default=default_char_dictionary, help='Dictionary to use')
 FLAGS = parser.parse_args()
 
@@ -240,7 +240,7 @@ def sort_and_pad_for_poly(poly, obj, scores_to_sort):
     obj = tf.pad(obj, [[0, to_add]], 'CONSTANT')
     return poly, obj, best_index
 
-def per_image_supression(y_pred, image_size, anchors_all, model, pad_value):
+def per_image_supression(y_pred, image_size, crop_size, anchors_all, model, pad_value):
     pred_values, features = y_pred
 
     pred_word_obj = tf.math.sigmoid(pred_values[..., 0])
@@ -272,21 +272,21 @@ def per_image_supression(y_pred, image_size, anchors_all, model, pad_value):
     feature_size = tf.cast(tf.shape(features)[0], tf.float32)
     feature_poly = word_poly * feature_size / image_size
 
-    selected_features, written = model.sample_crops_for_single_image(features, feature_poly, selected_features, written)
+    selected_features, written = encoder.sample_crops_for_single_image(features, feature_poly, crop_size, selected_features, written)
     selected_features = selected_features.concat()
 
-    _, rnn_outputs_ar = model.rnn_layer(selected_features, 0, 0, False)
+    text_outputs = model.text_layer(selected_features, False)
 
-    texts = tf.argmax(rnn_outputs_ar, -1)
+    texts = tf.argmax(text_outputs, -1)
     texts = tf.pad(texts, [[0, FLAGS.max_ret - tf.shape(texts)[0]], [0, 0]], mode='CONSTANT', constant_values=pad_value)
 
     return word_obj_sorted, word_poly_sorted, texts
 
-def eval_step_logits(model, images, image_size, anchors_all, pad_value):
-    pred_values, rnn_features = model(images, training=False)
+def eval_step_logits(model, images, image_size, crop_size, anchors_all, pad_value):
+    pred_values, raw_features = model(images, training=False)
 
-    word_obj, word_poly, texts = tf.map_fn(lambda vals: per_image_supression(vals, image_size, anchors_all, model, pad_value),
-                                                                                (pred_values, rnn_features),
+    word_obj, word_poly, texts = tf.map_fn(lambda vals: per_image_supression(vals, image_size, crop_size, anchors_all, model, pad_value),
+                                                                                (pred_values, raw_features),
                                                                                 parallel_iterations=FLAGS.num_cpus,
                                                                                 back_prop=False,
                                                                                 infer_shape=False,
@@ -337,12 +337,12 @@ def draw_poly(image_ax, text_ax, objs, polys, texts, dictionary, pad_value, imag
 
     return js_anns
 
-def run_eval(model, dataset, image_size, dst_dir, anchors_all, dictionary_size, dictionary, pad_value):
+def run_eval(model, dataset, image_size, crop_size, dst_dir, anchors_all, dictionary_size, dictionary, pad_value):
     num_files = 0
     dump_js = []
     for filenames, images, true_word_poly_batch, true_text_labels_batch, orig_image_shapes in dataset:
         start_time = time.time()
-        word_obj_batch, word_poly_batch, texts_batch = eval_step_logits(model, images, image_size, anchors_all, pad_value)
+        word_obj_batch, word_poly_batch, texts_batch = eval_step_logits(model, images, image_size, crop_size, anchors_all, pad_value)
         num_files += len(filenames)
         time_per_image_ms = (time.time() - start_time) / len(filenames) * 1000
 
@@ -438,6 +438,8 @@ def run_inference():
 
     dtype = tf.float32
     image_size = FLAGS.image_size
+    crop = FLAGS.crop_size.split('x')[:2]
+    crop_size = [int(c) for c in crop]
 
     dictionary_size, dict_table, pad_value = anchors_gen.create_lookup_table(FLAGS.dictionary)
 
@@ -495,7 +497,7 @@ def run_inference():
 
     logger.info('Dataset has been created: num_images: {}, model_name: {}'.format(num_images, FLAGS.model_name))
 
-    run_eval(model, ds, image_size, FLAGS.output_dir, anchors_all, dictionary_size, FLAGS.dictionary, pad_value)
+    run_eval(model, ds, image_size, crop_size, FLAGS.output_dir, anchors_all, dictionary_size, FLAGS.dictionary, pad_value)
 
 if __name__ == '__main__':
     np.set_printoptions(formatter={'float': '{:0.4f}'.format, 'int': '{:4d}'.format}, linewidth=250, suppress=True, threshold=np.inf)
