@@ -181,7 +181,6 @@ class LossMetricAggregator:
 
         label_smoothing = 0.1
 
-        self.mae = tf.keras.losses.MeanAbsoluteError(reduction=tf.keras.losses.Reduction.NONE)
         #self.obj_loss = FocalLoss(label_smoothing=label_smoothing, from_logits=True, sigmoid_ce=True, reduction=tf.keras.losses.Reduction.NONE, name='obj_focal_loss')
         self.obj_loss = tf.keras.losses.BinaryCrossentropy(label_smoothing=label_smoothing, from_logits=True, reduction=tf.keras.losses.Reduction.NONE, name='obj_focal_loss')
 
@@ -247,14 +246,15 @@ class LossMetricAggregator:
                 if axis >= 4:
                     axis -= 4
 
-                x = tf.math.abs(true_word_poly[:, axis, :] - pred_word_poly[:, idx, :])
+                x = true_word_poly[:, axis, :] - pred_word_poly[:, idx, :]
+                x = x * x
                 x = tf.reduce_sum(x, -1)
                 l += x
 
             word_dist_loss = tf.minimum(word_dist_loss, l)
 
 
-        m.word_dist_loss.update_state(tf.reduce_mean(word_dist_loss) / 8)
+        m.word_dist_loss.update_state(tf.reduce_mean(tf.math.sqrt(word_dist_loss / 4)))
         word_dist_loss = tf.nn.compute_average_loss(word_dist_loss, global_batch_size=self.global_batch_size)
         dist_loss = word_dist_loss
 
