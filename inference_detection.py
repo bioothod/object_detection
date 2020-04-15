@@ -251,8 +251,7 @@ def per_image_supression(y_pred, image_size, crop_size, anchors_all, model, pad_
     word_poly = tf.gather(pred_word_poly, word_index)
     word_poly = tf.reshape(word_poly, [-1, 4, 2])
 
-    best_anchors = tf.gather(anchors_all[..., :2], word_index)
-    best_anchors = tf.tile(best_anchors, [1, 4, 1])
+    best_anchors = tf.gather(anchors_all, word_index)
     word_poly = word_poly + best_anchors
 
     word_obj = tf.gather(pred_word_obj, word_index)

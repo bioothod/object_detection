@@ -255,7 +255,7 @@ def train():
 
     logits, raw_features = model(dummy_input, training=True)
 
-    anchors_all, output_xy_grids, output_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes, dtype)
+    anchors_all = anchors_gen.generate_anchors(image_size, model.output_sizes, dtype)
 
     true_word_obj = logits[..., 0]
     true_word_poly = logits[..., 1:9]
@@ -393,9 +393,6 @@ def train():
         epoch_var.assign(FLAGS.force_epoch)
 
     metric = loss.LossMetricAggregator(FLAGS.max_sequence_len, dictionary_size, FLAGS.batch_size)
-
-    anchors_all_batched = tf.expand_dims(anchors_all, 0)
-    anchors_all_batched = tf.tile(anchors_all_batched, [FLAGS.batch_size, 1, 1])
 
     def calculate_metrics(images, is_training, true_values):
         true_word_obj = true_values[..., 0]

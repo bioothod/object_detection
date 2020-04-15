@@ -254,7 +254,7 @@ class LossMetricAggregator:
             word_dist_loss = tf.minimum(word_dist_loss, l)
 
 
-        m.word_dist_loss.update_state(tf.reduce_mean(tf.math.sqrt(word_dist_loss / 4)))
+        m.word_dist_loss.update_state(tf.reduce_mean(tf.math.sqrt(word_dist_loss / 8)))
         word_dist_loss = tf.nn.compute_average_loss(word_dist_loss, global_batch_size=self.global_batch_size)
         dist_loss = word_dist_loss
 

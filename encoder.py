@@ -271,9 +271,7 @@ class Encoder(tf.keras.Model):
 
             poly = tf.boolean_mask(poly, word_obj_mask)
 
-            best_anchors = tf.boolean_mask(anchors_all[..., :2], word_obj_mask)
-            best_anchors = tf.expand_dims(best_anchors, 1)
-            best_anchors = tf.tile(best_anchors, [1, 4, 1])
+            best_anchors = tf.boolean_mask(anchors_all, word_obj_mask)
             poly = poly + best_anchors
 
             poly = poly * feature_size / self.image_size
@@ -349,7 +347,7 @@ def create_params(model_name, image_size, crop_size, max_sequence_len, dictionar
         'max_sequence_len': max_sequence_len,
         'pad_value': pad_value,
         'image_size': image_size,
-        'num_anchors': anchors_gen.num_anchors,
+        'num_anchors': anchors_gen.num_anchors_per_scale,
         'dtype': dtype,
         'crop_size': crop_size,
     }

@@ -6,15 +6,16 @@ import tensorflow as tf
 logger = logging.getLogger('detection')
 
 num_scales = 3
-num_anchors = 1
+num_anchors_per_scale = 1
 
 def create_anchors():
+    # WH format
     anchors_dict = {
-        '0': [(10, 13), (30, 61), (116, 90)],
+        '0': [(15, 9), (55, 35), (156, 90)],
     }
 
     anchors = anchors_dict["0"]
-    # _,_,W,H format
+    # W,H format
     anchors = np.array(anchors, dtype=np.float32)
 
     return anchors
@@ -32,46 +33,50 @@ def generate_anchors(image_size, output_sizes, dtype):
     anchor_boxes = create_anchors()
     anchor_boxes = tf.cast(anchor_boxes, dtype)
 
-    anchors_reshaped = tf.reshape(anchor_boxes, [num_scales, num_anchors, 2])
-    anchors_abs_coords = []
-
-    output_xy_grids = []
-    output_ratios = []
+    anchors_reshaped = tf.reshape(anchor_boxes, [num_scales, num_anchors_per_scale, 2])
+    polys = []
 
     for base_scale, output_size in zip(range(num_scales), output_sizes):
         output_size_float = tf.cast(output_size, dtype)
         ratio = float(image_size) / output_size_float
 
         anchors_wh_one = anchors_reshaped[num_scales - base_scale - 1, ...]
-        anchors_wh = tf.expand_dims(anchors_wh_one, 0)
+        anchors_wh = tf.expand_dims(anchors_wh_one, 0) # added batch dimension
         anchors_wh = tf.tile(anchors_wh, [output_size * output_size, 1, 1])
-        anchors_wh = tf.reshape(anchors_wh, [output_size, output_size, num_anchors, 2]) # [13, 13, num_anchors, 2]
+        anchors_wh = tf.reshape(anchors_wh, [output_size, output_size, num_anchors_per_scale, 2]) # [13, 13, num_anchors_per_scale, 2]
 
-        anchors_xy = create_xy_grid(1, output_size, num_anchors)
+        anchors_xy = create_xy_grid(1, output_size, num_anchors_per_scale)
         anchors_xy = tf.cast(anchors_xy, dtype)
-        anchors_xy = tf.squeeze(anchors_xy, 0) # [13, 13, num_anchors, 2]
-        anchors_xy_flat = tf.reshape(anchors_xy, [-1, 2])
-        output_xy_grids.append(anchors_xy_flat)
+        anchors_xy = tf.squeeze(anchors_xy, 0) # [13, 13, num_anchors_per_scale, 2]
 
-        anchors_xy_centers = anchors_xy + 0.5 # centers
-        #anchors_xy_centers *= ratio
+        # convert XY from scale grid to absolute grid
         anchors_xy *= ratio
-        ratios = tf.tile([ratio], [tf.shape(anchors_xy_flat)[0]])
-        output_ratios.append(ratios)
 
-        #anchors_for_layer = tf.concat([anchors_xy_centers, anchors_wh], axis=-1)
-        anchors_for_layer = tf.concat([anchors_xy, anchors_wh], axis=-1)
+        x0 = anchors_xy[..., 0]
+        y0 = anchors_xy[..., 1]
+        w = anchors_wh[..., 0]
+        h = anchors_wh[..., 1]
 
-        anchors_flat = tf.reshape(anchors_for_layer, [-1, 4])
+        x1 = x0 + w
+        y1 = y0
+        x2 = x0 + w
+        y2 = y0 + w
+        x3 = x0
+        y3 = y0 + h
 
-        logger.info('base_scale: {}: output_size: {}, anchors_for_layer: {}, anchors_flat: {}'.format(base_scale, output_size, anchors_for_layer.shape, anchors_flat.shape))
-        anchors_abs_coords.append(anchors_flat)
+        p0 = tf.stack([x0, y0], -1)
+        p1 = tf.stack([x1, y1], -1)
+        p2 = tf.stack([x2, y2], -1)
+        p3 = tf.stack([x3, y3], -1)
 
-    anchors_all = tf.concat(anchors_abs_coords, axis=0)
-    output_xy_grids = tf.concat(output_xy_grids, axis=0)
-    output_ratios = tf.concat(output_ratios, axis=0)
+        poly = tf.stack([p0, p1, p2, p3], 3)
+        poly_flat = tf.reshape(poly, [-1, 4, 2])
+        polys.append(poly_flat)
 
-    return anchors_all, output_xy_grids, output_ratios
+        logger.info('base_scale: {}: output_size: {}, poly: {}'.format(base_scale, output_size, poly.shape))
+
+    anchors_all = tf.concat(polys, axis=0)
+    return anchors_all
 
 def box_iou(pred_boxes, valid_true_boxes):
     '''
@@ -138,22 +143,17 @@ def polygon2bbox(poly, want_yx=False, want_wh=False):
 
 def find_bbox_anchor_for_poly(poly, anchors_all):
     # [N, 4, 2]
-    bboxes = polygon2bbox(poly)
+    bboxes_min_max = polygon2bbox(poly)
+    anchor_bboxes_wh = polygon2bbox(anchors_all, want_wh=True)
 
-    ious = box_iou(bboxes, anchors_all)
+    ious = box_iou(bboxes_min_max, anchor_bboxes_wh)
     #logger.info('ious: {}, bboxes: {}, anchors_all: {}'.format(
     #    ious.shape, bboxes.shape, anchors_all.shape))
 
     best_anchors_index = tf.argmax(ious, 1)
 
-    # grid's shape [N, 2]
-    best_anchors = tf.gather(anchors_all[..., :2], best_anchors_index)
-
-    # [N, 2] -> [N, 1, 2]
-    best_anchors = tf.expand_dims(best_anchors, 1)
-
-    # [N, 1, 2] -> [N, 4, 2]
-    best_anchors = tf.tile(best_anchors, [1, 4, 1])
+    # anchors shape [N, 4, 2]
+    best_anchors = tf.gather(anchors_all, best_anchors_index)
 
     # [N, 4, 2] - [N, 4, 2]
     poly_for_loss = poly - best_anchors
