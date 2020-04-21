@@ -251,10 +251,12 @@ def per_image_supression(y_pred, image_size, crop_size, anchors_all, model, pad_
     word_poly = tf.gather(pred_word_poly, word_index)
     word_poly = tf.reshape(word_poly, [-1, 4, 2])
 
-    best_anchors = tf.gather(anchors_all, word_index)
-    word_poly = word_poly + best_anchors
-
     word_obj = tf.gather(pred_word_obj, word_index)
+
+    best_anchors = tf.gather(anchors_all, word_index)
+    best_anchors = tf.squeeze(best_anchors, 1)
+
+    word_poly = word_poly + best_anchors
 
     word_poly, word_obj, word_index_nms = nms_for_poly(word_poly, word_obj, tf.squeeze(word_obj, 1))
     word_poly, word_obj, word_index_size = size_filter_for_poly(word_poly, word_obj)
@@ -449,7 +451,7 @@ def run_inference():
         model(dummy_input, training=False)
         logger.info('image_size: {}, model output sizes: {}'.format(image_size, model.output_sizes))
 
-    anchors_all, all_grid_xy, all_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes, dtype)
+    anchors_all = anchors_gen.generate_anchors(image_size, model.output_sizes, dtype)
 
     checkpoint = tf.train.Checkpoint(model=model)
 
