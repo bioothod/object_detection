@@ -71,8 +71,6 @@ def evaluate(model: tf.keras.Model,
                   for n, i in class2idx.items()]
     gt_coco['categories'] = categories
 
-    inference_time = 0.
-    post_time = 0.
     total_time = 0.
     num_images = 0
     i = 0
@@ -82,12 +80,9 @@ def evaluate(model: tf.keras.Model,
         bboxes, categories, scores = model(images, training=False)
         h, w = images.shape[1: 3]
 
-        inference_time += time.time() - inference_start
-
         # Iterate through images in batch, and for each one
         # create the ground truth coco annotation
 
-        post_start = time.time()
         for batch_idx in range(len(bboxes)):
             gt_labels, gt_boxes = true_labels[batch_idx], true_bboxes[batch_idx]
             no_padding_mask = gt_labels != -1
@@ -109,20 +104,19 @@ def evaluate(model: tf.keras.Model,
             annot_id += len(annots)
             image_id += 1
 
-        post_time += time.time() - post_start
         total_time += time.time() - inference_start
         num_images += len(bboxes)
 
         if i % print_every == 0:
-            logger.info('Validating[{}/{}]... inference: {:.1f}, post: {:.1f}, total_perf: {:.1f} img/s, time_per_image: {:.1f} ms'.format(
-                i, steps, num_images / inference_time, num_images / post_time, num_images / total_time, total_time / num_images * 1000))
+            logger.info('validated steps: {}/{}, images: {}, perf: {:.1f} img/s, time_per_image: {:.1f} ms'.format(
+                i, steps, num_images, num_images / total_time, total_time / num_images * 1000))
 
         i += 1
         if i == steps:
             break
 
-    logger.info('validated steps: {}, images: {}, inference: {:.1f}, post: {:.1f}, total_perf: {:.1f}  img/s, time_per_image: {:.1f} ms'.format(
-        i, num_images, num_images / inference_time, num_images / post_time, num_images / total_time, total_time / num_images * 1000))
+    logger.info('validated steps: {}, images: {}, perf: {:.1f}  img/s, time_per_image: {:.1f} ms'.format(
+        i, num_images, num_images / total_time, total_time / num_images * 1000))
 
     # Convert custom annotations to COCO annots
     gtCOCO = COCO()

@@ -26,6 +26,7 @@ import preprocess_ssd
 parser = argparse.ArgumentParser()
 parser.add_argument('--category_json', type=str, required=True, help='Category to ID mapping json file.')
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch.')
+parser.add_argument('--eval_batch_size', type=int, default=128, help='Number of images to process in a batch.')
 parser.add_argument('--num_epochs', type=int, default=1000, help='Number of epochs to run.')
 parser.add_argument('--epoch', type=int, default=0, help='Initial epoch\'s number')
 parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel preprocessing jobs.')
@@ -51,6 +52,7 @@ parser.add_argument('--train_num_images', type=int, default=-1, help='Number of 
 parser.add_argument('--eval_num_images', type=int, default=-1, help='Number of images in eval epoch')
 parser.add_argument('--grad_accumulate_steps', type=int, default=1, help='Number of batches to accumulate before gradient update')
 parser.add_argument('--use_random_augmentation', action='store_true', help='Use efficientnet random augmentation')
+parser.add_argument('--is_mscoco_labels', action='store_true', help='Label ids start from 1, decrease it since ID must start from zero, this is not the case for Badoo dataset created by scan_tags.py script')
 
 def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, data_format):
     features = tf.io.parse_single_example(serialized_example,
@@ -68,17 +70,11 @@ def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, da
 
     orig_labels = tf.io.decode_raw(features['true_labels'], tf.int32)
     # labels should start from zero
-    orig_labels -= 1
+    if FLAGS.is_mscoco_labels:
+        orig_labels -= 1
 
     image_id = features['image_id']
     image = tf.image.decode_jpeg(features['image'], channels=3)
-
-    # In most cases, the default data format NCHW instead of NHWC should be
-    # used for a significant performance boost on GPU/TPU. NHWC should be used
-    # only if the network needs to be run on CPU since the pooling operations
-    # are only supported on NHWC.
-    if FLAGS.data_format == 'channels_first':
-        images = tf.transpose(images, [0, 3, 1, 2])
 
     cx, cy, h, w = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
 
@@ -131,8 +127,8 @@ def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, da
 
     return filename, image_id, image, new_bboxes, new_labels
 
-def calc_epoch_steps(num_files):
-    return (num_files + FLAGS.batch_size - 1) // FLAGS.batch_size
+def calc_epoch_steps(num_files, batch_size):
+    return (num_files + batch_size - 1) // batch_size
 
 def draw_bboxes(image_size, train_dataset, train_cat_names, all_anchors):
     data_dir = os.path.join(FLAGS.train_dir, 'tmp')
@@ -271,13 +267,17 @@ def train():
                 num_parallel_calls=FLAGS.num_cpus)
         if is_training:
             ds = ds.shuffle(1024)
+            batch_size = FLAGS.batch_size
+        else:
+            batch_size = FLAGS.eval_batch_size
 
-        ds = ds.padded_batch(batch_size=FLAGS.batch_size,
+        ds = ds.padded_batch(batch_size=batch_size,
                 padded_shapes=((), (), (image_size, image_size, 3), (None, 4), (None,)),
                 padding_values=('', tf.constant(0, dtype=tf.int64), 0., -1., -1))
 
-        #ds = ds.batch(FLAGS.batch_size)
         ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
+        if not is_training:
+            ds = ds.cache()
 
         logger.info('{} dataset has been created, tfrecords: {}'.format(name, len(filenames)))
 
@@ -303,11 +303,11 @@ def train():
 
     steps_per_train_epoch = FLAGS.steps_per_train_epoch
     if FLAGS.train_num_images > 0:
-        steps_per_train_epoch = calc_epoch_steps(train_num_images)
+        steps_per_train_epoch = calc_epoch_steps(FLAGS.train_num_images, FLAGS.batch_size)
 
     steps_per_eval_epoch = FLAGS.steps_per_eval_epoch
     if FLAGS.eval_num_images > 0:
-        steps_per_eval_epoch = calc_epoch_steps(eval_num_images)
+        steps_per_eval_epoch = calc_epoch_steps(FLAGS.eval_num_images, FLAGS.eval_batch_size)
 
     logger.info('steps_per_train_epoch: {}, train images: {}, steps_per_eval_epoch: {}, eval images: {}'.format(
         steps_per_train_epoch, train_num_images,
@@ -448,9 +448,11 @@ def train():
         want_reset = False
 
         train_steps = run_train_epoch(train_dataset, train_step, FLAGS.steps_per_train_epoch, (epoch == 0))
-        new_metric = evaluate.evaluate(model, eval_dataset, class2idx, FLAGS.steps_per_eval_epoch)
 
-        epoch_var.assign_add(1)
+        if hvd.rank() == 0:
+            saved_path = manager.save()
+
+        new_metric = evaluate.evaluate(model, eval_dataset, class2idx, FLAGS.steps_per_eval_epoch)
 
         new_lr = learning_rate.numpy()
 
@@ -459,9 +461,6 @@ def train():
             learning_rate.numpy(),
             met.str_result(True),
             new_metric, best_metric))
-
-        if hvd.rank() == 0:
-            saved_path = manager.save()
 
         if new_metric > best_metric:
             if epoch_var.numpy() > FLAGS.skip_saving_epochs:
@@ -523,6 +522,7 @@ def train():
 
         # update learning rate even without resetting model
         learning_rate.assign(new_lr)
+        epoch_var.assign_add(1)
 
 
 if __name__ == '__main__':
