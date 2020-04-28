@@ -54,7 +54,7 @@ class Metric:
         self.ce_acc.reset_states()
 
     def str_result(self):
-        return 'total_loss: {:.3e}, reg_loss: {:.3f}, dist: {:.3f}, ce: {:.3f}, acc: {:.3f}'.format(
+        return 'total_loss: {:.4f}, reg_loss: {:.3f}, dist: {:.3f}, ce: {:.3f}, acc: {:.3f}'.format(
                 self.total_loss.result(),
                 self.reg_loss.result(),
                 self.dist_loss.result(),

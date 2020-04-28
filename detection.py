@@ -52,7 +52,7 @@ parser.add_argument('--train_num_images', type=int, default=-1, help='Number of 
 parser.add_argument('--eval_num_images', type=int, default=-1, help='Number of images in eval epoch')
 parser.add_argument('--grad_accumulate_steps', type=int, default=1, help='Number of batches to accumulate before gradient update')
 parser.add_argument('--use_random_augmentation', action='store_true', help='Use efficientnet random augmentation')
-parser.add_argument('--is_mscoco_labels', action='store_true', help='Label ids start from 1, decrease it since ID must start from zero, this is not the case for Badoo dataset created by scan_tags.py script')
+parser.add_argument('--is_mscoco_dataset', action='store_true', help='Label ids start from 1, decrease it since ID must start from zero, this is not the case for Badoo dataset created by scan_tags.py script')
 
 def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, data_format):
     features = tf.io.parse_single_example(serialized_example,
@@ -70,7 +70,7 @@ def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, da
 
     orig_labels = tf.io.decode_raw(features['true_labels'], tf.int32)
     # labels should start from zero
-    if FLAGS.is_mscoco_labels:
+    if FLAGS.is_mscoco_dataset:
         orig_labels -= 1
 
     image_id = features['image_id']
@@ -266,7 +266,7 @@ def train():
                         FLAGS.data_format),
                 num_parallel_calls=FLAGS.num_cpus)
         if is_training:
-            ds = ds.shuffle(1024)
+            ds = ds.shuffle(256)
             batch_size = FLAGS.batch_size
         else:
             batch_size = FLAGS.eval_batch_size
@@ -361,7 +361,7 @@ def train():
 
             total_loss = dist_loss + class_loss + l2_loss
 
-            met.train_metric.reg_loss.update_state(total_loss)
+            met.train_metric.reg_loss.update_state(l2_loss)
             met.train_metric.total_loss.update_state(total_loss)
 
         tape = hvd.DistributedGradientTape(tape)
