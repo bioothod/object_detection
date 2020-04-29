@@ -275,12 +275,10 @@ def train():
             batch_size = FLAGS.eval_batch_size
 
         ds = ds.padded_batch(batch_size=batch_size,
-                padded_shapes=((), (), (image_size, image_size, 3), (None, 4), (None,)),
+                padded_shapes=((), (), (image_size, image_size, 3), (100, 4), (100,)),
                 padding_values=('', tf.constant(0, dtype=tf.int64), 0., -1., -1))
 
         ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
-        if not is_training:
-            ds = ds.cache()
 
         logger.info('{} dataset has been created, tfrecords: {}'.format(name, len(filenames)))
 
@@ -422,19 +420,18 @@ def train():
     initial_learning_rate_multiplier = 0.2
     learning_rate_multiplier = initial_learning_rate_multiplier
 
-    if hvd.rank() == 0:
-        if restore_path:
-            met.reset_states()
-            logger.info('there is a checkpoint {}, running initial validation'.format(restore_path))
+    if restore_path:
+        met.reset_states()
+        logger.info('there is a checkpoint {}, running initial validation'.format(restore_path))
 
-            best_saved_path = restore_path
+        best_saved_path = restore_path
 
-            best_metric = evaluate.evaluate(model, eval_dataset, class2idx, FLAGS.steps_per_eval_epoch)
-            logger.info('initial validation metric: {:.3f}'.format(best_metric))
+        best_metric = evaluate.evaluate(model, eval_dataset, class2idx, FLAGS.steps_per_eval_epoch)
+        logger.info('initial validation metric: {:.3f}'.format(best_metric))
 
-            if FLAGS.only_test:
-                logger.info('Exiting...')
-                exit(0)
+        if FLAGS.only_test:
+            logger.info('Exiting...')
+            exit(0)
 
     if best_metric < FLAGS.min_eval_metric:
         logger.info('setting minimal evaluation metric {:.4f} -> {} from command line arguments'.format(best_metric, FLAGS.min_eval_metric))
