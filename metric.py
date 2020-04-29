@@ -48,6 +48,7 @@ class Metric:
 
     def reset_states(self):
         self.total_loss.reset_states()
+        self.reg_loss.reset_states()
         self.dist_loss.reset_states()
         self.ce_loss.reset_states()
 
