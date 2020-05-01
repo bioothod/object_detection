@@ -88,7 +88,7 @@ class EfnClassifier(tf.keras.layers.Layer):
         w_init = tf.constant_initializer(-math.log((1 - prob) / prob))
         self.cls_score = tf.keras.layers.Conv2D(num_anchors * num_features,
                                                 kernel_size=3,
-                                                activation='softmax',
+                                                activation='sigmoid',
                                                 padding='same',
                                                 bias_initializer=w_init)
 
@@ -104,11 +104,10 @@ class EfnClassifier(tf.keras.layers.Layer):
         return x
 
 class EfnDet(tf.keras.Model):
-    def __init__(self, params, d, num_classes, score_threshold=0.1, **kwargs):
+    def __init__(self, params, d, num_classes, **kwargs):
         super().__init__(**kwargs)
 
         self.num_classes = num_classes
-        self.score_threshold = score_threshold
 
         self.config = config.DetConfig(d=d)
         self.anchors_config = config.AnchorsConfig()
@@ -125,7 +124,13 @@ class EfnDet(tf.keras.Model):
             stride=self.anchors_config.strides[i - 3]
         ) for i in range(3, 8)] # 3 to 7 pyramid levels
 
-    def call(self, images, training):
+    def call(self,
+             images: tf.Tensor,
+             training: bool,
+             score_threshold: float = 0.3,
+             iou_threshold: float = 0.45,
+             max_ret: int = 100
+            ):
         backend_features = self.body(images, training=training)
         bifnp_features = self.neck(backend_features, training=training)
         bboxes = [self.bb_head(bf, training=training) for bf in bifnp_features]
@@ -149,14 +154,11 @@ class EfnDet(tf.keras.Model):
 
         boxes = bndbox.regress_bndboxes(anchors, bboxes)
         boxes = bndbox.clip_boxes(boxes, [h, w])
-        boxes, labels, scores = bndbox.nms(boxes, class_scores, score_threshold=self.score_threshold)
+        boxes, scores, labels = bndbox.nms(boxes, class_scores, score_threshold=score_threshold, iou_threshold=iou_threshold, max_ret=max_ret)
 
-        # TODO: Pad output
-        return boxes, labels, scores
+        return boxes, scores, labels
 
-
-
-def create_model(d, num_classes, score_threshold=0.1, name='efndet'):
+def create_model(d, num_classes, name='efndet'):
     data_format='channels_last'
 
     if data_format == 'channels_first':
@@ -177,5 +179,5 @@ def create_model(d, num_classes, score_threshold=0.1, name='efndet'):
 
     params = GlobalParams(**params)
 
-    model = EfnDet(params, d, num_classes, score_threshold, name=name)
+    model = EfnDet(params, d, num_classes, name=name)
     return model
