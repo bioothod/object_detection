@@ -11,11 +11,9 @@ import tensorflow as tf
 
 from collections import defaultdict
 
-import anchors_gen
 import coco
 import encoder
 import image as image_draw
-import loss
 import preprocess_ssd
 
 logger = logging.getLogger('detection')
@@ -25,12 +23,6 @@ __fmt = logging.Formatter(fmt='%(asctime)s.%(msecs)03d: %(message)s', datefmt='%
 __handler = logging.StreamHandler()
 __handler.setFormatter(__fmt)
 logger.addHandler(__handler)
-
-def normalize_image(image, dtype):
-    image = tf.cast(image, dtype)
-
-    image = preprocess_ssd.normalize_image(image)
-    return image
 
 def tf_read_image(filename, image_size, dtype):
     image = tf.io.read_file(filename)
@@ -43,9 +35,7 @@ def tf_read_image(filename, image_size, dtype):
     mx_int = tf.cast(mx, tf.int32)
     image = tf.image.pad_to_bounding_box(image, tf.cast((mx - orig_image_height) / 2, tf.int32), tf.cast((mx - orig_image_width) / 2, tf.int32), mx_int, mx_int)
 
-    image = tf.image.resize_with_pad(image, image_size, image_size)
-
-    image = normalize_image(image, dtype)
+    image = preprocess_ssd.preprocess_for_eval(image, [image_size, image_size], data_format=FLAGS.data_format)
 
     return filename, image
 
@@ -92,226 +82,56 @@ def tf_left_needed_dimensions_from_tfrecord(image_size, anchors_all, output_xy_g
     image = tf.squeeze(image, 0)
     return filename, image
 
-@tf.function
-def non_max_suppression(coords, scores, max_ret, iou_threshold):
-    ymin, xmin, ymax, xmax = tf.split(coords, num_or_size_splits=4, axis=1)
-    ymax = tf.squeeze(ymax, 1)
-    xmax = tf.squeeze(xmax, 1)
-    ymin = tf.squeeze(ymin, 1)
-    xmin = tf.squeeze(xmin, 1)
+def eval_step_logits(model, images, image_size, num_classes, all_anchors, min_score, min_size, max_ret, iou_threshold):
+    bboxes, categories, scores = model(images, training=False)
+    h, w = images.shape[1: 3]
 
-    area = (xmax - xmin) * (ymax - ymin)
+    # Iterate through images in batch, and for each one
+    # create the ground truth coco annotation
 
-    idxs = tf.argsort(scores, direction='ASCENDING', stable=False)
+    for batch_idx in range(len(bboxes)):
+        gt_labels, gt_boxes = true_labels[batch_idx], true_bboxes[batch_idx]
+        no_padding_mask = gt_labels != -1
 
-    max_idx = tf.minimum(tf.shape(idxs)[0], max_ret)
+        gt_labels = tf.boolean_mask(gt_labels, no_padding_mask)
+        gt_boxes = tf.boolean_mask(gt_boxes, no_padding_mask)
 
-    pick = tf.TensorArray(tf.int32, size=max_idx)
-    written = 0
+        im_annot, annots = _COCO_gt_annot(image_id, annot_id, (h, w), gt_labels, gt_boxes)
+        gt_coco['annotations'].extend(annots)
+        gt_coco['images'].append(im_annot)
 
-    for idx in tf.range(max_idx):
-        last_idx = tf.shape(idxs)[0] - 1
-        if idx >= last_idx:
-            break
+        preds = categories[batch_idx], bboxes[batch_idx], scores[batch_idx]
+        pred_labels, pred_boxes, pred_scores = preds
 
-        #-----------------------------------------------------------------------
-        # Grab the last index (ie. the most confident detection), remove it from
-        # the list of indices to process, and put it on the list of picks
-        #-----------------------------------------------------------------------
-        i = idxs[last_idx]
-        idxs = idxs[:last_idx]
+        if pred_labels.shape[0] > 0:
+            results = _COCO_result(image_id, pred_labels, pred_boxes, pred_scores)
+            results_coco.extend(results)
 
-        pick = pick.write(idx, i)
-        written += 1
-        suppress = []
+        annot_id += len(annots)
+        image_id += 1
 
-        xmin_idx = tf.gather(xmin, idxs)
-        xmax_idx = tf.gather(xmax, idxs)
-        ymin_idx = tf.gather(ymin, idxs)
-        ymax_idx = tf.gather(ymax, idxs)
+    total_time += time.time() - inference_start
+    num_images += len(bboxes)
 
-        xmin_i = tf.gather(xmin, i)
-        xmax_i = tf.gather(xmax, i)
-        ymin_i = tf.gather(ymin, i)
-        ymax_i = tf.gather(ymax, i)
+    if i % print_every == 0:
+        logger.info('validated steps: {}/{}, images: {}, perf: {:.1f} img/s, time_per_image: {:.1f} ms'.format(
+            i, steps, num_images, num_images / total_time, total_time / num_images * 1000))
 
-        #-----------------------------------------------------------------------
-        # Figure out the intersection with the remaining windows
-        #-----------------------------------------------------------------------
-        xxmin = tf.maximum(xmin_i, xmin_idx)
-        xxmax = tf.minimum(xmax_i, xmax_idx)
-        yymin = tf.maximum(ymin_i, ymin_idx)
-        yymax = tf.minimum(ymax_i, ymax_idx)
-
-        w = tf.maximum(0., xxmax-xxmin+1)
-        h = tf.maximum(0., yymax-yymin+1)
-        intersection = w*h
-
-        #-----------------------------------------------------------------------
-        # Compute IOU and suppress indices with IOU higher than a threshold
-        #-----------------------------------------------------------------------
-        area_i = tf.gather(area, i)
-        area_idx = tf.gather(area, idxs)
-        union = area_i + area_idx - intersection
-        iou = intersection/union
-        nonoverlap_index = tf.where(iou <= iou_threshold)
-        nonoverlap_index = tf.squeeze(nonoverlap_index, 1)
-
-        idxs = tf.gather(idxs, nonoverlap_index)
-
-    pick = pick.stack()[:written]
-    return pick
-    #return tf.gather(coords, pick), tf.gather(scores, pick)
-
-def per_image_supression(logits, image_size, num_classes, min_obj_score, min_score, min_size, max_ret, iou_threshold):
-    coords, scores, labels, objectness = logits
-
-    non_background_index = tf.where(tf.logical_and(
-                                        tf.greater(objectness, min_obj_score),
-                                        tf.greater(scores, min_score)))
-
-    non_background_index = tf.squeeze(non_background_index, 1)
-
-    sampled_coords = tf.gather(coords, non_background_index)
-    sampled_scores = tf.gather(scores, non_background_index)
-    sampled_labels = tf.gather(labels, non_background_index)
-    sampled_objs = tf.gather(objectness, non_background_index)
-
-    ret_coords, ret_scores, ret_cat_ids, ret_objs = [], [], [], []
-    for cat_id in range(0, num_classes):
-        class_index = tf.where(tf.equal(sampled_labels, cat_id))
-        #tf.print('class_index:', class_index)
-
-        selected_scores = tf.gather_nd(sampled_scores, class_index)
-        #logger.info('class_index: {}, sampled_labels: {}, sampled_scores: {}, selected_scores: {}'.format(class_index.shape, sampled_labels.shape, sampled_scores.shape, selected_scores.shape))
-
-        selected_coords = tf.gather_nd(sampled_coords, class_index)
-        selected_objs = tf.gather_nd(sampled_objs, class_index)
-
-        #tf.print('selected_scores:', selected_scores, 'selected_coords:', selected_coords)
-
-        cx, cy, w, h = tf.split(selected_coords, num_or_size_splits=4, axis=1)
-        cx = tf.squeeze(cx, 1)
-        cy = tf.squeeze(cy, 1)
-        w = tf.squeeze(w, 1)
-        h = tf.squeeze(h, 1)
-
-        small_cond = tf.logical_and(h >= min_size, w >= min_size)
-        large_cond = tf.logical_and(h < image_size*2, w < image_size*2)
-        index = tf.where(tf.logical_and(small_cond, large_cond))
-        selected_scores = tf.gather(selected_scores, index)
-        selected_scores = tf.squeeze(selected_scores, 1)
-        selected_coords = tf.gather(selected_coords, index)
-        selected_coords = tf.squeeze(selected_coords, 1)
-        selected_objs = tf.gather(selected_objs, index)
-        selected_objs = tf.squeeze(selected_objs, 1)
-
-        cx, cy, w, h = tf.split(selected_coords, num_or_size_splits=4, axis=1)
-        cx = tf.squeeze(cx, 1)
-        cy = tf.squeeze(cy, 1)
-        w = tf.squeeze(w, 1)
-        h = tf.squeeze(h, 1)
-
-        #tf.print('cx:', cx, 'cy:', cy, 'w:', w, 'h:', h)
-
-        xmin = cx - w/2
-        xmax = cx + w/2
-        ymin = cy - h/2
-        ymax = cy + h/2
-
-        xmin = tf.maximum(0., xmin)
-        ymin = tf.maximum(0., ymin)
-        xmax = tf.minimum(float(image_size), xmax)
-        ymax = tf.minimum(float(image_size), ymax)
-
-        coords_yx = tf.stack([ymin, xmin, ymax, xmax], axis=1)
-
-        #scores_to_sort = selected_scores * selected_objs
-        scores_to_sort = selected_objs
-        if True:
-            selected_indexes = tf.image.non_max_suppression(coords_yx, scores_to_sort, max_ret, iou_threshold=iou_threshold)
-        else:
-            selected_indexes = non_max_suppression(coords_yx, scores_to_sort, max_ret, iou_threshold=iou_threshold)
-
-        #logger.info('selected_indexes: {}, selected_coords: {}, selected_scores: {}'.format(selected_indexes, selected_coords, selected_scores))
-        selected_coords = tf.gather(coords_yx, selected_indexes)
-        selected_scores = tf.gather(selected_scores, selected_indexes)
-        selected_objs = tf.gather(selected_objs, selected_indexes)
-
-        ret_coords.append(selected_coords)
-        ret_scores.append(selected_scores)
-        ret_objs.append(selected_objs)
-
-        num = tf.shape(selected_scores)[0]
-        tile = tf.tile([cat_id], [num])
-        ret_cat_ids.append(tile)
-
-    ret_coords = tf.concat(ret_coords, 0)
-    ret_scores = tf.concat(ret_scores, 0)
-    ret_objs = tf.concat(ret_objs, 0)
-    ret_cat_ids = tf.concat(ret_cat_ids, 0)
-
-    #logger.info('ret_coords: {}, ret_scores: {}, ret_cat_ids: {}'.format(ret_coords, ret_scores, ret_cat_ids))
-
-    #scores_to_sort = ret_scores * ret_objs
-    scores_to_sort = ret_objs
-    _, best_index = tf.math.top_k(scores_to_sort, tf.minimum(max_ret, tf.shape(ret_scores)[0]), sorted=True)
-
-    best_scores = tf.gather(ret_scores, best_index)
-    best_coords = tf.gather(ret_coords, best_index)
-    best_objs = tf.gather(ret_objs, best_index)
-    best_cat_ids = tf.gather(ret_cat_ids, best_index)
-
-    #logger.info('best_coords: {}, best_scores: {}, best_cat_ids: {}'.format(best_coords, best_scores, best_cat_ids))
-
-    to_add = tf.maximum(max_ret - tf.shape(best_scores)[0], 0)
-    best_coords = tf.pad(best_coords, [[0, to_add], [0, 0]] , 'CONSTANT', constant_values=0)
-    best_scores = tf.pad(best_scores, [[0, to_add]], 'CONSTANT', constant_values=0)
-    best_objs = tf.pad(best_objs, [[0, to_add]], 'CONSTANT', constant_values=0)
-    best_cat_ids = tf.pad(best_cat_ids, [[0, to_add]], 'CONSTANT', constant_values=0)
-
-
-    #logger.info('ret_coords: {}, ret_scores: {}, ret_cat_ids: {}, best_index: {}, best_scores: {}, best_coords: {}, best_cat_ids: {}'.format(
-    #    ret_coords, ret_scores, ret_cat_ids, best_index, best_scores, best_coords, best_cat_ids))
-
-    return best_coords, best_scores, best_objs, best_cat_ids
-
-def eval_step_logits(model, images, image_size, num_classes, all_anchors, all_grid_xy, all_ratios, min_obj_score, min_score, min_size, max_ret, iou_threshold):
-    pred_values = model(images, training=False)
-
-    pred_objs = tf.math.sigmoid(pred_values[..., 4])
-
-    pred_bboxes = pred_values[..., 0:4]
-    pred_scores_all = tf.math.sigmoid(pred_values[..., 5:])
-    pred_scores = tf.reduce_max(pred_scores_all, axis=-1)
-    pred_labels = tf.argmax(pred_scores_all, axis=-1)
-
-    all_ratios = tf.expand_dims(all_ratios, -1)
-
-    pred_xy = (tf.sigmoid(pred_bboxes[..., 0:2]) + all_grid_xy) * all_ratios
-    pred_wh = tf.math.exp(pred_bboxes[..., 2:4]) * all_anchors[..., 2:4]
-
-    pred_bboxes = tf.concat([pred_xy, pred_wh], axis=-1)
-
-    return tf.map_fn(lambda out: per_image_supression(out, image_size, num_classes, min_obj_score, min_score, min_size, max_ret, iou_threshold),
-                     (pred_bboxes, pred_scores, pred_labels, pred_objs),
-                     parallel_iterations=16,
-                     back_prop=False,
-                     dtype=(tf.float32, tf.float32, tf.float32, tf.int32))
-
-def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_anchors, all_grid_xy, all_ratios, cat_names, FLAGS):
+def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, cat_names, FLAGS):
     num_files = 0
     dump_js = []
     for filenames, images in dataset:
         start_time = time.time()
-        coords_batch, scores_batch, objs_batch, cat_ids_batch = eval_step_logits(model, images, image_size, num_classes, all_anchors, all_grid_xy, all_ratios,
-                FLAGS.min_obj_score, FLAGS.min_score, FLAGS.min_size, FLAGS.max_ret, FLAGS.iou_threshold)
+        coords_batch, scores_batch, cat_ids_batch = model(images, training=False, score_threshold=FLAGS.min_score, iou_threshold=FLAGS.iou_threshold, max_ret=FLAGS.max_ret)
+
         num_files += len(filenames)
         time_per_image_ms = (time.time() - start_time) / len(filenames) * 1000
 
+        logger.info('coords: {}, cat_ids: {}, scores: {}'.format(coords_batch.shape, cat_ids_batch.shape, scores_batch.shape))
+
         logger.info('batch images: {}, total_processed: {}, time_per_image: {:.1f} ms'.format(len(filenames), num_files, time_per_image_ms))
 
-        for filename, image, coords, scores, objectness, cat_ids in zip(filenames, images, coords_batch, scores_batch, objs_batch, cat_ids_batch):
+        for filename, image, coords, scores, cat_ids in zip(filenames, images, coords_batch, scores_batch, cat_ids_batch):
             filename = str(filename.numpy(), 'utf8')
             image = cv2.imread(filename)
 
@@ -324,7 +144,6 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_a
             square_scale = max_side / image_size
 
             scores = scores.numpy()
-            objectness = objectness.numpy()
             cat_ids = cat_ids.numpy()
 
 
@@ -335,8 +154,7 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_a
             }
             js_anns = []
 
-            for coord, score, objs, cat_id in zip(coords, scores, objectness, cat_ids):
-                objs = float(objs)
+            for coord, score, cat_id in zip(coords, scores, cat_ids):
                 score = float(score)
                 cat_id = int(cat_id)
 
@@ -346,7 +164,7 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_a
                 bb = coord.numpy().astype(float)
                 scaled_bb = bb * square_scale
 
-                ymin, xmin, ymax, xmax = scaled_bb
+                xmin, ymin, xmax, ymax = scaled_bb
                 xmin -= pad_x
                 xmax -= pad_x
                 ymin -= pad_y
@@ -357,7 +175,6 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, all_a
 
                 ann_js = {
                     'bbox': bb,
-                    'objectness': objs,
                     'class_score': score,
                     'category_id': cat_id,
                 }
@@ -395,14 +212,8 @@ def run_inference(FLAGS):
     num_images = len(FLAGS.filenames)
 
     dtype = tf.float32
-    model = encoder.create_model(FLAGS.model_name, FLAGS.num_classes)
-    image_size = model.image_size
-    all_anchors, all_grid_xy, all_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
-
-    all_anchors_graph = all_anchors.numpy()
-    all_grid_xy_graph = all_grid_xy.numpy()
-    all_ratios_graph = all_ratios.numpy()
-    output_sizes = model.output_sizes
+    model = encoder.create_model(FLAGS.d, FLAGS.num_classes)
+    image_size = model.config.input_size
 
     if FLAGS.checkpoint:
         checkpoint_prefix = FLAGS.checkpoint
@@ -418,7 +229,12 @@ def run_inference(FLAGS):
         status.assert_existing_objects_matched().expect_partial()
     logger.info("Restored from external checkpoint {}".format(checkpoint_prefix))
 
+    with open(FLAGS.category_json, 'r') as f:
+        class2idx = json.load(f)
+
     cat_names = {}
+    for cname, cid in class2idx.items():
+        cat_names[cid] = cname
 
     if FLAGS.eval_coco_annotations:
         eval_base = coco.create_coco_iterable(FLAGS.eval_coco_annotations, FLAGS.eval_coco_data_dir, logger)
@@ -461,9 +277,9 @@ def run_inference(FLAGS):
     ds = ds.batch(FLAGS.batch_size)
     ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
 
-    logger.info('Dataset has been created: num_images: {}, num_classes: {}, model_name: {}'.format(num_images, num_classes, FLAGS.model_name))
+    logger.info('Dataset has been created: num_images: {}, num_classes: {}, D: {}'.format(num_images, num_classes, FLAGS.d))
 
-    run_eval(model, ds, num_images, image_size, FLAGS.num_classes, FLAGS.output_dir, all_anchors, all_grid_xy, all_ratios, cat_names, FLAGS)
+    run_eval(model, ds, num_images, image_size, FLAGS.num_classes, FLAGS.output_dir, cat_names, FLAGS)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -474,19 +290,18 @@ if __name__ == '__main__':
     parser.add_argument('--num_classes', type=int, required=True, help='Number of the output classes in the model')
     parser.add_argument('--max_ret', type=int, default=100, help='Maximum number of returned boxes')
     parser.add_argument('--min_score', type=float, default=0.7, help='Minimal class probability')
-    parser.add_argument('--min_obj_score', type=float, default=0.3, help='Minimal class probability')
     parser.add_argument('--min_size', type=float, default=10, help='Minimal size of the bounding box')
     parser.add_argument('--iou_threshold', type=float, default=0.45, help='Minimal IoU threshold for non-maximum suppression')
     parser.add_argument('--output_dir', type=str, required=True, help='Path to directory, where images will be stored')
     parser.add_argument('--checkpoint', type=str, help='Load model weights from this file')
     parser.add_argument('--checkpoint_dir', type=str, help='Load model weights from the latest checkpoint in this directory')
-    parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='Model name')
+    parser.add_argument('--d', type=int, default=0, help='Model name')
     parser.add_argument('--data_format', type=str, default='channels_last', choices=['channels_first', 'channels_last'], help='Data format: [channels_first, channels_last]')
-    parser.add_argument('--do_not_step_labels', action='store_true', help='Whether to reduce labels by 1, i.e. when 0 is background class')
     parser.add_argument('--skip_checkpoint_assertion', action='store_true', help='Skip checkpoint assertion, needed for older models on objdet3/4')
     parser.add_argument('--no_channel_swap', action='store_true', help='When set, do not perform rgb-bgr conversion, needed, when using files as input')
     parser.add_argument('--do_not_save_images', action='store_true', help='Do not save images with bounding boxes')
     parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
+    parser.add_argument('--category_json', type=str, help='Category to ID mapping json file.')
     parser.add_argument('--dataset_type', type=str, choices=['files', 'tfrecords', 'filelist'], default='files', help='Dataset type')
     parser.add_argument('filenames', type=str, nargs='*', help='Numeric label : file path')
     FLAGS = parser.parse_args()
