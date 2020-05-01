@@ -117,8 +117,8 @@ def clip_boxes(boxes: tf.Tensor,
 @tf.function
 def nms(bboxes: tf.Tensor,
         class_scores: tf.Tensor,
-        score_threshold: float = 0.5,
-        iou_threshold: float = 0.5,
+        score_threshold: float = 0.3,
+        iou_threshold: float = 0.45,
         max_ret: int = 100,
         ) -> tf.Tensor:
 
@@ -161,15 +161,10 @@ def nms(bboxes: tf.Tensor,
     all_scores = []
 
     @tf.function
-    def body(c, written, c_bboxes, c_scores, c_labels, batch_idx):
-        nms_scores = tf.gather(class_scores[batch_idx], c, axis=-1)
-        nms_scores = tf.reshape(nms_scores, [-1])
-
-        bboxes_for_image = bboxes[batch_idx]
-
+    def body(c, written, c_bboxes, c_scores, c_labels, bboxes_for_image, class_scores_for_image):
         indices = tf.image.non_max_suppression(
                 bboxes_for_image,
-                nms_scores,
+                class_scores_for_image,
                 max_output_size=max_ret,
                 iou_threshold=iou_threshold,
                 score_threshold=score_threshold)
@@ -177,7 +172,7 @@ def nms(bboxes: tf.Tensor,
         num = tf.shape(indices)[0]
         if num != 0:
             best_bboxes = tf.gather(bboxes_for_image, indices)
-            best_scores = tf.gather(nms_scores, indices)
+            best_scores = tf.gather(class_scores_for_image, indices)
             best_labels = tf.ones([tf.shape(indices)[0]], dtype=tf.int32) * c
 
             c_bboxes = c_bboxes.write(written, best_bboxes)
@@ -189,7 +184,6 @@ def nms(bboxes: tf.Tensor,
 
     @tf.function
     def batch_body(batch_idx):
-        body_fn = partial(body, batch_idx=batch_idx)
         # For each class, get the effective bboxes, labels and scores
         c = 0
         written = 0
@@ -197,9 +191,15 @@ def nms(bboxes: tf.Tensor,
         batch_scores = tf.TensorArray(tf.float32, size=0, dynamic_size=True, infer_shape=False)
         batch_labels = tf.TensorArray(tf.int32, size=0, dynamic_size=True, infer_shape=False)
 
+        bboxes_for_image = bboxes[batch_idx]
+        class_scores_for_image = tf.gather(class_scores[batch_idx], c, axis=-1)
+        class_scores_for_image = tf.reshape(class_scores_for_image, [-1])
+
+        body_fn = partial(body, bboxes_for_image=bboxes_for_image, class_scores_for_image=class_scores_for_image)
+
         _, _, batch_bboxes, batch_scores, batch_labels = tf.while_loop(
                 cond_fn, body_fn,
-                parallel_iterations=32,
+                parallel_iterations=1,
                 back_prop=False,
                 loop_vars=[c, written, batch_bboxes, batch_scores, batch_labels])
 
@@ -230,7 +230,7 @@ def nms(bboxes: tf.Tensor,
         return batch_bboxes, batch_scores, batch_labels
 
     return tf.map_fn(batch_body, tf.range(batch_size),
-            parallel_iterations=32,
+            parallel_iterations=1,
             back_prop=False,
             infer_shape=False,
             dtype=(tf.float32, tf.float32, tf.int32))
