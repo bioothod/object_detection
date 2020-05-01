@@ -19,6 +19,7 @@ import autoaugment
 import config
 import encoder
 import evaluate
+import glob
 import image as image_draw
 import metric
 import preprocess_ssd
@@ -30,6 +31,7 @@ parser.add_argument('--eval_batch_size', type=int, default=128, help='Number of 
 parser.add_argument('--num_epochs', type=int, default=1000, help='Number of epochs to run.')
 parser.add_argument('--epoch', type=int, default=0, help='Initial epoch\'s number')
 parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel preprocessing jobs.')
+parser.add_argument('--gradient_clip', type=float, default=4, help='Clip accumulated gradients by this value')
 parser.add_argument('--train_dir', type=str, required=True, help='Path to train directory, where graph will be stored.')
 parser.add_argument('--base_checkpoint', type=str, help='Load base model weights from this file')
 parser.add_argument('--use_good_checkpoint', action='store_true', help='Recover from the last good checkpoint when present')
@@ -45,16 +47,16 @@ parser.add_argument('--epochs_lr_update', default=10, type=int, help='Maximum nu
 parser.add_argument('--reset_on_lr_update', action='store_true', help='Whether to reset to the best model after learning rate update')
 parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16 training/inference')
 parser.add_argument('--dataset_type', type=str, choices=['tfrecords'], default='tfrecords', help='Dataset type')
-parser.add_argument('--train_tfrecord_dir', type=str, help='Directory containing training TFRecords')
-parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
+parser.add_argument('--train_tfrecord_pattern', type=str, help='Training TFRecords pattern')
+parser.add_argument('--eval_tfrecord_pattern', type=str, help='Evaluation TFRecords pattern')
 parser.add_argument('--num_classes', type=int, help='Number of classes in the dataset')
 parser.add_argument('--train_num_images', type=int, default=-1, help='Number of images in train epoch')
 parser.add_argument('--eval_num_images', type=int, default=-1, help='Number of images in eval epoch')
 parser.add_argument('--grad_accumulate_steps', type=int, default=1, help='Number of batches to accumulate before gradient update')
 parser.add_argument('--reg_loss_weight', type=float, default=0, help='L2 regularization weight')
 parser.add_argument('--use_random_augmentation', action='store_true', help='Use efficientnet random augmentation')
-parser.add_argument('--is_mscoco_dataset', action='store_true', help='Label ids start from 1, decrease it since ID must start from zero, this is not the case for Badoo dataset created by scan_tags.py script')
 parser.add_argument('--only_test', action='store_true', help='Exist after running initial validation')
+parser.add_argument('--save_examples', type=int, default=-1, help='Save this number of example images')
 
 def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, data_format):
     features = tf.io.parse_single_example(serialized_example,
@@ -71,14 +73,11 @@ def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, da
     orig_bboxes = tf.reshape(orig_bboxes, [-1, 4])
 
     orig_labels = tf.io.decode_raw(features['true_labels'], tf.int32)
-    # labels should start from zero
-    if FLAGS.is_mscoco_dataset:
-        orig_labels -= 1
 
     image_id = features['image_id']
     image = tf.image.decode_jpeg(features['image'], channels=3)
 
-    cx, cy, h, w = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
+    x0, y0, w, h = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
 
     orig_image_height = tf.cast(tf.shape(image)[0], tf.float32)
     orig_image_width = tf.cast(tf.shape(image)[1], tf.float32)
@@ -90,19 +89,16 @@ def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, da
                 tf.cast((mx - orig_image_width) / 2, tf.int32),
                 mx_int,
                 mx_int)
-    cx += (mx - orig_image_width) / 2
-    cy += (mx - orig_image_height) / 2
-
-    # convert to XYWH format
-    orig_bboxes = tf.concat([cx, cy, w, h], axis=1)
+    x0 += (mx - orig_image_width) / 2
+    y0 += (mx - orig_image_height) / 2
 
     image_height = tf.cast(tf.shape(image)[0], tf.float32)
     image_width = tf.cast(tf.shape(image)[1], tf.float32)
 
-    xminf = (cx - w/2) / image_width
-    xmaxf = (cx + w/2) / image_width
-    yminf = (cy - h/2) / image_height
-    ymaxf = (cy + h/2) / image_height
+    xminf = x0 / image_width
+    xmaxf = (x0 + w) / image_width
+    yminf = y0 / image_height
+    ymaxf = (y0 + h) / image_height
 
     coords_yx = tf.concat([yminf, xminf, ymaxf, xmaxf], axis=1)
 
@@ -113,11 +109,13 @@ def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, da
 
             image = autoaugment.distort_image_with_randaugment(image, randaug_num_layers, randaug_magnitude)
 
+        image = tf.image.convert_image_dtype(image, tf.float32)
         image, new_labels, new_bboxes = preprocess_ssd.preprocess_for_train(image, orig_labels, coords_yx,
                 [image_size, image_size], data_format=data_format)
 
         yminf, xminf, ymaxf, xmaxf = tf.split(new_bboxes, num_or_size_splits=4, axis=1)
     else:
+        image = tf.image.convert_image_dtype(image, tf.float32)
         image = preprocess_ssd.preprocess_for_eval(image, [image_size, image_size], data_format=data_format)
         new_labels = orig_labels
 
@@ -132,59 +130,35 @@ def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, da
 def calc_epoch_steps(num_files, batch_size):
     return (num_files + batch_size - 1) // batch_size
 
-def draw_bboxes(image_size, train_dataset, train_cat_names, all_anchors):
+def draw_bboxes(train_dataset, train_cat_names, all_anchors, num_images):
     data_dir = os.path.join(FLAGS.train_dir, 'tmp')
     os.makedirs(data_dir, exist_ok=True)
 
     all_anchors = all_anchors.numpy()
 
-    for filename, image_id, image, true_values in train_dataset.unbatch().take(20):
+    for filename, image_id, image, true_bboxes, true_labels in train_dataset.unbatch().take(num_images):
         filename = str(filename.numpy(), 'utf8')
 
         dst = '{}/{}.png'.format(data_dir, image_id.numpy())
 
-        true_values = true_values.numpy()
+        non_background_index = tf.where(true_labels != -1)
 
-        non_background_index = np.where(true_values[..., 4] != 0)[0]
-        #logger.info('{}: true_values: {}, non_background_index: {}'.format(filename, true_values.shape, non_background_index.shape))
+        bboxes = tf.gather(true_bboxes, non_background_index)
+        bboxes = tf.squeeze(bboxes, 1)
+        labels = tf.gather(true_labels, non_background_index)
+        labels = tf.squeeze(labels, 1)
 
-        bboxes = true_values[non_background_index, 0:4]
-        labels = true_values[non_background_index, 5:]
-        labels = np.argmax(labels, axis=1)
+        bboxes = bboxes.numpy()
+        labels = labels.numpy()
 
-        anchors = all_anchors[non_background_index, :]
-
-        cx, cy, w, h = np.split(bboxes, 4, axis=1)
-        cx = np.squeeze(cx)
-        cy = np.squeeze(cy)
-        w = np.squeeze(w)
-        h = np.squeeze(h)
-
-        #logger.info('bboxes: {}, grid_xy: {}, anchors: {}, ratios: {}'.format(bboxes, grid_xy, anchors, ratios))
-        #logger.info('cx: {}, cy: {}, w: {}, h: {}'.format(cx, cy, w, h))
-
-        cx = (cx + grid_xy[:, 0]) * ratios
-        cy = (cy + grid_xy[:, 1]) * ratios
-
-        #logger.info('cx: {}, anchors: {}'.format(cx, anchors))
-        w = np.power(np.math.e, w) * anchors[:, 2]
-        h = np.power(np.math.e, h) * anchors[:, 3]
-
-        x0 = cx - w/2
-        x1 = cx + w/2
-        y0 = cy - h/2
-        y1 = cy + h/2
-
-        bb = np.stack([x0, y0, x1, y1], axis=1)
         new_anns = []
-        for _bb, l in zip(bb, labels):
-            new_anns.append((_bb, l))
+        for bb, l in zip(bboxes, labels):
+            new_anns.append((bb, None, l))
 
-        logger.info('{}: true anchors: {}'.format(dst, len(new_anns)))
+        image = preprocess_ssd.denormalize_image(image)
+        image = tf.image.convert_image_dtype(image, tf.uint8)
 
-        image = image.numpy() * 128. + 128
-        image = image.astype(np.uint8)
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        image = image.numpy().astype(np.uint8)
         image_draw.draw_im(image, new_anns, dst, train_cat_names)
 
 def generate_anchors(anchors_config: config.AnchorsConfig,
@@ -253,13 +227,13 @@ def train():
 
     anchors_all = generate_anchors(model.anchors_config, model.config.input_size)
 
-    def create_dataset_from_tfrecord(name, dataset_dir, image_size, num_classes, is_training):
+    def create_dataset_from_tfrecord(name, dataset_pattern, image_size, num_classes, is_training):
         filenames = []
-        for fn in os.listdir(dataset_dir):
-            fn = os.path.join(dataset_dir, fn)
+        for fn in glob.glob(dataset_pattern):
             if os.path.isfile(fn):
                 filenames.append(fn)
 
+        total_filenames = len(filenames)
         if is_training and hvd.size() > 1 and len(filenames) > hvd.size():
             filenames = np.array_split(filenames, hvd.size())[hvd.rank()]
 
@@ -268,8 +242,20 @@ def train():
                         image_size, num_classes, is_training,
                         FLAGS.data_format),
                 num_parallel_calls=FLAGS.num_cpus)
+
+        def filter_fn(filename, image_id, image, true_bboxes, true_labels):
+            index = tf.math.not_equal(true_labels, -1)
+            index = tf.cast(index, tf.int32)
+            index_sum = tf.reduce_sum(index)
+
+            return tf.math.logical_and(
+                    tf.math.not_equal(index_sum, 0),
+                    tf.math.not_equal(tf.shape(true_labels)[0], 0))
+
+        ds = ds.filter(filter_fn)
+
         if is_training:
-            ds = ds.shuffle(256)
+            #ds = ds.shuffle(256)
             batch_size = FLAGS.batch_size
         else:
             batch_size = FLAGS.eval_batch_size
@@ -280,7 +266,7 @@ def train():
 
         ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
 
-        logger.info('{} dataset has been created, tfrecords: {}'.format(name, len(filenames)))
+        logger.info('{} dataset has been created, tfrecords: {}/{}'.format(name, len(filenames), total_filenames))
 
         return ds
 
@@ -288,14 +274,17 @@ def train():
         train_num_images = FLAGS.train_num_images
         eval_num_images = FLAGS.eval_num_images
         train_num_classes = FLAGS.num_classes
+
         train_cat_names = {}
+        for cname, cid in class2idx.items():
+            train_cat_names[cid] = cname
 
-        train_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_dir, image_size, train_num_classes, is_training=True)
-        eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_dir, image_size, train_num_classes, is_training=False)
+        train_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_pattern, image_size, train_num_classes, is_training=True)
+        eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_pattern, image_size, train_num_classes, is_training=False)
 
 
-    if False:
-        draw_bboxes(image_size, train_dataset, train_cat_names, anchors_all)
+    if FLAGS.save_examples > 0:
+        draw_bboxes(train_dataset, train_cat_names, anchors_all, FLAGS.save_examples)
         exit(0)
 
     if train_num_classes is None:
@@ -319,7 +308,7 @@ def train():
     if FLAGS.use_fp16:
         opt = mixed_precision.LossScaleOptimizer(opt, loss_scale='dynamic')
 
-    checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model)
+    checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model, epoch=epoch_var)
     manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=20)
 
     status = checkpoint.restore(manager.latest_checkpoint)
@@ -384,7 +373,7 @@ def train():
                 if len(acc_gradients) == 0:
                     acc_gradients = gradients
                 else:
-                    acc_gradients = [g1+g2 for g1, g2 in zip(acc_gradients, gradients)]
+                    acc_gradients = [tf.clip_by_value(g1+g2, -FLAGS.gradient_clip, FLAGS.gradient_clip) for g1, g2 in zip(acc_gradients, gradients)]
 
                 if FLAGS.grad_accumulate_steps <= 1 or (step + 1) % FLAGS.grad_accumulate_steps == 0:
                     opt.apply_gradients(zip(acc_gradients, model.trainable_variables))
