@@ -98,14 +98,14 @@ class ModelMetric:
         normalizer = tf.shape(true_idx)[0]
         normalizer = tf.cast(normalizer, tf.float32)
 
-        true_labels = tf.gather_nd(true_labels[:, :, :-1], not_ignore_idx)
-        pred_scores = tf.gather_nd(pred_scores, not_ignore_idx)
+        true_not_ignore_labels = tf.gather_nd(true_labels[:, :, :-1], not_ignore_idx)
+        pred_not_ignore_scores = tf.gather_nd(pred_scores, not_ignore_idx)
 
         true_bboxes = tf.gather_nd(true_bboxes[:, :, :-1], true_idx)
         pred_bboxes = tf.gather_nd(pred_bboxes, true_idx)
 
         dist_loss = self.dist_loss(true_bboxes, pred_bboxes)
-        class_loss = focal_loss(true_labels, pred_scores, reduction='sum')
+        class_loss = focal_loss(true_not_ignore_labels, pred_not_ignore_scores, reduction='sum')
 
         dist_loss = tf.divide(dist_loss, normalizer)
         class_loss = tf.divide(class_loss, normalizer)
@@ -113,6 +113,8 @@ class ModelMetric:
         self.train_metric.dist_loss.update_state(dist_loss)
         self.train_metric.ce_loss.update_state(class_loss)
 
-        self.train_metric.ce_acc.update_state(true_labels, pred_scores)
+        true_fg_labels = tf.gather_nd(true_labels[:, :, :-1], true_idx)
+        pred_fg_scores = tf.gather_nd(pred_scores, true_idx)
+        self.train_metric.ce_acc.update_state(true_fg_labels, pred_fg_scores)
 
         return dist_loss, class_loss
