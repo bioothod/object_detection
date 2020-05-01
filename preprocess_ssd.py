@@ -1,10 +1,8 @@
 import tensorflow as tf
 from tensorflow.python.ops import control_flow_ops
 
-_R_MEAN = 123.68
-_G_MEAN = 116.78
-_B_MEAN = 103.94
-
+norm_mean_color = [0.485, 0.456, 0.406]
+norm_std_color = [0.229, 0.224, 0.225]
 
 def _ImageDimensions(image, rank = 3):
     """Returns the dimensions of an image tensor.
@@ -260,16 +258,14 @@ def ssd_random_expand(image, bboxes, ratio=2., name=None):
 
         canvas_width, canvas_height = tf.cast(float_width * ratio, tf.int32), tf.cast(float_height * ratio, tf.int32)
 
-        mean_color_of_image = [_R_MEAN/255., _G_MEAN/255., _B_MEAN/255.]#tf.reduce_mean(tf.reshape(image, [-1, 3]), 0)
-
         x = tf.random.uniform([], minval=0, maxval=canvas_width - width, dtype=tf.int32)
         y = tf.random.uniform([], minval=0, maxval=canvas_height - height, dtype=tf.int32)
 
         paddings = tf.convert_to_tensor([[y, canvas_height - height - y], [x, canvas_width - width - x]])
 
-        big_canvas = tf.stack([tf.pad(image[:, :, 0], paddings, "CONSTANT", constant_values = mean_color_of_image[0]),
-                              tf.pad(image[:, :, 1], paddings, "CONSTANT", constant_values = mean_color_of_image[1]),
-                              tf.pad(image[:, :, 2], paddings, "CONSTANT", constant_values = mean_color_of_image[2])], axis=-1)
+        big_canvas = tf.stack([tf.pad(image[:, :, 0], paddings, "CONSTANT", constant_values = norm_mean_color[0]),
+                              tf.pad(image[:, :, 1], paddings, "CONSTANT", constant_values = norm_mean_color[1]),
+                              tf.pad(image[:, :, 2], paddings, "CONSTANT", constant_values = norm_mean_color[2])], axis=-1)
 
         scale = tf.cast(tf.stack([height, width, height, width]), bboxes.dtype)
         absolute_bboxes = bboxes * scale + tf.cast(tf.stack([y, x, y, x]), bboxes.dtype)
@@ -355,18 +351,10 @@ def _mean_image_subtraction(image, means):
     return tf.concat(axis=-1, values=channels)
 
 def denormalize_image(image):
-    means=[_R_MEAN, _G_MEAN, _B_MEAN]
-    num_channels = image.get_shape().as_list()[-1]
-    channels = tf.split(axis=2, num_or_size_splits=num_channels, value=image)
-    for i in range(num_channels):
-        channels[i] += means[i]
-    image = tf.concat(axis=2, values=channels)
-    return image
+    return image * norm_std_color + norm_mean_color
 
 def normalize_image(image):
-    #image = _mean_image_subtraction(image, [_R_MEAN, _G_MEAN, _B_MEAN])
-    image -= [_R_MEAN, _G_MEAN, _B_MEAN]
-    return image
+    return (image - norm_mean_color) / norm_std_color
 
 def random_flip_left_right(image, bboxes):
     with tf.name_scope('random_flip_left_right'):
