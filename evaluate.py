@@ -77,7 +77,7 @@ def evaluate(model: tf.keras.Model,
 
     for filenames, image_ids, images, true_bboxes, true_labels in dataset:
         inference_start = time.time()
-        bboxes, categories, scores = model(images, training=False)
+        bboxes, scores, categories = model(images, training=False)
         h, w = images.shape[1: 3]
 
         # Iterate through images in batch, and for each one
