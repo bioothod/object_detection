@@ -181,6 +181,8 @@ def nms(bboxes: tf.Tensor,
             best_scores = tf.gather(selected_scores, indices)
             best_labels = tf.ones_like(best_scores, dtype=tf.int32) * c
 
+            #tf.print('c:', c, ', written:', written, ', indices:', tf.shape(indices), ', best_bboxes:', best_bboxes[:3], ', best_scores:', best_scores)
+
             c_bboxes = c_bboxes.write(written, best_bboxes)
             c_scores = c_scores.write(written, best_scores)
             c_labels = c_labels.write(written, best_labels)
@@ -234,9 +236,9 @@ def nms(bboxes: tf.Tensor,
             best_bboxes = tf.reshape(best_bboxes, [-1, 4])
 
             to_add = tf.maximum(max_ret - tf.shape(best_scores)[0], 0)
-            best_bboxes = tf.pad(best_bboxes, [[0, to_add], [0, 0]] , 'CONSTANT')
-            best_scores = tf.pad(best_scores, [[0, to_add]], 'CONSTANT')
-            best_labels = tf.pad(best_labels, [[0, to_add]], 'CONSTANT')
+            best_bboxes = tf.pad(best_bboxes, [[0, to_add], [0, 0]] , 'CONSTANT', constant_values=0)
+            best_scores = tf.pad(best_scores, [[0, to_add]], 'CONSTANT', constant_values=0)
+            best_labels = tf.pad(best_labels, [[0, to_add]], 'CONSTANT', constant_values=0)
         else:
             best_bboxes = tf.zeros((max_ret, 4), dtype=tf.float32)
             best_scores = tf.zeros((max_ret,), dtype=tf.float32)
@@ -245,7 +247,7 @@ def nms(bboxes: tf.Tensor,
         return best_bboxes, best_scores, best_labels
 
     return tf.map_fn(batch_body, tf.range(batch_size),
-            parallel_iterations=16,
+            parallel_iterations=1,
             back_prop=False,
             infer_shape=False,
             dtype=(tf.float32, tf.float32, tf.int32))
