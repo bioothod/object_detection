@@ -127,7 +127,7 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, cat_n
         num_files += len(filenames)
         time_per_image_ms = (time.time() - start_time) / len(filenames) * 1000
 
-        logger.info('coords: {}, cat_ids: {}, scores: {}'.format(coords_batch.shape, cat_ids_batch.shape, scores_batch.shape))
+        #logger.info('bboxes: {}, scores: {}, labels: {}'.format(coords_batch.shape, scores_batch.shape, cat_ids_batch.shape))
 
         logger.info('batch images: {}, total_processed: {}, time_per_image: {:.1f} ms'.format(len(filenames), num_files, time_per_image_ms))
 
@@ -199,7 +199,7 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, cat_n
     logger.info('Saving {} objects into {}'.format(len(dump_js), json_fn))
 
     with open(json_fn, 'w') as fout:
-        json.dump(dump_js, fout)
+        json.dump(dump_js, fout, indent=2)
 
 
 def run_inference(FLAGS):
