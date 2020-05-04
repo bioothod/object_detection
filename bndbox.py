@@ -1,8 +1,11 @@
+import logging
+
 from functools import partial
 from typing import Tuple, List, Union
 
 import tensorflow as tf
 
+logger = logging.getLogger('detection')
 
 def scale_boxes(boxes: tf.Tensor,
                 from_size: Tuple[int, int],
@@ -146,56 +149,66 @@ def nms(bboxes: tf.Tensor,
     batch_size = tf.shape(bboxes)[0]
     num_classes = tf.shape(class_scores)[-1]
 
-    # TF while loop variables
-    cond_fn = lambda c, *args: c < num_classes
-
     bboxes = tf.cast(bboxes, tf.float32)
     x1, y1, x2, y2 = tf.split(bboxes, 4, axis=-1)
     bboxes = tf.stack([y1, x1, y2, x2], axis=-1)
     bboxes = tf.reshape(bboxes, [batch_size, -1, 4])
 
-    class_scores = tf.cast(class_scores, tf.float32)
+    labels = tf.argmax(class_scores, -1, output_type=tf.int32)
+    scores = tf.math.reduce_max(class_scores, -1)
 
-    all_bboxes = []
-    all_labels = []
-    all_scores = []
+    cond_fn = lambda c, *args: c < num_classes
 
     @tf.function
-    def body(c, written, c_bboxes, c_scores, c_labels, bboxes_for_image, class_scores_for_image):
+    def body(c, written, c_bboxes, c_scores, c_labels, sampled_bboxes, sampled_scores, sampled_labels):
+        class_index = tf.where(tf.equal(sampled_labels, c))
+        selected_scores = tf.gather_nd(sampled_scores, class_index)
+        selected_bboxes = tf.gather_nd(sampled_bboxes, class_index)
+
+        #logger.info('sampled_bboxes: {}, selected_bboxes: {}, sampled_scores: {}, selected_scores: {}'.format(
+        #    sampled_bboxes.shape, selected_bboxes.shape, sampled_scores.shape, selected_scores.shape))
+
         indices = tf.image.non_max_suppression(
-                bboxes_for_image,
-                class_scores_for_image,
+                selected_bboxes,
+                selected_scores,
                 max_output_size=max_ret,
                 iou_threshold=iou_threshold,
                 score_threshold=score_threshold)
 
         num = tf.shape(indices)[0]
-        if num != 0:
-            best_bboxes = tf.gather(bboxes_for_image, indices)
-            best_scores = tf.gather(class_scores_for_image, indices)
-            best_labels = tf.ones([tf.shape(indices)[0]], dtype=tf.int32) * c
+        if num > 0:
+            best_bboxes = tf.gather(selected_bboxes, indices)
+            best_scores = tf.gather(selected_scores, indices)
+            best_labels = tf.ones_like(best_scores, dtype=tf.int32) * c
 
             c_bboxes = c_bboxes.write(written, best_bboxes)
             c_scores = c_scores.write(written, best_scores)
             c_labels = c_labels.write(written, best_labels)
             written += 1
 
-        return c + 1, written, c_bboxes, c_scores, c_labels
+        return c+1, written, c_bboxes, c_scores, c_labels
 
     @tf.function
     def batch_body(batch_idx):
-        # For each class, get the effective bboxes, labels and scores
-        c = 0
-        written = 0
+        bboxes_for_image = bboxes[batch_idx]
+        scores_for_image = scores[batch_idx]
+        labels_for_image = labels[batch_idx]
+
+        c = tf.constant(0, dtype=tf.int32)
+        written = tf.constant(0, dtype=tf.int32)
+
         batch_bboxes = tf.TensorArray(tf.float32, size=0, dynamic_size=True, infer_shape=False)
         batch_scores = tf.TensorArray(tf.float32, size=0, dynamic_size=True, infer_shape=False)
         batch_labels = tf.TensorArray(tf.int32, size=0, dynamic_size=True, infer_shape=False)
 
-        bboxes_for_image = bboxes[batch_idx]
-        class_scores_for_image = tf.gather(class_scores[batch_idx], c, axis=-1)
-        class_scores_for_image = tf.reshape(class_scores_for_image, [-1])
+        non_background_index = tf.where(scores_for_image > score_threshold)
+        non_background_index = tf.squeeze(non_background_index, 1)
 
-        body_fn = partial(body, bboxes_for_image=bboxes_for_image, class_scores_for_image=class_scores_for_image)
+        sampled_bboxes = tf.gather(bboxes_for_image, non_background_index)
+        sampled_scores = tf.gather(scores_for_image, non_background_index)
+        sampled_labels = tf.gather(labels_for_image, non_background_index)
+
+        body_fn = partial(body, sampled_bboxes=sampled_bboxes, sampled_scores=sampled_scores, sampled_labels=sampled_labels)
 
         _, _, batch_bboxes, batch_scores, batch_labels = tf.while_loop(
                 cond_fn, body_fn,
@@ -203,34 +216,36 @@ def nms(bboxes: tf.Tensor,
                 back_prop=False,
                 loop_vars=[c, written, batch_bboxes, batch_scores, batch_labels])
 
-        if batch_bboxes.size() != 0:
+        if batch_bboxes.size() > 0:
             batch_bboxes = batch_bboxes.concat()
             batch_scores = batch_scores.concat()
             batch_labels = batch_labels.concat()
 
             _, best_index = tf.math.top_k(batch_scores, tf.minimum(max_ret, tf.shape(batch_scores)[0]), sorted=True)
 
-            batch_bboxes = tf.gather(batch_bboxes, best_index)
-            batch_scores = tf.gather(batch_scores, best_index)
-            batch_labels = tf.gather(batch_labels, best_index)
+            best_bboxes = tf.gather(batch_bboxes, best_index)
+            best_scores = tf.gather(batch_scores, best_index)
+            best_labels = tf.gather(batch_labels, best_index)
 
-            y1, x1, y2, x2 = tf.split(batch_bboxes, 4, axis=-1)
-            batch_bboxes = tf.stack([x1, y1, x2, y2], axis=-1)
-            batch_bboxes = tf.reshape(batch_bboxes, [-1, 4])
+            #tf.print('batch_idx:', batch_idx, ', batch_bboxes:', tf.shape(batch_bboxes), ', best_bboxes:', tf.shape(best_bboxes), ', batch_scores:', tf.shape(batch_scores))
 
-            to_add = tf.maximum(max_ret - tf.shape(batch_scores)[0], 0)
-            batch_bboxes = tf.pad(batch_bboxes, [[0, to_add], [0, 0]] , 'CONSTANT')
-            batch_scores = tf.pad(batch_scores, [[0, to_add]], 'CONSTANT')
-            batch_labels = tf.pad(batch_labels, [[0, to_add]], 'CONSTANT')
+            y1, x1, y2, x2 = tf.split(best_bboxes, 4, axis=-1)
+            best_bboxes = tf.stack([x1, y1, x2, y2], axis=-1)
+            best_bboxes = tf.reshape(best_bboxes, [-1, 4])
+
+            to_add = tf.maximum(max_ret - tf.shape(best_scores)[0], 0)
+            best_bboxes = tf.pad(best_bboxes, [[0, to_add], [0, 0]] , 'CONSTANT')
+            best_scores = tf.pad(best_scores, [[0, to_add]], 'CONSTANT')
+            best_labels = tf.pad(best_labels, [[0, to_add]], 'CONSTANT')
         else:
-            batch_bboxes = tf.zeros([max_ret, 4], tf.float32)
-            batch_scores = tf.zeros([max_ret], tf.float32)
-            batch_labels = tf.zeros([max_ret], tf.int32)
+            best_bboxes = tf.zeros((max_ret, 4), dtype=tf.float32)
+            best_scores = tf.zeros((max_ret,), dtype=tf.float32)
+            best_labels = tf.zeros((max_ret,), dtype=tf.int32)
 
-        return batch_bboxes, batch_scores, batch_labels
+        return best_bboxes, best_scores, best_labels
 
     return tf.map_fn(batch_body, tf.range(batch_size),
-            parallel_iterations=1,
+            parallel_iterations=16,
             back_prop=False,
             infer_shape=False,
             dtype=(tf.float32, tf.float32, tf.int32))
