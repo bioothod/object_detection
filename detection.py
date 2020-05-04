@@ -56,6 +56,7 @@ parser.add_argument('--grad_accumulate_steps', type=int, default=1, help='Number
 parser.add_argument('--reg_loss_weight', type=float, default=0, help='L2 regularization weight')
 parser.add_argument('--use_random_augmentation', action='store_true', help='Use efficientnet random augmentation')
 parser.add_argument('--only_test', action='store_true', help='Exist after running initial validation')
+parser.add_argument('--run_evaluation_first', action='store_true', help='Run evaluation before the first training epoch')
 parser.add_argument('--save_examples', type=int, default=-1, help='Save this number of example images')
 
 def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, data_format):
@@ -437,6 +438,10 @@ def train():
     for epoch in range(FLAGS.num_epochs):
         met.reset_states()
         want_reset = False
+
+        if FLAGS.run_evaluation_first:
+            new_metric = evaluate.evaluate(model, eval_dataset, class2idx, FLAGS.steps_per_eval_epoch)
+            FLAGS.run_evaluation_first = False
 
         train_steps = run_train_epoch(train_dataset, train_step, FLAGS.steps_per_train_epoch, (epoch == 0))
 
