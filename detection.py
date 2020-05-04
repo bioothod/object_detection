@@ -237,6 +237,8 @@ def train():
         total_filenames = len(filenames)
         if is_training and hvd.size() > 1 and len(filenames) > hvd.size():
             filenames = np.array_split(filenames, hvd.size())[hvd.rank()]
+            np.random.seed(time.time())
+            np.random.shuffle(filenames)
 
         ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
         ds = ds.map(lambda record: unpack_tfrecord(record,
