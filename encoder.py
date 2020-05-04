@@ -88,7 +88,7 @@ class EfnClassifier(tf.keras.layers.Layer):
         w_init = tf.constant_initializer(-math.log((1 - prob) / prob))
         self.cls_score = tf.keras.layers.Conv2D(num_anchors * num_features,
                                                 kernel_size=3,
-                                                activation='sigmoid',
+                                                activation='softmax',
                                                 padding='same',
                                                 bias_initializer=w_init)
 
