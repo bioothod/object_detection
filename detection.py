@@ -58,6 +58,7 @@ parser.add_argument('--use_random_augmentation', action='store_true', help='Use 
 parser.add_argument('--only_test', action='store_true', help='Exist after running initial validation')
 parser.add_argument('--run_evaluation_first', action='store_true', help='Run evaluation before the first training epoch')
 parser.add_argument('--save_examples', type=int, default=-1, help='Save this number of example images')
+parser.add_argument('--class_activation', type=str, default='softmax', help='Classification activation function')
 
 def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, data_format):
     features = tf.io.parse_single_example(serialized_example,
@@ -223,7 +224,7 @@ def train():
     epoch_var = tf.Variable(0, dtype=tf.int64, name='epoch_number', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
     learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
 
-    model = encoder.create_model(FLAGS.d, FLAGS.num_classes)
+    model = encoder.create_model(FLAGS.d, FLAGS.num_classes, class_activation=FLAGS.class_activation)
     image_size = model.config.input_size
 
     anchors_all = generate_anchors(model.anchors_config, model.config.input_size)
@@ -237,7 +238,7 @@ def train():
         total_filenames = len(filenames)
         if is_training and hvd.size() > 1 and len(filenames) > hvd.size():
             filenames = np.array_split(filenames, hvd.size())[hvd.rank()]
-            np.random.seed(time.time())
+            np.random.seed(int.from_bytes(os.urandom(4), 'big'))
             np.random.shuffle(filenames)
 
         ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
@@ -376,9 +377,15 @@ def train():
                 if len(acc_gradients) == 0:
                     acc_gradients = gradients
                 else:
-                    acc_gradients = [tf.clip_by_value(g1+g2, -FLAGS.gradient_clip, FLAGS.gradient_clip) for g1, g2 in zip(acc_gradients, gradients)]
+                    acc_gradients = [g1 + g2 for g1, g2 in zip(acc_gradients, gradients)]
 
                 if FLAGS.grad_accumulate_steps <= 1 or (step + 1) % FLAGS.grad_accumulate_steps == 0:
+                    mult = 1.
+                    if FLAGS.grad_accumulate_steps > 1:
+                        mult = 1. / float(FLAGS.grad_accumulate_steps)
+
+                    acc_gradients = [tf.clip_by_value(g * mult, -FLAGS.gradient_clip, FLAGS.gradient_clip) for g in acc_gradients]
+
                     opt.apply_gradients(zip(acc_gradients, model.trainable_variables))
                     acc_gradients = []
 
