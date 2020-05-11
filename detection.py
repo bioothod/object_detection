@@ -31,7 +31,7 @@ parser.add_argument('--eval_batch_size', type=int, default=128, help='Number of 
 parser.add_argument('--num_epochs', type=int, default=1000, help='Number of epochs to run.')
 parser.add_argument('--epoch', type=int, default=0, help='Initial epoch\'s number')
 parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel preprocessing jobs.')
-parser.add_argument('--gradient_clip', type=float, default=4, help='Clip accumulated gradients by this value')
+parser.add_argument('--clip_grad', type=float, default=10, help='Clip accumulated gradients by this value')
 parser.add_argument('--train_dir', type=str, required=True, help='Path to train directory, where graph will be stored.')
 parser.add_argument('--base_checkpoint', type=str, help='Load base model weights from this file')
 parser.add_argument('--use_good_checkpoint', action='store_true', help='Recover from the last good checkpoint when present')
@@ -381,10 +381,10 @@ def train():
 
                 if FLAGS.grad_accumulate_steps <= 1 or (step + 1) % FLAGS.grad_accumulate_steps == 0:
                     mult = 1.
-                    if FLAGS.grad_accumulate_steps > 1:
-                        mult = 1. / float(FLAGS.grad_accumulate_steps)
+                    #if FLAGS.grad_accumulate_steps > 1:
+                    #    mult = 1. / float(FLAGS.grad_accumulate_steps)
 
-                    acc_gradients = [tf.clip_by_value(g * mult, -FLAGS.gradient_clip, FLAGS.gradient_clip) for g in acc_gradients]
+                    acc_gradients = [tf.clip_by_value(g * mult, -FLAGS.clip_grad, FLAGS.clip_grad) for g in acc_gradients]
 
                     opt.apply_gradients(zip(acc_gradients, model.trainable_variables))
                     acc_gradients = []
