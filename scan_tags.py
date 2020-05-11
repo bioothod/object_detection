@@ -2,16 +2,18 @@ import argparse
 import json
 import os
 import random
-import shutil
 
-def scan_tags(input_dir, images={}, annotations={}, categories={}):
-    copied = 0
+from collections import defaultdict
 
+def scan_tags(input_dir, images={}, annotations={}, image_annotations={}, categories={}, image_categories={}):
     for fn in os.listdir(input_dir):
         image_filename_full = os.path.join(input_dir, fn)
 
+        #if len(annotations) > 1000:
+        #    break
+
         if os.path.isdir(image_filename_full):
-            images, annotations, categories = scan_tags(image_filename_full, images, annotations, categories)
+            images, annotations, image_annotations, categories, image_categories = scan_tags(image_filename_full, images, annotations, image_annotations, categories, image_categories)
             continue
 
         image_extensions = ['.jpg', '.jpeg', '.png']
@@ -32,15 +34,30 @@ def scan_tags(input_dir, images={}, annotations={}, categories={}):
             with open(js_fn, 'r') as fin:
                 js = json.load(fin)
 
-                for x in js:
-                    name = x['name']
-                    if FLAGS.copy_category and FLAGS.output_dir:
-                        if name == FLAGS.copy_category:
-                            shutil.copy(image_filename_full, FLAGS.output_dir)
-                            copied += 1
+                js_categories = js['categories']
 
+                for x in js_categories:
+                    name = x['name']
                     boxes = x['rectangles']
+
                     if not boxes:
+                        if name not in image_categories:
+                            cat_id = len(image_categories)
+                            image_categories[name] = {
+                                'name': name,
+                                'id': cat_id,
+                            }
+                            print('added new whole image category: {}/{}, cats: {}'.format(name, cat_id, len(image_categories)))
+
+                        cat_id = image_categories[name]['id']
+
+                        ann_id = len(image_annotations)
+
+                        image_annotations[ann_id] = {
+                            'category_id': cat_id,
+                            'image_id': image_id,
+                            'id': ann_id,
+                        }
                     else:
                         if name not in categories:
                             cat_id = len(categories)
@@ -49,7 +66,7 @@ def scan_tags(input_dir, images={}, annotations={}, categories={}):
                                 'id': cat_id,
                             }
 
-                            print('added new category: {}/{}, cats: {}'.format(name, cat_id, categories))
+                            print('added new category: {}/{}, cats: {}'.format(name, cat_id, len(categories)))
 
                         cat_id = categories[name]['id']
 
@@ -68,9 +85,11 @@ def scan_tags(input_dir, images={}, annotations={}, categories={}):
                                 'bbox': [xmin, ymin, xmax-xmin, ymax-ymin],
                             }
 
-    print('input_dir: {}, images: {}, annotations: {}, categories: {}, copied: {}'.format(input_dir, len(images), len(annotations), len(categories), copied))
-
-    return images, annotations, categories
+    print('input_dir: {}, images: {}, annotations: {}, whole_image_annotations: {}, categories: {}, whole_image_categories: {}'.format(
+        input_dir, len(images),
+        len(annotations), len(image_annotations),
+        len(categories), len(image_categories)))
+    return images, annotations, image_annotations, categories, image_categories
 
 categories = {
         'interface': {'name': 'interface', 'id': 0},
@@ -93,25 +112,41 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--annotations_file', type=str, help='Path to store annotations json file')
     parser.add_argument('--input_dir', required=True, type=str, help='Image data directory')
-    parser.add_argument('--copy_category', type=str, help='Copy image category into this dir')
-    parser.add_argument('--output_dir', type=str, help='Copy image category into this dir')
     FLAGS = parser.parse_args()
 
 
-    images, annotations, categories = scan_tags(FLAGS.input_dir, categories=categories)
+    images, annotations, image_annotations, categories, image_categories = scan_tags(FLAGS.input_dir, categories=categories)
 
+    def print_stats(prefix, annotations, categories):
+        category_annotations = defaultdict(int)
+        for ann_id, ann in annotations.items():
+            cat_id = ann['category_id']
+            category_annotations[cat_id] += 1
+
+        for cat_name, cat in categories.items():
+            cat_id = cat['id']
+            count = category_annotations[cat_id]
+            print('{} cat_id: {}, name: {}, annotations: {}'.format(prefix, cat_id, cat_name, count))
+
+    print_stats('object', annotations, categories)
+    print_stats('whole image', image_annotations, image_categories)
 
     images = list(images.values())
     annotations = list(annotations.values())
+    image_annotations = list(image_annotations.values())
     categories = list(categories.values())
+    image_categories = list(image_categories.values())
+
 
     output = {
         'annotations': annotations,
+        'image_annotations': image_annotations,
         'categories': categories,
+        'image_categories': image_categories,
         'images': images,
     }
 
     print('images: {}, tags: {}'.format(len(images), len(categories)))
     if FLAGS.annotations_file:
         with open(FLAGS.annotations_file, 'w') as f:
-            json.dump(output, f)
+            json.dump(output, f, indent=2)
