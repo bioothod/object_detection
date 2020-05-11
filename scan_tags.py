@@ -94,18 +94,31 @@ def scan_tags(input_dir, images={}, annotations={}, image_annotations={}, catego
 categories = {
         'interface': {'name': 'interface', 'id': 0},
         'contact_details': {'name': 'contact_details', 'id': 1},
-        'face': {'name': 'face', 'id': 2},
-        'underwear': {'name': 'underwear', 'id': 3},
-        'erotic': {'name': 'erotic', 'id': 4},
-        'element_overlay': {'name': 'element_overlay', 'id': 5},
-        'weapon': {'name': 'weapon', 'id': 6},
-        'text_overlay': {'name': 'text_overlay', 'id': 7},
-        'child': {'name': 'child', 'id': 8},
-        'hate_gesture': {'name': 'hate_gesture', 'id': 9},
-        'sex': {'name': 'sex', 'id': 10},
-        'violence': {'name': 'violence', 'id': 11},
-        'blood': {'name': 'blood', 'id': 12},
-        'drugs': {'name': 'drugs', 'id': 13},
+        'underwear': {'name': 'underwear', 'id': 2},
+        'erotic': {'name': 'erotic', 'id': 3},
+        'element_overlay': {'name': 'element_overlay', 'id': 4},
+        'weapon': {'name': 'weapon', 'id': 5},
+        'text_overlay': {'name': 'text_overlay', 'id': 6},
+        'child': {'name': 'child', 'id': 7},
+        'sex': {'name': 'sex', 'id': 8},
+        'violence': {'name': 'violence', 'id': 9},
+        'blood': {'name': 'blood', 'id': 10},
+        'drugs': {'name': 'drugs', 'id': 11},
+        'male_face': {'name': 'drugs', 'id': 12},
+        'person': {'name': 'drugs', 'id': 13},
+        'female_face': {'name': 'drugs', 'id': 14},
+        'good_element_overlay': {'name': 'good_element_overlay', 'id': 15},
+        'trash_element': {'name': 'trash_element', 'id': 16},
+        'hate_symbol': {'name': 'hate_symbol', 'id': 17},
+        'normal_text': {'name': 'normal_text', 'id': 18},
+        'naked_child': {'name': 'naked_child', 'id': 19},
+        'qr_code': {'name': 'qr_code', 'id': 20},
+}
+
+image_categories = {
+        'mirror_selfie': {'name': 'mirror_selfie', 'id': 0},
+        'one_color_photo': {'name': 'one_color_photo', 'id': 1},
+        'photo_of_photo': {'name': 'photo_of_photo', 'id': 2},
 }
 
 if __name__ == '__main__':
@@ -115,7 +128,7 @@ if __name__ == '__main__':
     FLAGS = parser.parse_args()
 
 
-    images, annotations, image_annotations, categories, image_categories = scan_tags(FLAGS.input_dir, categories=categories)
+    images, annotations, image_annotations, categories, image_categories = scan_tags(FLAGS.input_dir, categories=categories, image_categories=image_categories)
 
     def print_stats(prefix, annotations, categories):
         category_annotations = defaultdict(int)
