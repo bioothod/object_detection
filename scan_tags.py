@@ -121,6 +121,38 @@ image_categories = {
         'photo_of_photo': {'name': 'photo_of_photo', 'id': 2},
 }
 
+"""
+input dir: /shared2/bo_datasets/photo_tagging/sort
+annotations file: /shared2/object_detection/datasets/badoo/annotations/new/ann.json
+date: 12 May 2020
+
+object cat_id: 0, name: interface, annotations: 42539
+object cat_id: 1, name: contact_details, annotations: 16212
+object cat_id: 2, name: underwear, annotations: 17641
+object cat_id: 3, name: erotic, annotations: 22543
+object cat_id: 4, name: element_overlay, annotations: 42804
+object cat_id: 5, name: weapon, annotations: 36602
+object cat_id: 6, name: text_overlay, annotations: 43260
+object cat_id: 7, name: child, annotations: 61979
+object cat_id: 8, name: sex, annotations: 2427
+object cat_id: 9, name: violence, annotations: 1086
+object cat_id: 10, name: blood, annotations: 981
+object cat_id: 11, name: drugs, annotations: 1138
+object cat_id: 12, name: male_face, annotations: 149747
+object cat_id: 13, name: person, annotations: 232891
+object cat_id: 14, name: female_face, annotations: 103384
+object cat_id: 15, name: good_element_overlay, annotations: 24448
+object cat_id: 16, name: trash_element, annotations: 6007
+object cat_id: 17, name: hate_symbol, annotations: 3752
+object cat_id: 18, name: normal_text, annotations: 16616
+object cat_id: 19, name: naked_child, annotations: 2166
+object cat_id: 20, name: qr_code, annotations: 214
+whole image cat_id: 0, name: mirror_selfie, annotations: 14171
+whole image cat_id: 1, name: one_color_photo, annotations: 4988
+whole image cat_id: 2, name: photo_of_photo, annotations: 3326
+images: 287837, tags: 21
+"""
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--annotations_file', type=str, help='Path to store annotations json file')
