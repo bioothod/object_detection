@@ -338,8 +338,12 @@ def train():
             status = base_checkpoint.restore(FLAGS.base_checkpoint)
             status.expect_partial()
 
-            saved_path = manager.save()
-            logger.info("Restored base model from external checkpoint {} and saved object-based checkpoint {}".format(FLAGS.base_checkpoint, saved_path))
+            if hvd.rank() == 0:
+                saved_path = manager.save()
+                logger.info("Restored base model from external checkpoint {} and saved object-based checkpoint {}".format(FLAGS.base_checkpoint, saved_path))
+            else:
+                logger.info('Exiting because only hvd0 is saving the converted base checkpoint')
+
             exit(0)
 
     met = metric.ModelMetric(anchors_all, train_num_classes)
