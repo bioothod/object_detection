@@ -90,6 +90,7 @@ class EfnClassifier(tf.keras.layers.Layer):
         self.cls_score = tf.keras.layers.Conv2D(num_anchors * num_features,
                                                 kernel_size=3,
                                                 padding='same',
+                                                activation=activation,
                                                 bias_initializer=w_init)
 
     def call(self, inputs, training=True):
@@ -97,13 +98,8 @@ class EfnClassifier(tf.keras.layers.Layer):
         for conv in self.convs:
             x = conv(x, training=training)
 
-        x = self.cls_score(x)
-
         x = tf.clip_by_value(x, -1e10, 80)
-        if self.activation == 'softmax':
-            x = tf.nn.softmax(x, axis=-1)
-        elif self.activation == 'sigmoiod':
-            x = tf.nn.sigmoid(x)
+        x = self.cls_score(x)
 
         batch_size = tf.shape(inputs)[0]
         x = tf.reshape(x, [batch_size, -1, self.num_features])
@@ -121,9 +117,9 @@ class EfnDet(tf.keras.Model):
 
         self.body = EfnBody(params, model_name=f'efficientnet-b{d:d}', name='efn')
         self.neck = utils.BiFPN(self.config.bifpn_width, self.config.bifpn_depth, name='bifpn')
-        self.class_head = EfnClassifier(num_features=num_classes, width=self.config.bifpn_width, depth=self.config.bifpn_depth,
+        self.class_head = EfnClassifier(num_features=num_classes, width=self.config.bifpn_width, depth=self.config.class_depth,
                 num_anchors=num_anchors, activation=class_activation, name='class_head')
-        self.bb_head = EfnBB(width=self.config.bifpn_width, depth=self.config.bifpn_depth, num_anchors=num_anchors, name='bb_head')
+        self.bb_head = EfnBB(width=self.config.bifpn_width, depth=self.config.class_depth, num_anchors=num_anchors, name='bb_head')
 
         self.anchors_gen = [anchors.AnchorGenerator(
             size=self.anchors_config.sizes[i - 3],

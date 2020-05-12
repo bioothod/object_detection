@@ -27,12 +27,8 @@ class DetConfig:
         return self.base_conf.bifpn_depth + PHIs[self.d]
 
     @property
-    def dclass(self) -> int:
+    def class_depth(self) -> int:
         return self.base_conf.dclass + int(PHIs[self.d] / 3)
-
-    @property
-    def b(self) -> int:
-        return self.d
 
 class AnchorsConfig(typing.NamedTuple):
     sizes: typing.Sequence[int] = (32, 64, 128, 256, 512)
