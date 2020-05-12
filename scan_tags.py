@@ -176,22 +176,15 @@ if __name__ == '__main__':
     print_stats('object', annotations, categories)
     print_stats('whole image', image_annotations, image_categories)
 
-    images = list(images.values())
-    annotations = list(annotations.values())
-    image_annotations = list(image_annotations.values())
-    categories = list(categories.values())
-    image_categories = list(image_categories.values())
-
-
     output = {
-        'annotations': annotations,
-        'image_annotations': image_annotations,
-        'categories': categories,
-        'image_categories': image_categories,
-        'images': images,
+        'annotations': list(annotations.values()),
+        'image_annotations': list(image_annotations.values()),
+        'categories': list(categories.values()),
+        'image_categories': list(image_categories.values()),
+        'images': list(images.values()),
     }
 
-    print('images: {}, tags: {}'.format(len(images), len(categories)))
+    print('images: {}, categories: {}, image_categories: {}'.format(len(images), len(categories), len(image_categories)))
     if FLAGS.annotations_file:
         with open(FLAGS.annotations_file, 'w') as f:
             json.dump(output, f, indent=2)

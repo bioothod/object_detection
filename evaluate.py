@@ -71,6 +71,7 @@ def evaluate(model: tf.keras.Model,
                   for n, i in class2idx.items()]
     gt_coco['categories'] = categories
 
+    start_time = time.time()
     total_time = 0.
     num_images = 0
     i = 0
@@ -114,6 +115,11 @@ def evaluate(model: tf.keras.Model,
         i += 1
         if i == steps:
             break
+
+    total_time = time.time() - start_time
+    if num_images == 0:
+        logger.info('there are no validation images, returning 0 from evaluation')
+        return 0.
 
     logger.info('validated steps: {}, images: {}, perf: {:.1f}  img/s, time_per_image: {:.1f} ms'.format(
         i, num_images, num_images / total_time, total_time / num_images * 1000))

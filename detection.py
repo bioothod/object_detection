@@ -19,7 +19,6 @@ import autoaugment
 import config
 import encoder
 import evaluate
-import glob
 import image as image_draw
 import metric
 import preprocess_ssd
@@ -28,6 +27,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--category_json', type=str, required=True, help='Category to ID mapping json file.')
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch.')
 parser.add_argument('--eval_batch_size', type=int, default=128, help='Number of images to process in a batch.')
+parser.add_argument('--max_items_in_image', type=int, default=32, help='Limit number of true objects in image.')
 parser.add_argument('--num_epochs', type=int, default=1000, help='Number of epochs to run.')
 parser.add_argument('--epoch', type=int, default=0, help='Initial epoch\'s number')
 parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel preprocessing jobs.')
@@ -46,9 +46,11 @@ parser.add_argument('--min_eval_metric', default=0.2, type=float, help='Minimal 
 parser.add_argument('--epochs_lr_update', default=10, type=int, help='Maximum number of epochs without improvement used to reset or decrease learning rate')
 parser.add_argument('--reset_on_lr_update', action='store_true', help='Whether to reset to the best model after learning rate update')
 parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16 training/inference')
-parser.add_argument('--dataset_type', type=str, choices=['tfrecords'], default='tfrecords', help='Dataset type')
+parser.add_argument('--dataset_type', type=str, choices=['tfrecords', 'annotations'], default='tfrecords', help='Dataset type')
 parser.add_argument('--train_tfrecord_pattern', type=str, help='Training TFRecords pattern')
 parser.add_argument('--eval_tfrecord_pattern', type=str, help='Evaluation TFRecords pattern')
+parser.add_argument('--train_annotations_json', type=str, help='Training annotations pattern')
+parser.add_argument('--eval_annotations_json', type=str, help='Evaluation annotations pattern')
 parser.add_argument('--num_classes', type=int, help='Number of classes in the dataset')
 parser.add_argument('--train_num_images', type=int, default=-1, help='Number of images in train epoch')
 parser.add_argument('--eval_num_images', type=int, default=-1, help='Number of images in eval epoch')
@@ -60,25 +62,7 @@ parser.add_argument('--run_evaluation_first', action='store_true', help='Run eva
 parser.add_argument('--save_examples', type=int, default=-1, help='Save this number of example images')
 parser.add_argument('--class_activation', type=str, default='softmax', help='Classification activation function')
 
-def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, data_format):
-    features = tf.io.parse_single_example(serialized_example,
-            features={
-                'image_id': tf.io.FixedLenFeature([], tf.int64),
-                'filename': tf.io.FixedLenFeature([], tf.string),
-                'true_labels': tf.io.FixedLenFeature([], tf.string),
-                'true_bboxes': tf.io.FixedLenFeature([], tf.string),
-                'image': tf.io.FixedLenFeature([], tf.string),
-            })
-    filename = features['filename']
-
-    orig_bboxes = tf.io.decode_raw(features['true_bboxes'], tf.float32)
-    orig_bboxes = tf.reshape(orig_bboxes, [-1, 4])
-
-    orig_labels = tf.io.decode_raw(features['true_labels'], tf.int32)
-
-    image_id = features['image_id']
-    image = tf.image.decode_jpeg(features['image'], channels=3)
-
+def prepare_example(filename, image_id, image, orig_bboxes, orig_labels, image_size, num_classes, is_training, data_format):
     x0, y0, w, h = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
 
     orig_image_height = tf.cast(tf.shape(image)[0], tf.float32)
@@ -129,6 +113,32 @@ def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, da
 
     return filename, image_id, image, new_bboxes, new_labels
 
+def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, data_format):
+    features = tf.io.parse_single_example(serialized_example,
+            features={
+                'image_id': tf.io.FixedLenFeature([], tf.int64),
+                'filename': tf.io.FixedLenFeature([], tf.string),
+                'true_labels': tf.io.FixedLenFeature([], tf.string),
+                'true_bboxes': tf.io.FixedLenFeature([], tf.string),
+                'image': tf.io.FixedLenFeature([], tf.string),
+            })
+    filename = features['filename']
+
+    orig_bboxes = tf.io.decode_raw(features['true_bboxes'], tf.float32)
+    orig_bboxes = tf.reshape(orig_bboxes, [-1, 4])
+
+    orig_labels = tf.io.decode_raw(features['true_labels'], tf.int32)
+
+    image_id = features['image_id']
+    image = tf.image.decode_jpeg(features['image'], channels=3)
+
+    return prepare_example(filename, image_id, image, orig_bboxes, orig_labels, image_size, num_classes, is_training, data_format)
+
+def tf_read_image(filename, image_id, bboxes, labels, image_labels, image_size, num_classes, is_training, data_format):
+    image = tf.io.read_file(filename)
+    image = tf.io.decode_jpeg(image, channels=3)
+    return prepare_example(filename, image_id, image, bboxes, labels, image_size, num_classes, is_training, data_format)
+
 def calc_epoch_steps(num_files, batch_size):
     return (num_files + batch_size - 1) // batch_size
 
@@ -177,6 +187,32 @@ def generate_anchors(anchors_config: config.AnchorsConfig,
     anchors_all = [g((size, size, 3)) for g, size in zip(anchors_gen, shapes)]
 
     return tf.concat(anchors_all, axis=0)
+
+def filter_fn(filename, image_id, image, true_bboxes, true_labels):
+    index = tf.math.not_equal(true_labels, -1)
+    index = tf.cast(index, tf.int32)
+    index_sum = tf.reduce_sum(index)
+
+    return tf.math.logical_and(
+            tf.math.not_equal(index_sum, 0),
+            tf.math.not_equal(tf.shape(true_labels)[0], 0))
+
+def wrap_dataset(ds, image_size, is_training):
+    ds = ds.filter(filter_fn)
+
+    if is_training:
+        #ds = ds.shuffle(256)
+        batch_size = FLAGS.batch_size
+    else:
+        batch_size = FLAGS.eval_batch_size
+
+    ds = ds.padded_batch(batch_size=batch_size,
+            padded_shapes=((), (), (image_size, image_size, 3), (FLAGS.max_items_in_image, 4), (FLAGS.max_items_in_image,)),
+            padding_values=('', tf.constant(0, dtype=tf.int64), 0., -1., -1))
+
+    ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
+    return ds
+
 
 def train():
     checkpoint_dir = os.path.join(FLAGS.train_dir, 'checkpoints')
@@ -229,55 +265,39 @@ def train():
 
     anchors_all = generate_anchors(model.anchors_config, model.config.input_size)
 
-    def create_dataset_from_tfrecord(name, dataset_pattern, image_size, num_classes, is_training):
-        filenames = []
-        for fn in glob.glob(dataset_pattern):
-            if os.path.isfile(fn):
-                filenames.append(fn)
-
-        total_filenames = len(filenames)
-        if is_training and hvd.size() > 1 and len(filenames) > hvd.size():
-            filenames = np.array_split(filenames, hvd.size())[hvd.rank()]
-            np.random.seed(int.from_bytes(os.urandom(4), 'big'))
-            np.random.shuffle(filenames)
-
-        ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
-        ds = ds.map(lambda record: unpack_tfrecord(record,
-                        image_size, num_classes, is_training,
-                        FLAGS.data_format),
-                num_parallel_calls=FLAGS.num_cpus)
-
-        def filter_fn(filename, image_id, image, true_bboxes, true_labels):
-            index = tf.math.not_equal(true_labels, -1)
-            index = tf.cast(index, tf.int32)
-            index_sum = tf.reduce_sum(index)
-
-            return tf.math.logical_and(
-                    tf.math.not_equal(index_sum, 0),
-                    tf.math.not_equal(tf.shape(true_labels)[0], 0))
-
-        ds = ds.filter(filter_fn)
-
-        if is_training:
-            #ds = ds.shuffle(256)
-            batch_size = FLAGS.batch_size
-        else:
-            batch_size = FLAGS.eval_batch_size
-
-        ds = ds.padded_batch(batch_size=batch_size,
-                padded_shapes=((), (), (image_size, image_size, 3), (100, 4), (100,)),
-                padding_values=('', tf.constant(0, dtype=tf.int64), 0., -1., -1))
-
-        ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
-
-        logger.info('{} dataset has been created, tfrecords: {}/{}'.format(name, len(filenames), total_filenames))
-
-        return ds
-
     if FLAGS.dataset_type == 'tfrecords':
+        import glob
+
+        def create_dataset_from_tfrecord(name, dataset_pattern, image_size, num_classes, is_training):
+            filenames = []
+            for fn in glob.glob(dataset_pattern):
+                if os.path.isfile(fn):
+                    filenames.append(fn)
+
+            total_filenames = len(filenames)
+            if is_training and hvd.size() > 1 and len(filenames) > hvd.size():
+                filenames = np.array_split(filenames, hvd.size())[hvd.rank()]
+                np.random.seed(int.from_bytes(os.urandom(4), 'big'))
+                np.random.shuffle(filenames)
+
+            ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
+            ds = ds.map(lambda record: unpack_tfrecord(record,
+                            image_size, num_classes, is_training,
+                            FLAGS.data_format),
+                    num_parallel_calls=FLAGS.num_cpus)
+
+            ds = wrap_dataset(ds, image_size, is_training)
+
+            logger.info('{} dataset has been created, tfrecords: {}/{}'.format(name, len(filenames), total_filenames))
+            return ds
+
         train_num_images = FLAGS.train_num_images
         eval_num_images = FLAGS.eval_num_images
         train_num_classes = FLAGS.num_classes
+
+        if train_num_classes is None:
+            logger.error('If there is no train_num_classes (tfrecord dataset), you must provide --num_classes')
+            exit(-1)
 
         train_cat_names = {}
         for cname, cid in class2idx.items():
@@ -286,22 +306,95 @@ def train():
         train_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_pattern, image_size, train_num_classes, is_training=True)
         eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_pattern, image_size, train_num_classes, is_training=False)
 
+        steps_per_train_epoch = FLAGS.steps_per_train_epoch
+        if FLAGS.train_num_images > 0:
+            steps_per_train_epoch = calc_epoch_steps(FLAGS.train_num_images, FLAGS.batch_size)
+
+        steps_per_eval_epoch = FLAGS.steps_per_eval_epoch
+        if FLAGS.eval_num_images > 0:
+            steps_per_eval_epoch = calc_epoch_steps(FLAGS.eval_num_images, FLAGS.eval_batch_size)
+
+    elif FLAGS.dataset_type == 'annotations':
+        import batch
+
+        def gen(bg, num_images, is_training):
+            want_full = not is_training
+            yield_num_images = 0
+
+            for filename, image_id, anns, image_anns in zip(*bg.get(num=num_images, want_full=want_full)):
+                if yield_num_images == num_images:
+                    break
+
+                if not os.path.exists(filename):
+                    continue
+
+                bboxes = []
+                labels = []
+                image_labels = []
+
+                for ann in anns:
+                    bboxes.append(ann['bbox'])
+                    labels.append(ann['category_id'])
+
+                for ann in image_anns:
+                    image_labels.append(ann['category_id'])
+
+                if len(labels) == 0 and len(image_labels) == 0:
+                    continue
+
+                #logger.info('{}: bboxes: {}, labels: {}, image_labels: {}'.format(filename, len(bboxes), len(labels), len(image_labels)))
+                bboxes = np.array(bboxes, dtype=np.float32).reshape([len(bboxes), 4])
+                labels = np.array(labels, dtype=np.int32)
+                image_labels = np.array(image_labels, dtype=np.int32)
+
+                yield_num_images += 1
+                yield filename, image_id, bboxes, labels, image_labels
+
+        def create_dataset_from_annotations(name, ann_file, image_size, num_classes, num_images, is_training):
+            bg = batch.generator(ann_file)
+            if num_classes is None:
+                num_classes = bg.num_classes()
+
+            if num_images is None:
+                num_images = bg.num_images()
+
+            ds = tf.data.Dataset.from_generator(lambda: gen(bg, num_images, is_training),
+                                    output_types=(tf.string, tf.int64, tf.float32, tf.int32, tf.int32),
+                                    output_shapes=(tf.TensorShape([]), tf.TensorShape([]), tf.TensorShape([None, 4]), tf.TensorShape([None]), tf.TensorShape([None])))
+            ds = ds.map(lambda filename, image_id, bboxes, labels, image_labels:
+                            tf_read_image(filename, image_id, bboxes, labels, image_labels,
+                                image_size, num_classes, is_training, FLAGS.data_format),
+                        num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
+            ds = wrap_dataset(ds, image_size, is_training)
+
+            logger.info('{} dataset has been created, total images: {}, categories: {}, image_categories: {}'.format(name, bg.num_images(), bg.num_classes(), bg.num_image_classes()))
+            return ds, num_classes, num_images
+
+        def calc_num_images(num_images, steps_per_epoch, batch_size):
+            if num_images <= 0:
+                if steps_per_epoch > 0:
+                    num_images = steps_per_epoch * batch_size
+                else:
+                    num_images = None
+
+            return num_images
+
+        train_num_images = calc_num_images(FLAGS.train_num_images, FLAGS.steps_per_train_epoch, FLAGS.batch_size)
+        eval_num_images = calc_num_images(FLAGS.eval_num_images, FLAGS.steps_per_eval_epoch, FLAGS.batch_size)
+
+        train_dataset, train_num_classes, train_num_images = create_dataset_from_annotations('train', FLAGS.train_annotations_json, image_size,
+                num_classes=None, num_images=train_num_images, is_training=True)
+        eval_dataset, eval_num_classes, eval_num_images = create_dataset_from_annotations('eval', FLAGS.eval_annotations_json, image_size,
+                train_num_classes, num_images=eval_num_images, is_training=False)
+
+        steps_per_train_epoch = calc_epoch_steps(train_num_images, FLAGS.batch_size)
+        steps_per_eval_epoch = calc_epoch_steps(eval_num_images, FLAGS.eval_batch_size)
 
     if FLAGS.save_examples > 0:
         draw_bboxes(train_dataset, train_cat_names, anchors_all, FLAGS.save_examples)
         exit(0)
 
-    if train_num_classes is None:
-        logger.error('If there is no train_num_classes (tfrecord dataset), you must provide --num_classes')
-        exit(-1)
-
-    steps_per_train_epoch = FLAGS.steps_per_train_epoch
-    if FLAGS.train_num_images > 0:
-        steps_per_train_epoch = calc_epoch_steps(FLAGS.train_num_images, FLAGS.batch_size)
-
-    steps_per_eval_epoch = FLAGS.steps_per_eval_epoch
-    if FLAGS.eval_num_images > 0:
-        steps_per_eval_epoch = calc_epoch_steps(FLAGS.eval_num_images, FLAGS.eval_batch_size)
 
     logger.info('steps_per_train_epoch: {}, train images: {}, steps_per_eval_epoch: {}, eval images: {}'.format(
         steps_per_train_epoch, train_num_images,
