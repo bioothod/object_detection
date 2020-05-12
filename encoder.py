@@ -99,7 +99,7 @@ class EfnClassifier(tf.keras.layers.Layer):
 
         x = self.cls_score(x)
 
-        x = tf.clip_by_value(x, -1e10, 1e7)
+        x = tf.clip_by_value(x, -1e10, 80)
         if self.activation == 'softmax':
             x = tf.nn.softmax(x, axis=-1)
         elif self.activation == 'sigmoiod':
