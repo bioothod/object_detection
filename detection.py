@@ -60,6 +60,7 @@ parser.add_argument('--use_random_augmentation', action='store_true', help='Use 
 parser.add_argument('--only_test', action='store_true', help='Exist after running initial validation')
 parser.add_argument('--run_evaluation_first', action='store_true', help='Run evaluation before the first training epoch')
 parser.add_argument('--save_examples', type=int, default=-1, help='Save this number of example images')
+parser.add_argument('--train_echo_factor', type=int, default=1, help='Repeat augmented examples this many times in shuffle buffer before batching and training')
 parser.add_argument('--class_activation', type=str, default='softmax', help='Classification activation function')
 
 def prepare_example(filename, image_id, image, orig_bboxes, orig_labels, image_size, num_classes, is_training, data_format):
@@ -110,6 +111,9 @@ def prepare_example(filename, image_id, image, orig_bboxes, orig_labels, image_s
     xmax = xmaxf * image_size
     ymax = ymaxf * image_size
     new_bboxes = tf.concat([xmin, ymin, xmax, ymax], 1)
+
+    new_bboxes = new_bboxes[:FLAGS.max_items_in_image, ...]
+    new_labels = new_labels[:FLAGS.max_items_in_image]
 
     return filename, image_id, image, new_bboxes, new_labels
 
@@ -201,16 +205,20 @@ def wrap_dataset(ds, image_size, is_training):
     ds = ds.filter(filter_fn)
 
     if is_training:
-        #ds = ds.shuffle(256)
         batch_size = FLAGS.batch_size
+        if FLAGS.train_echo_factor > 1:
+            ds = ds.flat_map(lambda *t: tf.data.Dataset.from_tensors(t).repeat(FLAGS.train_echo_factor))
+        ds = ds.shuffle(256)
     else:
         batch_size = FLAGS.eval_batch_size
 
+    ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
     ds = ds.padded_batch(batch_size=batch_size,
             padded_shapes=((), (), (image_size, image_size, 3), (FLAGS.max_items_in_image, 4), (FLAGS.max_items_in_image,)),
             padding_values=('', tf.constant(0, dtype=tf.int64), 0., -1., -1))
 
-    ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).repeat()
+    ds = ds.repeat()
+
     return ds
 
 
@@ -342,8 +350,8 @@ def train():
                 if len(labels) == 0 and len(image_labels) == 0:
                     continue
 
-                if len(bboxes) > FLAGS.max_items_in_image:
-                    logger.info('{}: bboxes: {}, labels: {}, image_labels: {}'.format(filename, len(bboxes), len(labels), len(image_labels)))
+                #if len(bboxes) > FLAGS.max_items_in_image:
+                #    logger.info('{}: bboxes: {}, labels: {}, image_labels: {}'.format(filename, len(bboxes), len(labels), len(image_labels)))
 
                 bboxes = np.array(bboxes, dtype=np.float32).reshape([len(bboxes), 4])
                 labels = np.array(labels, dtype=np.int32)
