@@ -342,10 +342,16 @@ def train():
                 if len(labels) == 0 and len(image_labels) == 0:
                     continue
 
-                #logger.info('{}: bboxes: {}, labels: {}, image_labels: {}'.format(filename, len(bboxes), len(labels), len(image_labels)))
+                if len(bboxes) > FLAGS.max_items_in_image:
+                    logger.info('{}: bboxes: {}, labels: {}, image_labels: {}'.format(filename, len(bboxes), len(labels), len(image_labels)))
+
                 bboxes = np.array(bboxes, dtype=np.float32).reshape([len(bboxes), 4])
                 labels = np.array(labels, dtype=np.int32)
                 image_labels = np.array(image_labels, dtype=np.int32)
+
+                bboxes = bboxes[:FLAGS.max_items_in_image, ...]
+                labels = labels[:FLAGS.max_items_in_image]
+                image_labels = image_labels[:FLAGS.max_items_in_image]
 
                 yield_num_images += 1
                 yield filename, image_id, bboxes, labels, image_labels
