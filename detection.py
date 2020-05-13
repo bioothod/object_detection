@@ -510,6 +510,11 @@ def train():
             if step >= max_steps:
                 break
 
+        logger.info('{}: step: {}/{} {}: total_loss: {:.3f}, {}'.format(
+            epoch_var.numpy(), step, max_steps, global_step.numpy(),
+            total_loss, met.str_result(training=True)
+            ))
+
         if len(acc_gradients) > 0:
             opt.apply_gradients(zip(acc_gradients, model.trainable_variables))
             acc_gradients = []
