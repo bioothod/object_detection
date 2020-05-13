@@ -212,7 +212,7 @@ def run_inference(FLAGS):
     num_images = len(FLAGS.filenames)
 
     dtype = tf.float32
-    model = encoder.create_model(FLAGS.d, FLAGS.num_classes)
+    model = encoder.create_model(FLAGS.d, FLAGS.num_classes, class_activation=FLAGS.class_activation)
     image_size = model.config.input_size
 
     if FLAGS.checkpoint:
@@ -302,6 +302,7 @@ if __name__ == '__main__':
     parser.add_argument('--do_not_save_images', action='store_true', help='Do not save images with bounding boxes')
     parser.add_argument('--eval_tfrecord_dir', type=str, help='Directory containing evaluation TFRecords')
     parser.add_argument('--category_json', type=str, help='Category to ID mapping json file.')
+    parser.add_argument('--class_activation', type=str, default='softmax', help='Classification activation fuinction')
     parser.add_argument('--dataset_type', type=str, choices=['files', 'tfrecords', 'filelist'], default='files', help='Dataset type')
     parser.add_argument('filenames', type=str, nargs='*', help='Numeric label : file path')
     FLAGS = parser.parse_args()
