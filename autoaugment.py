@@ -39,31 +39,31 @@ def policy_v0():
     # (operation, probability, magnitude). Each element in policy is a
     # sub-policy that will be applied sequentially on the image.
     policy = [
-        [('Equalize', 0.8, 1), ('ShearY', 0.8, 4)],
+        #[('Equalize', 0.8, 1), ('ShearY', 0.8, 4)],
         [('Color', 0.4, 9), ('Equalize', 0.6, 3)],
-        [('Color', 0.4, 1), ('Rotate', 0.6, 8)],
+        #[('Color', 0.4, 1), ('Rotate', 0.6, 8)],
         [('Solarize', 0.8, 3), ('Equalize', 0.4, 7)],
         [('Solarize', 0.4, 2), ('Solarize', 0.6, 2)],
         [('Color', 0.2, 0), ('Equalize', 0.8, 8)],
         [('Equalize', 0.4, 8), ('SolarizeAdd', 0.8, 3)],
-        [('ShearX', 0.2, 9), ('Rotate', 0.6, 8)],
+        #[('ShearX', 0.2, 9), ('Rotate', 0.6, 8)],
         [('Color', 0.6, 1), ('Equalize', 1.0, 2)],
-        [('Invert', 0.4, 9), ('Rotate', 0.6, 0)],
-        [('Equalize', 1.0, 9), ('ShearY', 0.6, 3)],
+        #[('Invert', 0.4, 9), ('Rotate', 0.6, 0)],
+        #[('Equalize', 1.0, 9), ('ShearY', 0.6, 3)],
         [('Color', 0.4, 7), ('Equalize', 0.6, 0)],
         [('Posterize', 0.4, 6), ('AutoContrast', 0.4, 7)],
         [('Solarize', 0.6, 8), ('Color', 0.6, 9)],
-        [('Solarize', 0.2, 4), ('Rotate', 0.8, 9)],
-        [('Rotate', 1.0, 7), ('TranslateY', 0.8, 9)],
-        [('ShearX', 0.0, 0), ('Solarize', 0.8, 4)],
-        [('ShearY', 0.8, 0), ('Color', 0.6, 4)],
-        [('Color', 1.0, 0), ('Rotate', 0.6, 2)],
+        #[('Solarize', 0.2, 4), ('Rotate', 0.8, 9)],
+        #[('Rotate', 1.0, 7), ('TranslateY', 0.8, 9)],
+        #[('ShearX', 0.0, 0), ('Solarize', 0.8, 4)],
+        #[('ShearY', 0.8, 0), ('Color', 0.6, 4)],
+        #[('Color', 1.0, 0), ('Rotate', 0.6, 2)],
         [('Equalize', 0.8, 4), ('Equalize', 0.0, 8)],
         [('Equalize', 1.0, 4), ('AutoContrast', 0.6, 2)],
-        [('ShearY', 0.4, 7), ('SolarizeAdd', 0.6, 7)],
+        #[('ShearY', 0.4, 7), ('SolarizeAdd', 0.6, 7)],
         [('Posterize', 0.8, 2), ('Solarize', 0.6, 10)],
         [('Solarize', 0.6, 8), ('Equalize', 0.6, 1)],
-        [('Color', 0.8, 6), ('Rotate', 0.4, 5)],
+        #[('Color', 0.8, 6), ('Rotate', 0.4, 5)],
     ]
     return policy
 
@@ -458,7 +458,7 @@ def _randomly_negate_tensor(tensor):
     return final_tensor
 
 
-def _rotate_level_to_arg(level, max_angle):
+def _rotate_level_to_arg(level, max_angle=30):
     level = (level/_MAX_LEVEL) * float(max_angle)
     level = _randomly_negate_tensor(level)
     return (level,)
@@ -685,7 +685,7 @@ def distort_image_with_randaugment(image, num_layers, magnitude):
     available_ops = [
         'AutoContrast', 'Equalize', 'Invert', 'Posterize',
         'Solarize', 'Color', 'Contrast', 'Brightness', 'Sharpness',
-        'Cutout', 'SolarizeAdd']
+        'SolarizeAdd']
 
     for layer_num in range(num_layers):
         op_to_select = tf.random.uniform([], maxval=len(available_ops), dtype=tf.int32)
