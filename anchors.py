@@ -113,22 +113,15 @@ class AnchorGenerator(object):
     def __len__(self):
         return len(self.aspect_ratios) * len(self.anchor_scales)
 
-
-@tf.function(
-    input_signature=[tf.TensorSpec(shape=[None, 4], dtype=tf.float32),
-                     tf.TensorSpec(shape=[None, None, None, 3], dtype=tf.float32),
-                     tf.TensorSpec(shape=[None, None, 4], dtype=tf.float32),
-                     tf.TensorSpec(shape=[None, None], dtype=tf.int32),
-                     tf.TensorSpec(shape=None, dtype=tf.int32),
-                     tf.TensorSpec(shape=None, dtype=tf.float32),
-                     tf.TensorSpec(shape=None, dtype=tf.float32)])
+@tf.function
 def anchor_targets_bbox(anchors: tf.Tensor,
                         images: tf.Tensor,
                         bndboxes: tf.Tensor,
                         labels: tf.Tensor,
                         num_classes: int,
                         negative_overlap: float = 0.4,
-                        positive_overlap: float = 0.5) -> typing.Tuple[tf.Tensor, tf.Tensor]:
+                        positive_overlap: float = 0.5,
+                        dtype: tf.dtypes.DType = tf.float32) -> typing.Tuple[tf.Tensor, tf.Tensor]:
     """
     Generate anchor targets for bbox detection.
 
@@ -170,8 +163,8 @@ def anchor_targets_bbox(anchors: tf.Tensor,
     """
     im_shape = tf.shape(images)
     batch_size = im_shape[0]
-    h = tf.cast(im_shape[1], tf.float32)
-    w = tf.cast(im_shape[2], tf.float32)
+    h = tf.cast(im_shape[1], dtype)
+    w = tf.cast(im_shape[2], dtype)
 
     n_anchors = tf.shape(anchors)[0]
 
@@ -218,7 +211,6 @@ def anchor_targets_bbox(anchors: tf.Tensor,
     regression_per_anchor = tf.concat([regression_per_anchor, indices], axis=-1)
 
     return regression_per_anchor, labels_per_anchor
-
 
 def compute_gt_annotations(anchors: tf.Tensor,
                            annotations: tf.Tensor,
@@ -276,8 +268,7 @@ def compute_gt_annotations(anchors: tf.Tensor,
 
     # Assign ignored boxes
     ignore_indices = tf.greater(max_overlaps, negative_overlap)
-    ignore_indices = tf.logical_and(ignore_indices,
-                                    tf.logical_not(positive_indices))
+    ignore_indices = tf.logical_and(ignore_indices, tf.logical_not(positive_indices))
     ignore_indices = tf.logical_or(ignore_indices, tf.less(max_overlaps, 0.))
 
     return positive_indices, ignore_indices, batched_indices

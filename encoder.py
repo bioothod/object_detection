@@ -106,7 +106,7 @@ class EfnClassifier(tf.keras.layers.Layer):
         return x
 
 class EfnDet(tf.keras.Model):
-    def __init__(self, params, d, num_classes, class_activation='softmax', **kwargs):
+    def __init__(self, params, d, num_classes, class_activation='softmax', dtype: tf.dtypes.DType = tf.float32, **kwargs):
         super().__init__(**kwargs)
 
         self.num_classes = num_classes
@@ -116,7 +116,7 @@ class EfnDet(tf.keras.Model):
         num_anchors = 9
 
         self.body = EfnBody(params, model_name=f'efficientnet-b{d:d}', name='efn')
-        self.neck = utils.BiFPN(self.config.bifpn_width, self.config.bifpn_depth, name='bifpn')
+        self.neck = utils.BiFPN(self.config.bifpn_width, self.config.bifpn_depth, name='bifpn', dtype=dtype)
         self.class_head = EfnClassifier(num_features=num_classes, width=self.config.bifpn_width, depth=self.config.class_depth,
                 num_anchors=num_anchors, activation=class_activation, name='class_head')
         self.bb_head = EfnBB(width=self.config.bifpn_width, depth=self.config.class_depth, num_anchors=num_anchors, name='bb_head')
@@ -161,7 +161,7 @@ class EfnDet(tf.keras.Model):
 
         return boxes, scores, labels
 
-def create_model(d, num_classes, class_activation='softmax', name='efndet'):
+def create_model(d, num_classes, class_activation='softmax', name='efndet', dtype: tf.dtypes.DType = tf.float32):
     data_format='channels_last'
 
     if data_format == 'channels_first':
@@ -182,5 +182,5 @@ def create_model(d, num_classes, class_activation='softmax', name='efndet'):
 
     params = GlobalParams(**params)
 
-    model = EfnDet(params, d, num_classes, name=name, class_activation=class_activation)
+    model = EfnDet(params, d, num_classes, name=name, class_activation=class_activation, dtype=dtype)
     return model

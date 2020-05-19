@@ -85,11 +85,8 @@ def regress_bndboxes(boxes: tf.Tensor,
     tf.Tensor
         Regressed boxes
     """
-    boxes = tf.cast(boxes, tf.float32)
-    regressors = tf.cast(regressors, tf.float32)
-
-    mean = tf.constant([0., 0., 0., 0.], dtype=tf.float32)
-    std = tf.constant([0.2, 0.2, 0.2, 0.2], dtype=tf.float32)
+    mean = tf.constant([0., 0., 0., 0.], dtype=boxes.dtype)
+    std = tf.constant([0.2, 0.2, 0.2, 0.2], dtype=boxes.dtype)
 
     width  = boxes[:, :, 2] - boxes[:, :, 0]
     height = boxes[:, :, 3] - boxes[:, :, 1]
@@ -107,8 +104,8 @@ def clip_boxes(boxes: tf.Tensor,
     # TODO: Document this
     h, w = im_size
 
-    h = tf.cast(h - 1, tf.float32)
-    w = tf.cast(w - 1, tf.float32)
+    h = tf.cast(h - 1, boxes.dtype)
+    w = tf.cast(w - 1, boxes.dtype)
 
     x1 = tf.clip_by_value(boxes[:, :, 0], 0., w)
     y1 = tf.clip_by_value(boxes[:, :, 1], 0., h)
@@ -149,7 +146,6 @@ def nms(bboxes: tf.Tensor,
     batch_size = tf.shape(bboxes)[0]
     num_classes = tf.shape(class_scores)[-1]
 
-    bboxes = tf.cast(bboxes, tf.float32)
     x1, y1, x2, y2 = tf.split(bboxes, 4, axis=-1)
     bboxes = tf.stack([y1, x1, y2, x2], axis=-1)
     bboxes = tf.reshape(bboxes, [batch_size, -1, 4])
@@ -199,9 +195,9 @@ def nms(bboxes: tf.Tensor,
         c = tf.constant(0, dtype=tf.int32)
         written = tf.constant(0, dtype=tf.int32)
 
-        batch_bboxes = tf.TensorArray(tf.float32, size=0, dynamic_size=True, infer_shape=False)
-        batch_scores = tf.TensorArray(tf.float32, size=0, dynamic_size=True, infer_shape=False)
-        batch_labels = tf.TensorArray(tf.int32, size=0, dynamic_size=True, infer_shape=False)
+        batch_bboxes = tf.TensorArray(bboxes.dtype, size=0, dynamic_size=True, infer_shape=False)
+        batch_scores = tf.TensorArray(scores.dtype, size=0, dynamic_size=True, infer_shape=False)
+        batch_labels = tf.TensorArray(labels.dtype, size=0, dynamic_size=True, infer_shape=False)
 
         non_background_index = tf.where(scores_for_image > score_threshold)
         non_background_index = tf.squeeze(non_background_index, 1)
@@ -240,9 +236,9 @@ def nms(bboxes: tf.Tensor,
             best_scores = tf.pad(best_scores, [[0, to_add]], 'CONSTANT', constant_values=0)
             best_labels = tf.pad(best_labels, [[0, to_add]], 'CONSTANT', constant_values=0)
         else:
-            best_bboxes = tf.zeros((max_ret, 4), dtype=tf.float32)
-            best_scores = tf.zeros((max_ret,), dtype=tf.float32)
-            best_labels = tf.zeros((max_ret,), dtype=tf.int32)
+            best_bboxes = tf.zeros((max_ret, 4), dtype=bboxes.dtype)
+            best_scores = tf.zeros((max_ret,), dtype=scores.dtype)
+            best_labels = tf.zeros((max_ret,), dtype=labels.dtype)
 
         return best_bboxes, best_scores, best_labels
 
@@ -250,7 +246,7 @@ def nms(bboxes: tf.Tensor,
             parallel_iterations=1,
             back_prop=False,
             infer_shape=False,
-            dtype=(tf.float32, tf.float32, tf.int32))
+            dtype=(bboxes.dtype, scores.dtype, labels.dtype))
 
 def bbox_overlap(bboxes, gt_bboxes):
     """

@@ -3,6 +3,7 @@ import cv2
 import json
 import logging
 import os
+import re
 import sys
 
 import numpy as np
@@ -21,7 +22,7 @@ import encoder
 import evaluate
 import image as image_draw
 import metric
-import preprocess_ssd
+import preprocess
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--category_json', type=str, required=True, help='Category to ID mapping json file.')
@@ -56,12 +57,33 @@ parser.add_argument('--train_num_images', type=int, default=-1, help='Number of 
 parser.add_argument('--eval_num_images', type=int, default=-1, help='Number of images in eval epoch')
 parser.add_argument('--grad_accumulate_steps', type=int, default=1, help='Number of batches to accumulate before gradient update')
 parser.add_argument('--reg_loss_weight', type=float, default=0, help='L2 regularization weight')
-parser.add_argument('--use_random_augmentation', action='store_true', help='Use efficientnet random augmentation')
 parser.add_argument('--only_test', action='store_true', help='Exist after running initial validation')
 parser.add_argument('--run_evaluation_first', action='store_true', help='Run evaluation before the first training epoch')
-parser.add_argument('--save_examples', type=int, default=-1, help='Save this number of example images')
 parser.add_argument('--train_echo_factor', type=int, default=1, help='Repeat augmented examples this many times in shuffle buffer before batching and training')
 parser.add_argument('--class_activation', type=str, default='softmax', help='Classification activation function')
+parser.add_argument('--rotation_augmentation', type=int, default=-1, help='Angle for rotation augmentation')
+parser.add_argument('--use_augmentation', type=str, help='Use efficientnet random/v0/distort augmentation')
+parser.add_argument('--save_examples', type=int, default=0, help='Save this many train examples')
+
+def polygon2bbox(poly, want_yx=False, want_wh=False):
+    # polygon shape [N, 4, 2]
+
+    x = poly[..., 0]
+    y = poly[..., 1]
+
+    xmin = tf.math.reduce_min(x, axis=1, keepdims=True)
+    ymin = tf.math.reduce_min(y, axis=1, keepdims=True)
+    xmax = tf.math.reduce_max(x, axis=1, keepdims=True)
+    ymax = tf.math.reduce_max(y, axis=1, keepdims=True)
+
+    if want_yx:
+        bbox = tf.concat([ymin, xmin, ymax, xmax], 1)
+    elif want_wh:
+        bbox = tf.concat([xmin, ymin, xmax - xmin, ymax - ymin], 1)
+    else:
+        bbox = tf.concat([xmin, ymin, xmax, ymax], 1)
+
+    return bbox
 
 def prepare_example(filename, image_id, image, orig_bboxes, orig_labels, image_size, num_classes, is_training, data_format):
     x0, y0, w, h = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
@@ -82,42 +104,36 @@ def prepare_example(filename, image_id, image, orig_bboxes, orig_labels, image_s
     image_height = tf.cast(tf.shape(image)[0], tf.float32)
     image_width = tf.cast(tf.shape(image)[1], tf.float32)
 
-    xminf = x0 / image_width
-    xmaxf = (x0 + w) / image_width
-    yminf = y0 / image_height
-    ymaxf = (y0 + h) / image_height
+    dtype = image.dtype
 
-    coords_yx = tf.concat([yminf, xminf, ymaxf, xmaxf], axis=1)
+    p0 = tf.concat([x0, y0], 1)
+    p1 = tf.concat([x0+w, y0], 1)
+    p2 = tf.concat([x0+w, y0+h], 1)
+    p3 = tf.concat([x0, y0+h], 1)
+
+    word_poly = tf.stack([p0, p1, p2, p3], 1)
 
     if is_training:
-        if FLAGS.use_random_augmentation:
-            randaug_num_layers = 2
-            randaug_magnitude = 28
-
-            image = autoaugment.distort_image_with_randaugment(image, randaug_num_layers, randaug_magnitude)
-
-        image = tf.image.convert_image_dtype(image, tf.float32)
-        image, new_labels, new_bboxes = preprocess_ssd.preprocess_for_train(image, orig_labels, coords_yx,
-                [image_size, image_size], data_format=data_format)
-
-        yminf, xminf, ymaxf, xmaxf = tf.split(new_bboxes, num_or_size_splits=4, axis=1)
+        image, word_poly, new_labels = preprocess.preprocess_for_train(image, word_poly, orig_labels, FLAGS.rotation_augmentation, FLAGS.use_augmentation, dtype)
     else:
-        image = tf.image.convert_image_dtype(image, tf.float32)
-        image = preprocess_ssd.preprocess_for_eval(image, [image_size, image_size], data_format=data_format)
+        image = preprocess.preprocess_for_evaluation(image, dtype)
         new_labels = orig_labels
 
-    xmin = xminf * image_size
-    ymin = yminf * image_size
-    xmax = xmaxf * image_size
-    ymax = ymaxf * image_size
-    new_bboxes = tf.concat([xmin, ymin, xmax, ymax], 1)
+    current_image_size = tf.cast(tf.shape(image)[1], tf.float32)
+    image = tf.image.resize(image, [image_size, image_size])
+    image = tf.cast(image, dtype)
+
+    word_poly = word_poly / current_image_size * image_size
+    word_poly = tf.cast(word_poly, dtype)
+
+    new_bboxes = polygon2bbox(word_poly)
 
     new_bboxes = new_bboxes[:FLAGS.max_items_in_image, ...]
     new_labels = new_labels[:FLAGS.max_items_in_image]
 
     return filename, image_id, image, new_bboxes, new_labels
 
-def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, data_format):
+def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, data_format, dtype):
     features = tf.io.parse_single_example(serialized_example,
             features={
                 'image_id': tf.io.FixedLenFeature([], tf.int64),
@@ -135,47 +151,45 @@ def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, da
 
     image_id = features['image_id']
     image = tf.image.decode_jpeg(features['image'], channels=3)
+    image = tf.cast(image, dtype)
 
     return prepare_example(filename, image_id, image, orig_bboxes, orig_labels, image_size, num_classes, is_training, data_format)
 
-def tf_read_image(filename, image_id, bboxes, labels, image_labels, image_size, num_classes, is_training, data_format):
+def tf_read_image(filename, image_id, bboxes, labels, image_labels, image_size, num_classes, is_training, data_format, dtype):
     image = tf.io.read_file(filename)
     image = tf.io.decode_jpeg(image, channels=3)
+    image = tf.cast(image, dtype)
     return prepare_example(filename, image_id, image, bboxes, labels, image_size, num_classes, is_training, data_format)
 
 def calc_epoch_steps(num_files, batch_size):
     return (num_files + batch_size - 1) // batch_size
 
-def draw_bboxes(train_dataset, train_cat_names, all_anchors, num_images):
+def draw_bboxes(dataset, cat_names, num_examples):
     data_dir = os.path.join(FLAGS.train_dir, 'tmp')
     os.makedirs(data_dir, exist_ok=True)
 
-    all_anchors = all_anchors.numpy()
-
-    for filename, image_id, image, true_bboxes, true_labels in train_dataset.unbatch().take(num_images):
+    for filename, image_id, image, true_bboxes, true_labels in dataset.unbatch().take(num_examples):
         filename = str(filename.numpy(), 'utf8')
+        filename_base = os.path.basename(filename)
+        filename_base = os.path.splitext(filename_base)[0]
 
-        dst = '{}/{}.png'.format(data_dir, image_id.numpy())
+        dst = os.path.join(data_dir, filename_base) + '.png'
 
-        non_background_index = tf.where(true_labels != -1)
+        image = image.numpy()
+        image = image * 128 + 128
+        image = image.astype(np.uint8)
 
-        bboxes = tf.gather(true_bboxes, non_background_index)
-        bboxes = tf.squeeze(bboxes, 1)
-        labels = tf.gather(true_labels, non_background_index)
-        labels = tf.squeeze(labels, 1)
-
-        bboxes = bboxes.numpy()
-        labels = labels.numpy()
+        true_bboxes = true_bboxes.numpy()
+        true_labels = true_labels.numpy()
 
         new_anns = []
-        for bb, l in zip(bboxes, labels):
-            new_anns.append((bb, None, l))
+        for bb, label in zip(true_bboxes, true_labels):
+            if label == -1:
+                continue
 
-        image = preprocess_ssd.denormalize_image(image)
-        image = tf.image.convert_image_dtype(image, tf.uint8)
+            new_anns.append((bb, None, label))
 
-        image = image.numpy().astype(np.uint8)
-        image_draw.draw_im(image, new_anns, dst, train_cat_names)
+        image_draw.draw_im(image, new_anns, dst, cat_names)
 
 def generate_anchors(anchors_config: config.AnchorsConfig,
                      im_shape: int) -> tf.Tensor:
@@ -201,7 +215,7 @@ def filter_fn(filename, image_id, image, true_bboxes, true_labels):
             tf.math.not_equal(index_sum, 0),
             tf.math.not_equal(tf.shape(true_labels)[0], 0))
 
-def wrap_dataset(ds, image_size, is_training):
+def wrap_dataset(ds, image_size, dtype, is_training):
     ds = ds.filter(filter_fn)
 
     if is_training:
@@ -212,10 +226,12 @@ def wrap_dataset(ds, image_size, is_training):
     else:
         batch_size = FLAGS.eval_batch_size
 
+    pad_value = tf.constant(1, dtype=dtype)
+
     ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
     ds = ds.padded_batch(batch_size=batch_size,
             padded_shapes=((), (), (image_size, image_size, 3), (FLAGS.max_items_in_image, 4), (FLAGS.max_items_in_image,)),
-            padding_values=('', tf.constant(0, dtype=tf.int64), 0., -1., -1))
+            padding_values=('', tf.constant(0, dtype=tf.int64), 0*pad_value, -1*pad_value, -1))
 
     ds = ds.repeat()
 
@@ -268,7 +284,7 @@ def train():
     epoch_var = tf.Variable(0, dtype=tf.int64, name='epoch_number', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
     learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
 
-    model = encoder.create_model(FLAGS.d, FLAGS.num_classes, class_activation=FLAGS.class_activation)
+    model = encoder.create_model(FLAGS.d, FLAGS.num_classes, class_activation=FLAGS.class_activation, dtype=dtype)
     image_size = model.config.input_size
 
     anchors_all = generate_anchors(model.anchors_config, model.config.input_size)
@@ -291,10 +307,10 @@ def train():
             ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
             ds = ds.map(lambda record: unpack_tfrecord(record,
                             image_size, num_classes, is_training,
-                            FLAGS.data_format),
+                            FLAGS.data_format, dtype),
                     num_parallel_calls=FLAGS.num_cpus)
 
-            ds = wrap_dataset(ds, image_size, is_training)
+            ds = wrap_dataset(ds, image_size, dtype, is_training)
 
             logger.info('{} dataset has been created, tfrecords: {}/{}'.format(name, len(filenames), total_filenames))
             return ds
@@ -377,10 +393,10 @@ def train():
                                     output_shapes=(tf.TensorShape([]), tf.TensorShape([]), tf.TensorShape([None, 4]), tf.TensorShape([None]), tf.TensorShape([None])))
             ds = ds.map(lambda filename, image_id, bboxes, labels, image_labels:
                             tf_read_image(filename, image_id, bboxes, labels, image_labels,
-                                image_size, num_classes, is_training, FLAGS.data_format),
+                                image_size, num_classes, is_training, FLAGS.data_format, dtype),
                         num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
-            ds = wrap_dataset(ds, image_size, is_training)
+            ds = wrap_dataset(ds, image_size, dtype, is_training)
 
             logger.info('{} dataset has been created, total images: {}, categories: {}, image_categories: {}'.format(name, bg.num_images(), bg.num_classes(), bg.num_image_classes()))
             return ds, num_classes, num_images
@@ -406,7 +422,7 @@ def train():
         steps_per_eval_epoch = calc_epoch_steps(eval_num_images, FLAGS.eval_batch_size)
 
     if FLAGS.save_examples > 0:
-        draw_bboxes(train_dataset, train_cat_names, anchors_all, FLAGS.save_examples)
+        draw_bboxes(train_dataset, train_cat_names, FLAGS.save_examples)
         exit(0)
 
 
@@ -414,6 +430,7 @@ def train():
         steps_per_train_epoch, train_num_images,
         steps_per_eval_epoch, eval_num_images))
 
+    #opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
     opt = tfa.optimizers.RectifiedAdam(lr=learning_rate, min_lr=FLAGS.min_learning_rate)
     opt = tfa.optimizers.Lookahead(opt, sync_period=6, slow_step_size=0.5)
     if FLAGS.use_fp16:
@@ -422,17 +439,17 @@ def train():
     checkpoint = tf.train.Checkpoint(step=global_step, optimizer=opt, model=model, epoch=epoch_var)
     manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=20)
 
-    status = checkpoint.restore(manager.latest_checkpoint)
-
     restore_path = None
     if FLAGS.use_good_checkpoint:
         restore_path = tf.train.latest_checkpoint(good_checkpoint_dir)
         if restore_path:
             status = checkpoint.restore(restore_path)
+            epoch_var.assign_add(1)
             logger.info("Restored from good checkpoint {}, global step: {}".format(restore_path, global_step.numpy()))
 
     if not restore_path:
         status = checkpoint.restore(manager.latest_checkpoint)
+        epoch_var.assign_add(1)
 
         if manager.latest_checkpoint:
             logger.info("Restored from {}, global step: {}, epoch: {}".format(manager.latest_checkpoint, global_step.numpy(), epoch_var.numpy()))
@@ -464,7 +481,11 @@ def train():
             total_loss = dist_loss + class_loss
 
             if FLAGS.reg_loss_weight != 0:
-                l2_loss = FLAGS.reg_loss_weight * sum([tf.reduce_sum(tf.pow(w, 2)) for w in model.trainable_variables if 'bias' not in w.name and 'norm' not in w.name])
+                regex = r'.*(kernel|weight):0$'
+                var_match = re.compile(regex)
+
+                l2_loss = FLAGS.reg_loss_weight * tf.add_n([tf.nn.l2_loss(v) for v in model.trainable_variables if var_match.match(v.name)])
+
                 met.train_metric.reg_loss.update_state(l2_loss)
 
                 total_loss += l2_loss

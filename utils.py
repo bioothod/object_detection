@@ -14,24 +14,6 @@ def num_params_flops(variables, readable_format=True):
     flops = float(flops) * 1e-9
   return nparams, flops
 
-def normalize_image(image: tf.Tensor) -> tf.Tensor:
-    """
-    Normalize the image according imagenet mean and std
-
-    Parameters
-    ----------
-    image: tf.Tensor of shape [H, W, C]
-        Image in [0, 1] range
-    
-    Returns
-    -------
-    tf.Tensor
-        Normalized image
-    """
-    mean = tf.constant([0.485, 0.456, 0.406])
-    std = tf.constant([0.229, 0.224, 0.225])
-    return (image - mean) / std
-
 class Resize(tf.keras.layers.Layer):
     def __init__(self, features: int, **kwargs):
         super().__init__()
@@ -80,13 +62,14 @@ class ConvBlock(tf.keras.layers.Layer):
 EPSILON = 1e-8
 
 class FastFusion(tf.keras.layers.Layer):
-    def __init__(self, size: int, features: int):
+    def __init__(self, size: int, features: int, dtype: tf.dtypes.DType = tf.float32):
         super(FastFusion, self).__init__()
 
         self.size = size
         w_init = tf.keras.initializers.constant(1. / size)
         self.w = tf.Variable(name='w',
-                             initial_value=w_init(shape=(size,)),
+                             initial_value=tf.cast(w_init(shape=(size,)), dtype=dtype),
+                             dtype=dtype,
                              trainable=True)
         self.relu = tf.keras.layers.Activation('relu')
 
@@ -125,22 +108,22 @@ class FastFusion(tf.keras.layers.Layer):
 
 class BiFPNBlock(tf.keras.Model):
 
-    def __init__(self, features: int, **kwargs: dict):
+    def __init__(self, features: int, dtype: tf.dtypes.DType = tf.float32, **kwargs: dict):
         super().__init__(**kwargs)
 
         # Feature fusion for intermediate level
         # ff stands for Feature fusion
         # td refers to intermediate level
-        self.ff_6_td = FastFusion(2, features)
-        self.ff_5_td = FastFusion(2, features)
-        self.ff_4_td = FastFusion(2, features)
+        self.ff_6_td = FastFusion(2, features, dtype=dtype)
+        self.ff_5_td = FastFusion(2, features, dtype=dtype)
+        self.ff_4_td = FastFusion(2, features, dtype=dtype)
 
         # Feature fusion for output
-        self.ff_7_out = FastFusion(2, features)
-        self.ff_6_out = FastFusion(3, features)
-        self.ff_5_out = FastFusion(3, features)
-        self.ff_4_out = FastFusion(3, features)
-        self.ff_3_out = FastFusion(2, features)
+        self.ff_7_out = FastFusion(2, features, dtype=dtype)
+        self.ff_6_out = FastFusion(3, features, dtype=dtype)
+        self.ff_5_out = FastFusion(3, features, dtype=dtype)
+        self.ff_4_out = FastFusion(3, features, dtype=dtype)
+        self.ff_3_out = FastFusion(2, features, dtype=dtype)
 
     def call(self,
              features: typing.Sequence[tf.Tensor],
@@ -175,7 +158,7 @@ class BiFPNBlock(tf.keras.Model):
 
 class BiFPN(tf.keras.Model):
 
-    def __init__(self, features: int = 64, n_blocks: int = 3, **kwargs: dict):
+    def __init__(self, features: int = 64, n_blocks: int = 3, dtype: tf.dtypes.DType = tf.float32, **kwargs: dict):
         super(BiFPN, self).__init__(**kwargs)
 
         # One pixel-wise for each feature comming from the
@@ -194,7 +177,7 @@ class BiFPN(tf.keras.Model):
                                 strides=2,
                                 padding='same')
 
-        self.blocks = [BiFPNBlock(features) for i in range(n_blocks)]
+        self.blocks = [BiFPNBlock(features, dtype=dtype) for i in range(n_blocks)]
 
     def call(self,
              inputs: typing.Sequence[tf.Tensor],

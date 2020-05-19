@@ -8,17 +8,19 @@ logger = logging.getLogger('detection')
 
 def focal_loss(y_true: tf.Tensor,
                y_pred: tf.Tensor,
-               gamma: int = 1.5,
+               gamma: float = 1.5,
                alpha: float = 0.25,
                from_logits: bool = False,
                reduction: str = 'sum'):
+
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
 
     if from_logits:
         y_pred = tf.nn.softmax(y_pred)
 
     epsilon = 1e-6
     y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
-    y_true = tf.cast(y_true, tf.float32)
 
     alpha = tf.ones_like(y_true) * alpha
     alpha = tf.where(tf.equal(y_true, 1.), alpha, 1 - alpha)
@@ -67,12 +69,14 @@ class Metric:
 
 class ModelMetric:
     def __init__(self,
-                 anchors: tf.Tensor,
+                 all_anchors: tf.Tensor,
                  num_classes: int,
+                 dtype: tf.dtypes.DType = tf.float32,
                  **kwargs):
 
-        self.anchors = anchors
+        self.all_anchors = all_anchors
         self.num_classes = num_classes
+        self.dtype = dtype
 
         self.train_metric = Metric(training=True, name='train_metric')
 
@@ -85,7 +89,7 @@ class ModelMetric:
         self.train_metric.reset_states()
 
     def __call__(self, images, true_bboxes, true_labels, pred_bboxes, pred_scores, training):
-        true_bboxes, true_labels = anchors.anchor_targets_bbox(self.anchors, images, true_bboxes, true_labels, self.num_classes)
+        true_bboxes, true_labels = anchors.anchor_targets_bbox(self.all_anchors, images, true_bboxes, true_labels, self.num_classes, dtype=self.dtype)
 
         y_shape = tf.shape(true_labels)
         batch = y_shape[0]
