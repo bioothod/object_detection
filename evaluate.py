@@ -58,6 +58,9 @@ def _COCO_gt_annot(image_id: int,
 def evaluate(model: tf.keras.Model,
              dataset: tf.data.Dataset,
              class2idx: typing.Mapping[str, int],
+             anchors_all: tf.Tensor,
+             output_xy_grids: tf.Tensor,
+             output_ratios: tf.Tensor,
              steps: int,
              print_every: int = 10):
 
@@ -76,15 +79,52 @@ def evaluate(model: tf.keras.Model,
     num_images = 0
     i = 0
 
-    for filenames, image_ids, images, true_bboxes, true_labels in dataset:
+    for filenames, image_ids, images, true_values in dataset:
         inference_start = time.time()
-        bboxes, scores, categories = model(images, training=False)
+        logits = model(images, training=False)
         h, w = images.shape[1: 3]
+
+        true_values = true_values.numpy()
 
         # Iterate through images in batch, and for each one
         # create the ground truth coco annotation
 
-        for batch_idx in range(len(bboxes)):
+        for batch_idx in range(true_values.shape[0]):
+            val = true_values[batch_idx, ...]
+
+            non_background_index = np.where(val[..., 4] != 0)[0]
+
+            bboxes = val[non_background_index, 0:4]
+            true_labels = val[non_background_index, 5:]
+            true_labels = np.argmax(true_labels, axis=1)
+
+            anchors = anchors_all[non_background_index, :]
+            grid_xy = output_xy_grids[non_background_index, :]
+            ratios = output_ratios[non_background_index]
+
+            cx, cy, w, h = np.split(bboxes, 4, axis=1)
+            cx = np.squeeze(cx)
+            cy = np.squeeze(cy)
+            w = np.squeeze(w)
+            h = np.squeeze(h)
+
+            #logger.info('bboxes: {}, grid_xy: {}, anchors: {}, ratios: {}'.format(bboxes, grid_xy, anchors, ratios))
+            #logger.info('cx: {}, cy: {}, w: {}, h: {}'.format(cx, cy, w, h))
+
+            cx = (cx + grid_xy[:, 0]) * ratios
+            cy = (cy + grid_xy[:, 1]) * ratios
+
+            #logger.info('cx: {}, anchors: {}'.format(cx, anchors))
+            w = np.power(np.math.e, w) * anchors[:, 2]
+            h = np.power(np.math.e, h) * anchors[:, 3]
+
+            x0 = cx - w/2
+            x1 = cx + w/2
+            y0 = cy - h/2
+            y1 = cy + h/2
+
+            true_bboxes = np.stack([x0, y0, x1, y1], axis=1)
+
             gt_labels, gt_boxes = true_labels[batch_idx], true_bboxes[batch_idx]
             no_padding_mask = gt_labels != -1
 

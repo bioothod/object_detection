@@ -1,23 +1,16 @@
 import collections
 import logging
-import math
-import typing
 
 import tensorflow as tf
 
-import anchors
-import bndbox
-import config
 import efficientnet as efn
-import utils
 
 logger = logging.getLogger('detection')
 
 GlobalParams = collections.namedtuple('GlobalParams', [
     'batch_norm_momentum', 'batch_norm_epsilon', 'data_format',
     'relu_fn',
-    'l2_reg_weight', 'spatial_dims', 'channel_axis',
-    'd'
+    'l2_reg_weight', 'spatial_dims', 'channel_axis', 'model_name'
 ])
 
 GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
@@ -25,8 +18,10 @@ def local_swish(x):
     return x * tf.nn.sigmoid(x)
 
 class EfnBody(tf.keras.layers.Layer):
-    def __init__(self, params, model_name, **kwargs):
+    def __init__(self, params, **kwargs):
         super(EfnBody, self).__init__(**kwargs)
+
+        self.image_size = efn.efficientnet_params(params.model_name)[2]
 
         efn_param_keys = efn.GlobalParams._fields
         efn_params = {}
@@ -34,14 +29,15 @@ class EfnBody(tf.keras.layers.Layer):
             if k in efn_param_keys:
                 efn_params[k] = v
 
-        self.base_model = efn.build_model(model_name, override_params=efn_params)
+        self.base_model = efn.build_model(model_name=params.model_name, override_params=efn_params)
 
-        self.reduction_indexes = [1, 2, 3, 4, 5]
+        self.reduction_indexes = [3, 4, 5]
 
     def call(self, inputs, training=True):
         self.endpoints = []
 
         outputs = self.base_model(inputs, training=training, features_only=True)
+
 
         for reduction_idx in self.reduction_indexes:
             endpoint = self.base_model.endpoints['reduction_{}'.format(reduction_idx)]
@@ -49,119 +45,173 @@ class EfnBody(tf.keras.layers.Layer):
 
         return self.endpoints
 
-class EfnBB(tf.keras.layers.Layer):
-    def __init__(self, width, depth, num_anchors, **kwargs):
-        super().__init__(**kwargs)
+class DarknetConv(tf.keras.layers.Layer):
+    def __init__(self, params, num_features, kernel_size=(3, 3), strides=(1, 1), padding='SAME', **kwargs):
+        super(DarknetConv, self).__init__(**kwargs)
+        self.num_features = num_features
+        self.kernel_size = kernel_size
+        self.strides = strides
+        self.padding = padding
 
-        self.convs = []
-        for i in range(depth):
-            conv = utils.ConvBlock(features=width, kernel_size=3, activation='swish', padding='same')
-            self.convs.append(conv)
+        self.conv = tf.keras.layers.Conv2D(
+                self.num_features,
+                kernel_size=self.kernel_size,
+                strides=self.strides,
+                data_format=params.data_format,
+                use_bias=False,
+                padding=self.padding,
+                kernel_initializer='glorot_uniform')
 
-        self.bbox_regression = tf.keras.layers.Conv2D(num_anchors*4,
-                                                      kernel_size=3,
-                                                      padding='same')
+        self.bn = tf.keras.layers.BatchNormalization(
+            axis=params.channel_axis,
+            momentum=params.batch_norm_momentum,
+            epsilon=params.batch_norm_epsilon)
 
-    def call(self, inputs, training=True):
-        x = inputs
-        for conv in self.convs:
-            x = conv(x, training=training)
-
-        x = self.bbox_regression(x)
-
-        batch_size = tf.shape(inputs)[0]
-        x = tf.reshape(x, [batch_size, -1, 4])
+    def call(self, inputs, training):
+        x = self.conv(inputs)
+        x = self.bn(x, training)
+        x = tf.nn.leaky_relu(x, alpha=0.1)
         return x
 
-class EfnClassifier(tf.keras.layers.Layer):
-    def __init__(self, num_features, width, depth, num_anchors, activation='softmax', **kwargs):
-        super().__init__(**kwargs)
+class DarknetConv5(tf.keras.layers.Layer):
+    def __init__(self, params, filters, **kwargs):
+        super(DarknetConv5, self).__init__(**kwargs)
+
+        self.conv0 = DarknetConv(params, filters[0], kernel_size=(1, 1), strides=(1, 1), padding='SAME')
+        self.conv1 = DarknetConv(params, filters[1], kernel_size=(3, 3), strides=(1, 1), padding='SAME')
+        self.conv2 = DarknetConv(params, filters[2], kernel_size=(1, 1), strides=(1, 1), padding='SAME')
+        self.conv3 = DarknetConv(params, filters[3], kernel_size=(3, 3), strides=(1, 1), padding='SAME')
+        self.conv4 = DarknetConv(params, filters[4], kernel_size=(1, 1), strides=(1, 1), padding='SAME')
+
+    def call(self, input_tensor, training):
+        x = self.conv0(input_tensor, training)
+        x = self.conv1(x, training)
+        x = self.conv2(x, training)
+        x = self.conv3(x, training)
+        x = self.conv4(x, training)
+        return x
+
+class DarknetConv2(tf.keras.layers.Layer):
+    def __init__(self, params, filters, **kwargs):
+        super(DarknetConv2, self).__init__(**kwargs)
+
+        self.conv0 = DarknetConv(params, filters[0], kernel_size=(3, 3), strides=(1, 1), padding='SAME')
+        self.conv1 = tf.keras.layers.Conv2D(
+                filters[1],
+                kernel_size=(1, 1),
+                strides=(1, 1),
+                data_format=params.data_format,
+                use_bias=True,
+                padding='SAME',
+                kernel_initializer='glorot_uniform')
+
+    def call(self, input_tensor, training):
+        x = self.conv0(input_tensor, training)
+        x = self.conv1(x)
+        return x
+
+class DarknetUpsampling(tf.keras.layers.Layer):
+    def __init__(self, params, num_features, **kwargs):
+        super(DarknetUpsampling, self).__init__(**kwargs)
 
         self.num_features = num_features
-        self.activation = activation
+        self.conv = DarknetConv(params, num_features, kernel_size=(1, 1), strides=(1, 1), padding='SAME')
+        self.upsampling = tf.keras.layers.UpSampling2D(2)
 
-        self.convs = []
-        for i in range(depth):
-            conv = utils.ConvBlock(features=width, kernel_size=3, activation='swish', padding='same')
-            self.convs.append(conv)
-
-        prob = 0.01
-        w_init = tf.constant_initializer(-math.log((1 - prob) / prob))
-        self.cls_score = tf.keras.layers.Conv2D(num_anchors * num_features,
-                                                kernel_size=3,
-                                                padding='same',
-                                                activation=activation,
-                                                bias_initializer=w_init)
-
-    def call(self, inputs, training=True):
-        x = inputs
-        for conv in self.convs:
-            x = conv(x, training=training)
-
-        x = tf.clip_by_value(x, -1e10, 80)
-        x = self.cls_score(x)
-
-        batch_size = tf.shape(inputs)[0]
-        x = tf.reshape(x, [batch_size, -1, self.num_features])
+    def call(self, inputs, training):
+        x = self.conv(inputs, training)
+        x = self.upsampling(x)
         return x
 
-class EfnDet(tf.keras.Model):
-    def __init__(self, params, d, num_classes, class_activation='softmax', dtype: tf.dtypes.DType = tf.float32, **kwargs):
-        super().__init__(**kwargs)
+
+class EfnHead(tf.keras.layers.Layer):
+    def __init__(self, params, num_classes, **kwargs):
+        super(EfnHead, self).__init__(**kwargs)
+
+        num_features = 3 * (num_classes + 1 + 4)
+
+        self.stage2_conv5 = DarknetConv5(params, [512, 1024, 512, 1024, 512])
+        self.stage2_conv2 = DarknetConv2(params, [1024, num_features], name="detection_layer_1")
+        self.stage2_upsampling = DarknetUpsampling(params, 256)
+
+        self.stage1_conv5 = DarknetConv5(params, [256, 512, 256, 512, 256])
+        self.stage1_conv2 = DarknetConv2(params, [512, num_features], name="detection_layer_2")
+        self.stage1_upsampling = DarknetUpsampling(params, 128)
+
+        self.stage0_conv5 = DarknetConv5(params, [128, 256, 128, 256, 128])
+        self.stage0_conv2 = DarknetConv2(params, [256, num_features], name="detection_layer_3")
+
+        self.pads = [None]
+        for pad in [1, 2, 3, 4, 5, 6]:
+            self.pads.append(tf.keras.layers.ZeroPadding2D(((0, pad), (0, pad))))
+
+    def call(self, stage0_in, stage1_in, stage2_in, training=True):
+        x = self.stage2_conv5(stage2_in, training)
+        stage2_output = self.stage2_conv2(x, training)
+
+        x = self.stage2_upsampling(x, training)
+
+        diff = x.shape[1] - stage1_in.shape[1]
+        if diff > 0:
+            stage1_in = self.pads[diff](stage1_in)
+        if diff < 0:
+            x = self.pads[-diff](x)
+
+        x = tf.keras.layers.concatenate([x, stage1_in])
+        x = self.stage1_conv5(x, training)
+        stage1_output = self.stage1_conv2(x, training)
+
+        x = self.stage1_upsampling(x, training)
+
+        diff = x.shape[1] - stage0_in.shape[1]
+        if diff > 0:
+            stage0_in = self.pads[diff](stage0_in)
+        if diff < 0:
+            x = self.pads[-diff](x)
+
+        x = tf.keras.layers.concatenate([x, stage0_in])
+        x = self.stage0_conv5(x, training)
+        stage0_output = self.stage0_conv2(x, training)
+
+        return stage2_output, stage1_output, stage0_output
+
+class EfnYolo(tf.keras.Model):
+    def __init__(self, params, num_classes, **kwargs):
+        super(EfnYolo, self).__init__(**kwargs)
 
         self.num_classes = num_classes
 
-        self.config = config.DetConfig(d=d)
-        self.anchors_config = config.AnchorsConfig()
-        num_anchors = 9
+        self.body = EfnBody(params, name='body')
+        self.head = EfnHead(params, num_classes, name='head')
 
-        self.body = EfnBody(params, model_name=f'efficientnet-b{d:d}', name='efn')
-        self.neck = utils.BiFPN(self.config.bifpn_width, self.config.bifpn_depth, name='bifpn', dtype=dtype)
-        self.class_head = EfnClassifier(num_features=num_classes, width=self.config.bifpn_width, depth=self.config.class_depth,
-                num_anchors=num_anchors, activation=class_activation, name='class_head')
-        self.bb_head = EfnBB(width=self.config.bifpn_width, depth=self.config.class_depth, num_anchors=num_anchors, name='bb_head')
+        self.image_size = self.body.image_size
+        os = {
+                'efficientnet-b0': [7, 14, 28],
+                'efficientnet-b1': [8, 16, 32],
+                'efficientnet-b2': [9, 18, 36],
+                'efficientnet-b4': [12, 24, 48],
+                'efficientnet-b6': [17, 34, 68],
+        }
+        self.output_sizes = os.get(params.model_name, None)
 
-        self.anchors_gen = [anchors.AnchorGenerator(
-            size=self.anchors_config.sizes[i - 3],
-            aspect_ratios=self.anchors_config.ratios,
-            stride=self.anchors_config.strides[i - 3]
-        ) for i in range(3, 8)] # 3 to 7 pyramid levels
+    def call(self, inputs, training):
+        l = self.body(inputs, training)
+        f2, f1, f0 = self.head(l[0], l[1], l[2], training)
 
-    def call(self,
-             images: tf.Tensor,
-             training: bool,
-             score_threshold: float = 0.3,
-             iou_threshold: float = 0.45,
-             max_ret: int = 100
-            ):
-        backend_features = self.body(images, training=training)
-        bifnp_features = self.neck(backend_features, training=training)
-        bboxes = [self.bb_head(bf, training=training) for bf in bifnp_features]
-        class_scores = [self.class_head(bf, training=training) for bf in bifnp_features]
+        self.output_sizes = [tf.shape(f2)[1], tf.shape(f1)[1], tf.shape(f0)[1]]
 
-        bboxes = tf.concat(bboxes, axis=1)
-        class_scores = tf.concat(class_scores, axis=1)
+        batch_size = tf.shape(inputs)[0]
+        outputs = []
+        for output in [f2, f1, f0]:
+            flat = tf.reshape(output, [batch_size, -1, 4+1+self.num_classes])
+            outputs.append(flat)
 
-        if training:
-            return bboxes, class_scores
+        outputs = tf.concat(outputs, axis=1)
+        return outputs
 
-        im_shape = tf.shape(images)
-        batch_size, h, w = im_shape[0], im_shape[1], im_shape[2]
 
-        # Create the anchors
-        anchors = [g(f[0].shape) for g, f in zip(self.anchors_gen, bifnp_features)]
-        anchors = tf.concat(anchors, axis=0)
 
-        # Tile anchors over batches, so they can be regressed
-        anchors = tf.tile(tf.expand_dims(anchors, 0), [batch_size, 1, 1])
-
-        boxes = bndbox.regress_bndboxes(anchors, bboxes)
-        boxes = bndbox.clip_boxes(boxes, [h, w])
-        boxes, scores, labels = bndbox.nms(boxes, class_scores, score_threshold=score_threshold, iou_threshold=iou_threshold, max_ret=max_ret)
-
-        return boxes, scores, labels
-
-def create_model(d, num_classes, class_activation='softmax', name='efndet', dtype: tf.dtypes.DType = tf.float32):
+def create_model(model_name, num_classes, name='efn_yolo'):
     data_format='channels_last'
 
     if data_format == 'channels_first':
@@ -178,9 +228,10 @@ def create_model(d, num_classes, class_activation='softmax', name='efndet', dtyp
         'batch_norm_epsilon': 1e-8,
         'channel_axis': channel_axis,
         'spatial_dims': spatial_dims,
+        'model_name': model_name,
     }
 
     params = GlobalParams(**params)
 
-    model = EfnDet(params, d, num_classes, name=name, class_activation=class_activation, dtype=dtype)
+    model = EfnYolo(params, num_classes, name=name)
     return model

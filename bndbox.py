@@ -7,291 +7,186 @@ import tensorflow as tf
 
 logger = logging.getLogger('detection')
 
-def scale_boxes(boxes: tf.Tensor,
-                from_size: Tuple[int, int],
-                to_size: Tuple[int, int]) -> tf.Tensor:
-    """
-    Scale boxes to a new image size.
-    Converts boxes generated in an image with `from_size` dimensions
-    to boxes that fit inside an image with `to_size` dimensions
-
-    Parameters
-    ----------
-    boxes: tf.Tensor
-        Boxes to be scale. Boxes must be declared in
-        [xmin, ymin, xmax, ymax] format
-    from_size: Tuple[int, int], (height, width)
-        Dimensions of the image where the boxes are decalred
-    to_size: Tuple[int, int]
-
-    Returns
-    -------
-    tf.Tensor
-        Scaled boxes
-    """
-    ratio_w = from_size[1] / to_size[1]
-    ratio_h = from_size[0] / to_size[0]
-
-    x1, y1, x2, y2 = tf.split(boxes, 4, axis=1)
-    x1 *= ratio_w
-    x2 *= ratio_w
-    y1 *= ratio_h
-    y2 *= ratio_h
-
-    return tf.concat([x1, y1, x2, y2], axis=1)
-
-
-def normalize_bndboxes(boxes: tf.Tensor,
-                       image_size: Tuple[int, int]) -> tf.Tensor:
-    """
-    Normalizes boxes so they can be image size agnostic
-
-    Parameters
-    ----------
-    boxes: tf.Tensor of shape [N_BOXES, 4]
-        Boxes to be normalize. Boxes must be declared in
-        [xmin, ymin, xmax, ymax] format
-    image_size: Tuple[int, int], (height, width)
-        Dimensions of the image where the boxes are decalred
-
-    Returns
-    -------
-    tf.Tensor of shape [N_BOXES, 4]
-        Normalized boxes with values in range [0, 1]
-    """
-    h, w = image_size
-    x1, y1, x2, y2 = tf.split(boxes, 4, axis=1)
-    x1 /= (w - 1)
-    x2 /= (w - 1)
-    y1 /= (h - 1)
-    y2 /= (h - 1)
-    return tf.concat([x1, y1, x2, y2], axis=1)
-
-
-def regress_bndboxes(boxes: tf.Tensor,
-                     regressors: tf.Tensor) -> tf.Tensor:
-    """
-    Apply scale invariant regression to boxes.
-
-    Parameters
-    ----------
-    boxes: tf.Tensor of shape [BATCH, N_BOXES, 4]
-        Boxes to apply the regressors
-    regressors: tf.Tensor of shape [BATCH, N_BOXES, 4]
-        Scale invariant regressions
-
-    Returns
-    -------
-    tf.Tensor
-        Regressed boxes
-    """
-    mean = tf.constant([0., 0., 0., 0.], dtype=boxes.dtype)
-    std = tf.constant([0.2, 0.2, 0.2, 0.2], dtype=boxes.dtype)
-
-    width  = boxes[:, :, 2] - boxes[:, :, 0]
-    height = boxes[:, :, 3] - boxes[:, :, 1]
-
-    x1 = boxes[:, :, 0] + (regressors[:, :, 0] * std[0] + mean[0]) * width
-    y1 = boxes[:, :, 1] + (regressors[:, :, 1] * std[1] + mean[1]) * height
-    x2 = boxes[:, :, 2] + (regressors[:, :, 2] * std[2] + mean[2]) * width
-    y2 = boxes[:, :, 3] + (regressors[:, :, 3] * std[3] + mean[3]) * height
-
-    return tf.stack([x1, y1, x2, y2], axis=2)
-
-
-def clip_boxes(boxes: tf.Tensor,
-               im_size: Tuple[int, int]) -> tf.Tensor:
-    # TODO: Document this
-    h, w = im_size
-
-    h = tf.cast(h - 1, boxes.dtype)
-    w = tf.cast(w - 1, boxes.dtype)
-
-    x1 = tf.clip_by_value(boxes[:, :, 0], 0., w)
-    y1 = tf.clip_by_value(boxes[:, :, 1], 0., h)
-    x2 = tf.clip_by_value(boxes[:, :, 2], 0., w)
-    y2 = tf.clip_by_value(boxes[:, :, 3], 0., h)
-
-    return tf.stack([x1, y1, x2, y2], axis=2)
-
 @tf.function
-def nms(bboxes: tf.Tensor,
-        class_scores: tf.Tensor,
-        score_threshold: float = 0.3,
-        iou_threshold: float = 0.45,
-        max_ret: int = 100,
-        ) -> tf.Tensor:
+def non_max_suppression(coords, scores, max_ret, iou_threshold):
+    ymin, xmin, ymax, xmax = tf.split(coords, num_or_size_splits=4, axis=1)
+    ymax = tf.squeeze(ymax, 1)
+    xmax = tf.squeeze(xmax, 1)
+    ymin = tf.squeeze(ymin, 1)
+    xmin = tf.squeeze(xmin, 1)
 
-    """
-    Parameters
-    ----------
-    bboxes: tf.Tensor of shape [BATCH, N, 4]
+    area = (xmax - xmin) * (ymax - ymin)
 
-    class_scores: tf.Tensor of shape [BATCH, N, NUM_CLASSES]
+    idxs = tf.argsort(scores, direction='ASCENDING', stable=False)
 
-    score_threshold: float, default 0.1
-        Classification score to keep the box
+    max_idx = tf.minimum(tf.shape(idxs)[0], max_ret)
 
-    Returns
-    -------
-    Tuple[List[tf.Tensor], List[tf.Tensor], List[tf.Tensor]]
-        The list len is equal to batch size.
-        list[0] contains the bboxes and corresponding label of the first element
-        of the batch
-        bboxes List[tf.Tensor of shape [N, 4]]
-        labels: List[tf.Tensor of shape [N]]
-        scores: List[tf.Tensor of shape [N]]
-    """
+    pick = tf.TensorArray(tf.int32, size=max_idx)
+    written = 0
 
-    batch_size = tf.shape(bboxes)[0]
-    num_classes = tf.shape(class_scores)[-1]
+    for idx in tf.range(max_idx):
+        last_idx = tf.shape(idxs)[0] - 1
+        if idx >= last_idx:
+            break
 
-    x1, y1, x2, y2 = tf.split(bboxes, 4, axis=-1)
-    bboxes = tf.stack([y1, x1, y2, x2], axis=-1)
-    bboxes = tf.reshape(bboxes, [batch_size, -1, 4])
+        #-----------------------------------------------------------------------
+        # Grab the last index (ie. the most confident detection), remove it from
+        # the list of indices to process, and put it on the list of picks
+        #-----------------------------------------------------------------------
+        i = idxs[last_idx]
+        idxs = idxs[:last_idx]
 
-    labels = tf.argmax(class_scores, -1, output_type=tf.int32)
-    scores = tf.math.reduce_max(class_scores, -1)
+        pick = pick.write(idx, i)
+        written += 1
+        suppress = []
 
-    cond_fn = lambda c, *args: c < num_classes
+        xmin_idx = tf.gather(xmin, idxs)
+        xmax_idx = tf.gather(xmax, idxs)
+        ymin_idx = tf.gather(ymin, idxs)
+        ymax_idx = tf.gather(ymax, idxs)
 
-    @tf.function
-    def body(c, written, c_bboxes, c_scores, c_labels, sampled_bboxes, sampled_scores, sampled_labels):
-        class_index = tf.where(tf.equal(sampled_labels, c))
+        xmin_i = tf.gather(xmin, i)
+        xmax_i = tf.gather(xmax, i)
+        ymin_i = tf.gather(ymin, i)
+        ymax_i = tf.gather(ymax, i)
+
+        #-----------------------------------------------------------------------
+        # Figure out the intersection with the remaining windows
+        #-----------------------------------------------------------------------
+        xxmin = tf.maximum(xmin_i, xmin_idx)
+        xxmax = tf.minimum(xmax_i, xmax_idx)
+        yymin = tf.maximum(ymin_i, ymin_idx)
+        yymax = tf.minimum(ymax_i, ymax_idx)
+
+        w = tf.maximum(0., xxmax-xxmin+1)
+        h = tf.maximum(0., yymax-yymin+1)
+        intersection = w*h
+
+        #-----------------------------------------------------------------------
+        # Compute IOU and suppress indices with IOU higher than a threshold
+        #-----------------------------------------------------------------------
+        area_i = tf.gather(area, i)
+        area_idx = tf.gather(area, idxs)
+        union = area_i + area_idx - intersection
+        iou = intersection/union
+        nonoverlap_index = tf.where(iou <= iou_threshold)
+        nonoverlap_index = tf.squeeze(nonoverlap_index, 1)
+
+        idxs = tf.gather(idxs, nonoverlap_index)
+
+    pick = pick.stack()[:written]
+    return pick
+    #return tf.gather(coords, pick), tf.gather(scores, pick)
+
+def per_image_supression(logits, image_size, num_classes, min_obj_score, min_score, min_size, max_ret, iou_threshold):
+    coords, scores, labels, objectness = logits
+
+    non_background_index = tf.where(tf.logical_and(
+                                        tf.greater(objectness, min_obj_score),
+                                        tf.greater(scores, min_score)))
+
+    non_background_index = tf.squeeze(non_background_index, 1)
+
+    sampled_coords = tf.gather(coords, non_background_index)
+    sampled_scores = tf.gather(scores, non_background_index)
+    sampled_labels = tf.gather(labels, non_background_index)
+    sampled_objs = tf.gather(objectness, non_background_index)
+
+    ret_coords, ret_scores, ret_cat_ids, ret_objs = [], [], [], []
+    for cat_id in range(0, num_classes):
+        class_index = tf.where(tf.equal(sampled_labels, cat_id))
+        #tf.print('class_index:', class_index)
+
         selected_scores = tf.gather_nd(sampled_scores, class_index)
-        selected_bboxes = tf.gather_nd(sampled_bboxes, class_index)
+        #logger.info('class_index: {}, sampled_labels: {}, sampled_scores: {}, selected_scores: {}'.format(class_index.shape, sampled_labels.shape, sampled_scores.shape, selected_scores.shape))
 
-        #logger.info('sampled_bboxes: {}, selected_bboxes: {}, sampled_scores: {}, selected_scores: {}'.format(
-        #    sampled_bboxes.shape, selected_bboxes.shape, sampled_scores.shape, selected_scores.shape))
+        selected_coords = tf.gather_nd(sampled_coords, class_index)
+        selected_objs = tf.gather_nd(sampled_objs, class_index)
 
-        indices = tf.image.non_max_suppression(
-                selected_bboxes,
-                selected_scores,
-                max_output_size=max_ret,
-                iou_threshold=iou_threshold,
-                score_threshold=score_threshold)
+        #tf.print('selected_scores:', selected_scores, 'selected_coords:', selected_coords)
 
-        num = tf.shape(indices)[0]
-        if num > 0:
-            best_bboxes = tf.gather(selected_bboxes, indices)
-            best_scores = tf.gather(selected_scores, indices)
-            best_labels = tf.ones_like(best_scores, dtype=tf.int32) * c
+        cx, cy, w, h = tf.split(selected_coords, num_or_size_splits=4, axis=1)
+        cx = tf.squeeze(cx, 1)
+        cy = tf.squeeze(cy, 1)
+        w = tf.squeeze(w, 1)
+        h = tf.squeeze(h, 1)
 
-            #tf.print('c:', c, ', written:', written, ', indices:', tf.shape(indices), ', best_bboxes:', best_bboxes[:3], ', best_scores:', best_scores)
+        small_cond = tf.logical_and(h >= min_size, w >= min_size)
+        large_cond = tf.logical_and(h < image_size*2, w < image_size*2)
+        index = tf.where(tf.logical_and(small_cond, large_cond))
+        selected_scores = tf.gather(selected_scores, index)
+        selected_scores = tf.squeeze(selected_scores, 1)
+        selected_coords = tf.gather(selected_coords, index)
+        selected_coords = tf.squeeze(selected_coords, 1)
+        selected_objs = tf.gather(selected_objs, index)
+        selected_objs = tf.squeeze(selected_objs, 1)
 
-            c_bboxes = c_bboxes.write(written, best_bboxes)
-            c_scores = c_scores.write(written, best_scores)
-            c_labels = c_labels.write(written, best_labels)
-            written += 1
+        cx, cy, w, h = tf.split(selected_coords, num_or_size_splits=4, axis=1)
+        cx = tf.squeeze(cx, 1)
+        cy = tf.squeeze(cy, 1)
+        w = tf.squeeze(w, 1)
+        h = tf.squeeze(h, 1)
 
-        return c+1, written, c_bboxes, c_scores, c_labels
+        #tf.print('cx:', cx, 'cy:', cy, 'w:', w, 'h:', h)
 
-    @tf.function
-    def batch_body(batch_idx):
-        bboxes_for_image = bboxes[batch_idx]
-        scores_for_image = scores[batch_idx]
-        labels_for_image = labels[batch_idx]
+        xmin = cx - w/2
+        xmax = cx + w/2
+        ymin = cy - h/2
+        ymax = cy + h/2
 
-        c = tf.constant(0, dtype=tf.int32)
-        written = tf.constant(0, dtype=tf.int32)
+        xmin = tf.maximum(0., xmin)
+        ymin = tf.maximum(0., ymin)
+        xmax = tf.minimum(float(image_size), xmax)
+        ymax = tf.minimum(float(image_size), ymax)
 
-        batch_bboxes = tf.TensorArray(bboxes.dtype, size=0, dynamic_size=True, infer_shape=False)
-        batch_scores = tf.TensorArray(scores.dtype, size=0, dynamic_size=True, infer_shape=False)
-        batch_labels = tf.TensorArray(labels.dtype, size=0, dynamic_size=True, infer_shape=False)
+        coords_yx = tf.stack([ymin, xmin, ymax, xmax], axis=1)
 
-        non_background_index = tf.where(scores_for_image > score_threshold)
-        non_background_index = tf.squeeze(non_background_index, 1)
-
-        sampled_bboxes = tf.gather(bboxes_for_image, non_background_index)
-        sampled_scores = tf.gather(scores_for_image, non_background_index)
-        sampled_labels = tf.gather(labels_for_image, non_background_index)
-
-        body_fn = partial(body, sampled_bboxes=sampled_bboxes, sampled_scores=sampled_scores, sampled_labels=sampled_labels)
-
-        _, _, batch_bboxes, batch_scores, batch_labels = tf.while_loop(
-                cond_fn, body_fn,
-                parallel_iterations=1,
-                back_prop=False,
-                loop_vars=[c, written, batch_bboxes, batch_scores, batch_labels])
-
-        if batch_bboxes.size() > 0:
-            batch_bboxes = batch_bboxes.concat()
-            batch_scores = batch_scores.concat()
-            batch_labels = batch_labels.concat()
-
-            _, best_index = tf.math.top_k(batch_scores, tf.minimum(max_ret, tf.shape(batch_scores)[0]), sorted=True)
-
-            best_bboxes = tf.gather(batch_bboxes, best_index)
-            best_scores = tf.gather(batch_scores, best_index)
-            best_labels = tf.gather(batch_labels, best_index)
-
-            #tf.print('batch_idx:', batch_idx, ', batch_bboxes:', tf.shape(batch_bboxes), ', best_bboxes:', tf.shape(best_bboxes), ', batch_scores:', tf.shape(batch_scores))
-
-            y1, x1, y2, x2 = tf.split(best_bboxes, 4, axis=-1)
-            best_bboxes = tf.stack([x1, y1, x2, y2], axis=-1)
-            best_bboxes = tf.reshape(best_bboxes, [-1, 4])
-
-            to_add = tf.maximum(max_ret - tf.shape(best_scores)[0], 0)
-            best_bboxes = tf.pad(best_bboxes, [[0, to_add], [0, 0]] , 'CONSTANT', constant_values=0)
-            best_scores = tf.pad(best_scores, [[0, to_add]], 'CONSTANT', constant_values=0)
-            best_labels = tf.pad(best_labels, [[0, to_add]], 'CONSTANT', constant_values=0)
+        #scores_to_sort = selected_scores * selected_objs
+        scores_to_sort = selected_objs
+        if True:
+            selected_indexes = tf.image.non_max_suppression(coords_yx, scores_to_sort, max_ret, iou_threshold=iou_threshold)
         else:
-            best_bboxes = tf.zeros((max_ret, 4), dtype=bboxes.dtype)
-            best_scores = tf.zeros((max_ret,), dtype=scores.dtype)
-            best_labels = tf.zeros((max_ret,), dtype=labels.dtype)
+            selected_indexes = non_max_suppression(coords_yx, scores_to_sort, max_ret, iou_threshold=iou_threshold)
 
-        return best_bboxes, best_scores, best_labels
+        #logger.info('selected_indexes: {}, selected_coords: {}, selected_scores: {}'.format(selected_indexes, selected_coords, selected_scores))
+        selected_coords = tf.gather(coords_yx, selected_indexes)
+        selected_scores = tf.gather(selected_scores, selected_indexes)
+        selected_objs = tf.gather(selected_objs, selected_indexes)
 
-    return tf.map_fn(batch_body, tf.range(batch_size),
-            parallel_iterations=1,
-            back_prop=False,
-            infer_shape=False,
-            dtype=(bboxes.dtype, scores.dtype, labels.dtype))
+        ret_coords.append(selected_coords)
+        ret_scores.append(selected_scores)
+        ret_objs.append(selected_objs)
 
-def bbox_overlap(bboxes, gt_bboxes):
-    """
-    Calculates the overlap between proposal and ground truth bboxes.
-    Some `gt_bboxes` may have been padded. The returned `iou` tensor for these
-    bboxes will be -1.
+        num = tf.shape(selected_scores)[0]
+        tile = tf.tile([cat_id], [num])
+        ret_cat_ids.append(tile)
 
-    Parameters
-    ----------
-    bboxes: tf.Tensor with a shape of [batch_size, N, 4].
-        N is the number of proposals before groundtruth assignment. The
-        last dimension is the pixel coordinates in [xmin, ymin, xmax, ymax] form.
-    gt_bboxes: tf.Tensor with a shape of [batch_size, MAX_NUM_INSTANCES, 4].
-        This tensor might have paddings with a negative value.
+    ret_coords = tf.concat(ret_coords, 0)
+    ret_scores = tf.concat(ret_scores, 0)
+    ret_objs = tf.concat(ret_objs, 0)
+    ret_cat_ids = tf.concat(ret_cat_ids, 0)
 
-    Returns
-    -------
-    tf.FloatTensor
-        A tensor with as a shape of [batch_size, N, MAX_NUM_INSTANCES].
-    """
-    bb_x_min, bb_y_min, bb_x_max, bb_y_max = tf.split(value=bboxes, num_or_size_splits=4, axis=2)
-    gt_x_min, gt_y_min, gt_x_max, gt_y_max = tf.split(value=gt_bboxes, num_or_size_splits=4, axis=2)
+    #logger.info('ret_coords: {}, ret_scores: {}, ret_cat_ids: {}'.format(ret_coords, ret_scores, ret_cat_ids))
 
-    # Calculates the intersection area.
-    i_xmin = tf.math.maximum(bb_x_min, tf.transpose(gt_x_min, [0, 2, 1]))
-    i_xmax = tf.math.minimum(bb_x_max, tf.transpose(gt_x_max, [0, 2, 1]))
-    i_ymin = tf.math.maximum(bb_y_min, tf.transpose(gt_y_min, [0, 2, 1]))
-    i_ymax = tf.math.minimum(bb_y_max, tf.transpose(gt_y_max, [0, 2, 1]))
-    i_area = (tf.math.maximum(i_xmax - i_xmin, 0) *
-              tf.math.maximum(i_ymax - i_ymin, 0))
+    #scores_to_sort = ret_scores * ret_objs
+    scores_to_sort = ret_objs
+    _, best_index = tf.math.top_k(scores_to_sort, tf.minimum(max_ret, tf.shape(ret_scores)[0]), sorted=True)
 
-    # Calculates the union area.
-    bb_area = (bb_y_max - bb_y_min) * (bb_x_max - bb_x_min)
-    gt_area = (gt_y_max - gt_y_min) * (gt_x_max - gt_x_min)
+    best_scores = tf.gather(ret_scores, best_index)
+    best_coords = tf.gather(ret_coords, best_index)
+    best_objs = tf.gather(ret_objs, best_index)
+    best_cat_ids = tf.gather(ret_cat_ids, best_index)
 
-    # Adds a small epsilon to avoid divide-by-zero.
-    u_area = bb_area + tf.transpose(gt_area, [0, 2, 1]) - i_area + 1e-8
+    #logger.info('best_coords: {}, best_scores: {}, best_cat_ids: {}'.format(best_coords, best_scores, best_cat_ids))
 
-    # Calculates IoU.
-    iou = i_area / u_area
+    to_add = tf.maximum(max_ret - tf.shape(best_scores)[0], 0)
+    best_coords = tf.pad(best_coords, [[0, to_add], [0, 0]] , 'CONSTANT', constant_values=0)
+    best_scores = tf.pad(best_scores, [[0, to_add]], 'CONSTANT', constant_values=0)
+    best_objs = tf.pad(best_objs, [[0, to_add]], 'CONSTANT', constant_values=0)
+    best_cat_ids = tf.pad(best_cat_ids, [[0, to_add]], 'CONSTANT', constant_values=0)
 
-    # Fills -1 for IoU entries between the padded ground truth bboxes.
-    gt_invalid_mask = tf.less(tf.reduce_max(gt_bboxes, axis=-1, keepdims=True), 0.0)
-    padding_mask = tf.logical_or(tf.zeros_like(bb_x_min, dtype=tf.bool), tf.transpose(gt_invalid_mask, [0, 2, 1]))
-    iou = tf.where(padding_mask, -tf.ones_like(iou), iou)
 
-    return iou
+    #logger.info('ret_coords: {}, ret_scores: {}, ret_cat_ids: {}, best_index: {}, best_scores: {}, best_coords: {}, best_cat_ids: {}'.format(
+    #    ret_coords, ret_scores, ret_cat_ids, best_index, best_scores, best_coords, best_cat_ids))
 
+    return best_coords, best_scores, best_objs, best_cat_ids

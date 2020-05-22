@@ -15,7 +15,7 @@ import horovod.tensorflow as hvd
 
 logger = logging.getLogger('detection')
 
-import anchors
+import anchors_gen
 import autoaugment
 import config
 import encoder
@@ -28,15 +28,14 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--category_json', type=str, required=True, help='Category to ID mapping json file.')
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch.')
 parser.add_argument('--eval_batch_size', type=int, default=128, help='Number of images to process in a batch.')
-parser.add_argument('--max_items_in_image', type=int, default=32, help='Limit number of true objects in image.')
 parser.add_argument('--num_epochs', type=int, default=1000, help='Number of epochs to run.')
 parser.add_argument('--epoch', type=int, default=0, help='Initial epoch\'s number')
 parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel preprocessing jobs.')
 parser.add_argument('--clip_grad', type=float, default=10, help='Clip accumulated gradients by this value')
 parser.add_argument('--train_dir', type=str, required=True, help='Path to train directory, where graph will be stored.')
 parser.add_argument('--base_checkpoint', type=str, help='Load base model weights from this file')
+parser.add_argument('--model_name', type=str, default='efficientnet-b0', help='Model name')
 parser.add_argument('--use_good_checkpoint', action='store_true', help='Recover from the last good checkpoint when present')
-parser.add_argument('--d', type=int, default=0, help='Model name suffix: 0-7')
 parser.add_argument('--data_format', type=str, default='channels_last', choices=['channels_first', 'channels_last'], help='Data format: [channels_first, channels_last]')
 parser.add_argument('--initial_learning_rate', default=1e-3, type=float, help='Initial learning rate (will be multiplied by the number of nodes in the distributed strategy)')
 parser.add_argument('--min_learning_rate', default=1e-6, type=float, help='Minimal learning rate')
@@ -64,6 +63,7 @@ parser.add_argument('--class_activation', type=str, default='softmax', help='Cla
 parser.add_argument('--rotation_augmentation', type=int, default=-1, help='Angle for rotation augmentation')
 parser.add_argument('--use_augmentation', type=str, help='Use efficientnet random/v0/distort augmentation')
 parser.add_argument('--save_examples', type=int, default=0, help='Save this many train examples')
+parser.add_argument('--image_size', type=int, default=-1, help='Use this image size or default for this model type if negative')
 
 def polygon2bbox(poly, want_yx=False, want_wh=False):
     # polygon shape [N, 4, 2]
@@ -85,7 +85,7 @@ def polygon2bbox(poly, want_yx=False, want_wh=False):
 
     return bbox
 
-def prepare_example(filename, image_id, image, orig_bboxes, orig_labels, image_size, num_classes, is_training, data_format):
+def prepare_example(filename, image_id, image, orig_bboxes, orig_labels, image_size, num_classes, is_training, data_format, anchors_all, output_xy_grids, output_ratios):
     x0, y0, w, h = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
 
     orig_image_height = tf.cast(tf.shape(image)[0], tf.float32)
@@ -128,12 +128,25 @@ def prepare_example(filename, image_id, image, orig_bboxes, orig_labels, image_s
 
     new_bboxes = polygon2bbox(word_poly)
 
-    new_bboxes = new_bboxes[:FLAGS.max_items_in_image, ...]
-    new_labels = new_labels[:FLAGS.max_items_in_image]
+    x0 = new_bboxes[:, 0]
+    y0 = new_bboxes[:, 1]
+    x1 = new_bboxes[:, 2]
+    y1 = new_bboxes[:, 3]
 
-    return filename, image_id, image, new_bboxes, new_labels
+    cx = (x0 + x1) / 2
+    cy = (y0 + y1) / 2
+    w = x1 - x0
+    h = y1 - y0
 
-def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, data_format, dtype):
+    new_bboxes = tf.stack([cx, cy, w, h], axis=1)
+
+    true_values = anchors_gen.generate_true_labels_for_anchors(new_bboxes, new_labels,
+            anchors_all, output_xy_grids, output_ratios,
+            image_size, num_classes)
+
+    return filename, image_id, image, true_values
+
+def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, data_format, dtype, anchors_all, output_xy_grids, output_ratios):
     features = tf.io.parse_single_example(serialized_example,
             features={
                 'image_id': tf.io.FixedLenFeature([], tf.int64),
@@ -153,22 +166,26 @@ def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, da
     image = tf.image.decode_jpeg(features['image'], channels=3)
     image = tf.cast(image, dtype)
 
-    return prepare_example(filename, image_id, image, orig_bboxes, orig_labels, image_size, num_classes, is_training, data_format)
+    return prepare_example(filename, image_id, image, orig_bboxes, orig_labels, image_size, num_classes, is_training, data_format, anchors_all, output_xy_grids, output_ratios)
 
-def tf_read_image(filename, image_id, bboxes, labels, image_labels, image_size, num_classes, is_training, data_format, dtype):
+def tf_read_image(filename, image_id, bboxes, labels, image_labels, image_size, num_classes, is_training, data_format, dtype, anchors_all, output_xy_grids, output_ratios):
     image = tf.io.read_file(filename)
     image = tf.io.decode_jpeg(image, channels=3)
     image = tf.cast(image, dtype)
-    return prepare_example(filename, image_id, image, bboxes, labels, image_size, num_classes, is_training, data_format)
+    return prepare_example(filename, image_id, image, bboxes, labels, image_size, num_classes, is_training, data_format, anchors_all, output_xy_grids, output_ratios)
 
 def calc_epoch_steps(num_files, batch_size):
     return (num_files + batch_size - 1) // batch_size
 
-def draw_bboxes(dataset, cat_names, num_examples):
+def draw_bboxes(dataset, cat_names, num_examples, anchors_all, output_xy_grids, output_ratios):
     data_dir = os.path.join(FLAGS.train_dir, 'tmp')
     os.makedirs(data_dir, exist_ok=True)
 
-    for filename, image_id, image, true_bboxes, true_labels in dataset.unbatch().take(num_examples):
+    anchors_all = anchors_all.numpy()
+    output_xy_grids = output_xy_grids.numpy()
+    output_ratios = output_ratios.numpy()
+
+    for filename, image_id, image, true_values in dataset.unbatch().take(num_examples):
         filename = str(filename.numpy(), 'utf8')
         filename_base = os.path.basename(filename)
         filename_base = os.path.splitext(filename_base)[0]
@@ -179,8 +196,40 @@ def draw_bboxes(dataset, cat_names, num_examples):
         image = image * 128 + 128
         image = image.astype(np.uint8)
 
-        true_bboxes = true_bboxes.numpy()
-        true_labels = true_labels.numpy()
+        #logger.info('true_values: {}, dtype: {}'.format(true_values.shape, true_values.dtype))
+        true_values = true_values.numpy()
+        non_background_index = np.where(true_values[..., 4] != 0)[0]
+
+        bboxes = true_values[non_background_index, 0:4]
+        true_labels = true_values[non_background_index, 5:]
+        true_labels = np.argmax(true_labels, axis=1)
+
+        anchors = anchors_all[non_background_index, :]
+        grid_xy = output_xy_grids[non_background_index, :]
+        ratios = output_ratios[non_background_index]
+
+        cx, cy, w, h = np.split(bboxes, 4, axis=1)
+        cx = np.squeeze(cx)
+        cy = np.squeeze(cy)
+        w = np.squeeze(w)
+        h = np.squeeze(h)
+
+        #logger.info('bboxes: {}, grid_xy: {}, anchors: {}, ratios: {}'.format(bboxes, grid_xy, anchors, ratios))
+        #logger.info('cx: {}, cy: {}, w: {}, h: {}'.format(cx, cy, w, h))
+
+        cx = (cx + grid_xy[:, 0]) * ratios
+        cy = (cy + grid_xy[:, 1]) * ratios
+
+        #logger.info('cx: {}, anchors: {}'.format(cx, anchors))
+        w = np.power(np.math.e, w) * anchors[:, 2]
+        h = np.power(np.math.e, h) * anchors[:, 3]
+
+        x0 = cx - w/2
+        x1 = cx + w/2
+        y0 = cy - h/2
+        y1 = cy + h/2
+
+        true_bboxes = np.stack([x0, y0, x1, y1], axis=1)
 
         new_anns = []
         for bb, label in zip(true_bboxes, true_labels):
@@ -191,31 +240,13 @@ def draw_bboxes(dataset, cat_names, num_examples):
 
         image_draw.draw_im(image, new_anns, dst, cat_names)
 
-def generate_anchors(anchors_config: config.AnchorsConfig,
-                     im_shape: int) -> tf.Tensor:
+def filter_fn(filename, image_id, image, true_values):
+    non_background_index = tf.where(true_values[..., 4] != 0, 1, 0)
+    index_sum = tf.reduce_sum(non_background_index)
 
-    anchors_gen = [anchors.AnchorGenerator(
-                            size=anchors_config.sizes[i - 3],
-                            aspect_ratios=anchors_config.ratios,
-                            stride=anchors_config.strides[i - 3])
-                    for i in range(3, 8)]
+    return tf.math.not_equal(index_sum, 0)
 
-    shapes = [im_shape // (2 ** x) for x in range(3, 8)]
-
-    anchors_all = [g((size, size, 3)) for g, size in zip(anchors_gen, shapes)]
-
-    return tf.concat(anchors_all, axis=0)
-
-def filter_fn(filename, image_id, image, true_bboxes, true_labels):
-    index = tf.math.not_equal(true_labels, -1)
-    index = tf.cast(index, tf.int32)
-    index_sum = tf.reduce_sum(index)
-
-    return tf.math.logical_and(
-            tf.math.not_equal(index_sum, 0),
-            tf.math.not_equal(tf.shape(true_labels)[0], 0))
-
-def wrap_dataset(ds, image_size, dtype, is_training):
+def wrap_dataset(ds, dtype, is_training):
     ds = ds.filter(filter_fn)
 
     if is_training:
@@ -229,10 +260,7 @@ def wrap_dataset(ds, image_size, dtype, is_training):
     pad_value = tf.constant(1, dtype=dtype)
 
     ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
-    ds = ds.padded_batch(batch_size=batch_size,
-            padded_shapes=((), (), (image_size, image_size, 3), (FLAGS.max_items_in_image, 4), (FLAGS.max_items_in_image,)),
-            padding_values=('', tf.constant(0, dtype=tf.int64), 0*pad_value, -1*pad_value, -1))
-
+    ds = ds.batch(batch_size=batch_size)
     ds = ds.repeat()
 
     return ds
@@ -244,12 +272,19 @@ def train():
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(good_checkpoint_dir, exist_ok=True)
 
+    #tf.debugging.enable_check_numerics(stack_height_limit=30, path_length_limit=50)
+
     handler = logging.FileHandler(os.path.join(checkpoint_dir, 'train.log.{}'.format(hvd.rank())), 'a')
     handler.setFormatter(__fmt)
     logger.addHandler(handler)
 
     with open(FLAGS.category_json, 'r') as f:
         class2idx = json.load(f)
+
+    train_cat_names = {}
+    for cname, cid in class2idx.items():
+        train_cat_names[cid] = cname
+
 
     logger.info('start: {}'.format(' '.join(sys.argv)))
     logger.info('FLAGS: {}'.format(FLAGS))
@@ -284,10 +319,17 @@ def train():
     epoch_var = tf.Variable(0, dtype=tf.int64, name='epoch_number', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
     learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
 
-    model = encoder.create_model(FLAGS.d, FLAGS.num_classes, class_activation=FLAGS.class_activation, dtype=dtype)
-    image_size = model.config.input_size
+    model = encoder.create_model(FLAGS.model_name, FLAGS.num_classes)
+    if FLAGS.image_size < 0:
+        image_size = model.image_size
+    else:
+        image_size = FLAGS.image_size
 
-    anchors_all = generate_anchors(model.anchors_config, model.config.input_size)
+    dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
+    model(dummy_input, training=True)
+    logger.info('model output sizes: {}'.format([m.numpy() for m in model.output_sizes]))
+
+    anchors_all, output_xy_grids, output_ratios = anchors_gen.generate_anchors(image_size, model.output_sizes)
 
     if FLAGS.dataset_type == 'tfrecords':
         import glob
@@ -307,10 +349,10 @@ def train():
             ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
             ds = ds.map(lambda record: unpack_tfrecord(record,
                             image_size, num_classes, is_training,
-                            FLAGS.data_format, dtype),
+                            FLAGS.data_format, dtype, anchors_all, output_xy_grids, output_ratios),
                     num_parallel_calls=FLAGS.num_cpus)
 
-            ds = wrap_dataset(ds, image_size, dtype, is_training)
+            ds = wrap_dataset(ds, dtype, is_training)
 
             logger.info('{} dataset has been created, tfrecords: {}/{}'.format(name, len(filenames), total_filenames))
             return ds
@@ -322,10 +364,6 @@ def train():
         if train_num_classes is None:
             logger.error('If there is no train_num_classes (tfrecord dataset), you must provide --num_classes')
             exit(-1)
-
-        train_cat_names = {}
-        for cname, cid in class2idx.items():
-            train_cat_names[cid] = cname
 
         train_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_pattern, image_size, train_num_classes, is_training=True)
         eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_pattern, image_size, train_num_classes, is_training=False)
@@ -366,16 +404,9 @@ def train():
                 if len(labels) == 0 and len(image_labels) == 0:
                     continue
 
-                #if len(bboxes) > FLAGS.max_items_in_image:
-                #    logger.info('{}: bboxes: {}, labels: {}, image_labels: {}'.format(filename, len(bboxes), len(labels), len(image_labels)))
-
                 bboxes = np.array(bboxes, dtype=np.float32).reshape([len(bboxes), 4])
                 labels = np.array(labels, dtype=np.int32)
                 image_labels = np.array(image_labels, dtype=np.int32)
-
-                bboxes = bboxes[:FLAGS.max_items_in_image, ...]
-                labels = labels[:FLAGS.max_items_in_image]
-                image_labels = image_labels[:FLAGS.max_items_in_image]
 
                 yield_num_images += 1
                 yield filename, image_id, bboxes, labels, image_labels
@@ -393,10 +424,10 @@ def train():
                                     output_shapes=(tf.TensorShape([]), tf.TensorShape([]), tf.TensorShape([None, 4]), tf.TensorShape([None]), tf.TensorShape([None])))
             ds = ds.map(lambda filename, image_id, bboxes, labels, image_labels:
                             tf_read_image(filename, image_id, bboxes, labels, image_labels,
-                                image_size, num_classes, is_training, FLAGS.data_format, dtype),
+                                image_size, num_classes, is_training, FLAGS.data_format, dtype, anchors_all, output_xy_grids, output_ratios),
                         num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
-            ds = wrap_dataset(ds, image_size, dtype, is_training)
+            ds = wrap_dataset(ds, dtype, is_training)
 
             logger.info('{} dataset has been created, total images: {}, categories: {}, image_categories: {}'.format(name, bg.num_images(), bg.num_classes(), bg.num_image_classes()))
             return ds, num_classes, num_images
@@ -422,7 +453,7 @@ def train():
         steps_per_eval_epoch = calc_epoch_steps(eval_num_images, FLAGS.eval_batch_size)
 
     if FLAGS.save_examples > 0:
-        draw_bboxes(train_dataset, train_cat_names, FLAGS.save_examples)
+        draw_bboxes(train_dataset, train_cat_names, FLAGS.save_examples, anchors_all, output_xy_grids, output_ratios)
         exit(0)
 
 
@@ -470,15 +501,32 @@ def train():
 
             exit(0)
 
-    met = metric.ModelMetric(anchors_all, train_num_classes)
+    met = metric.ModelMetric(anchors_all, output_xy_grids, output_ratios, image_size, train_num_classes, reduction=tf.keras.losses.Reduction.NONE)
 
     @tf.function(experimental_relax_shapes=True)
-    def train_step(filenames, images, true_bboxes, true_labels):
-        with tf.GradientTape() as tape:
-            bboxes, class_scores = model(images, training=True)
+    def eval_step(filenames, images, true_values):
+        logits = model(images, training=False)
+        total_loss = met(true_values, logits, training=False)
 
-            dist_loss, class_loss = met(images, true_bboxes, true_labels, bboxes, class_scores, training=True)
-            total_loss = dist_loss + class_loss
+        if FLAGS.reg_loss_weight != 0:
+            regex = r'.*(kernel|weight):0$'
+            var_match = re.compile(regex)
+
+            l2_loss = FLAGS.reg_loss_weight * tf.add_n([tf.nn.l2_loss(v) for v in model.trainable_variables if var_match.match(v.name)])
+
+            met.eval_metric.reg_loss.update_state(l2_loss)
+
+            total_loss += l2_loss
+
+        met.eval_metric.total_loss.update_state(total_loss)
+        return total_loss
+
+    @tf.function(experimental_relax_shapes=True)
+    def train_step(filenames, images, true_values):
+        with tf.GradientTape() as tape:
+            logits = model(images, training=True)
+
+            total_loss = met(true_values, logits, training=True)
 
             if FLAGS.reg_loss_weight != 0:
                 regex = r'.*(kernel|weight):0$'
@@ -497,14 +545,14 @@ def train():
 
         return total_loss, gradients
 
-    def run_train_epoch(dataset, step_func, max_steps, broadcast_variables=False):
+    def run_train_epoch(dataset, max_steps, is_training, broadcast_variables=False):
         step = 0
         acc_gradients = []
-        for filenames, image_ids, images, true_bboxes, true_labels in dataset:
-            total_loss, gradients = train_step(filenames, images, true_bboxes, true_labels)
+        for filenames, image_ids, images, true_values in dataset:
+            total_loss, gradients = train_step(filenames, images, true_values)
 
             if tf.math.is_nan(total_loss):
-                logger.info('Loss is NaN, skipping training step')
+                logger.info('Loss is NaN, skipping training step: {}')
             else:
                 if len(acc_gradients) == 0:
                     acc_gradients = gradients
@@ -528,7 +576,7 @@ def train():
                     first_batch = False
 
             if (step % FLAGS.print_per_train_steps == 0) or np.isnan(total_loss.numpy()):
-                logger.info('{}: step: {}/{} {}: total_loss: {:.3f}, {}'.format(
+                logger.info('{}: step: {}/{} {}: loss: {:.3f}, {}'.format(
                     epoch_var.numpy(), step, max_steps, global_step.numpy(),
                     total_loss, met.str_result(training=True)
                     ))
@@ -539,7 +587,7 @@ def train():
             if step >= max_steps:
                 break
 
-        logger.info('{}: step: {}/{} {}: total_loss: {:.3f}, {}'.format(
+        logger.info('{}: step: {}/{} {}: loss: {:.3f}, {}'.format(
             epoch_var.numpy(), step, max_steps, global_step.numpy(),
             total_loss, met.str_result(training=True)
             ))
@@ -549,6 +597,21 @@ def train():
             acc_gradients = []
 
         return step
+
+    def run_eval_epoch(dataset,  max_steps):
+        step = 0
+        for filenames, image_ids, images, true_values in dataset:
+            eval_step(filenames, images, true_values)
+            step += 1
+            if step >= max_steps:
+                break
+
+        logger.info('{}: step: {}/{} {}: eval: {}'.format(
+            epoch_var.numpy(), step, max_steps, global_step.numpy(),
+            met.str_result(training=False)
+            ))
+
+        return met.eval_metric.obj_accuracy_metric.result()
 
     best_metric = 0
     best_saved_path = None
@@ -562,7 +625,8 @@ def train():
 
         best_saved_path = restore_path
 
-        best_metric = evaluate.evaluate(model, eval_dataset, class2idx, FLAGS.steps_per_eval_epoch)
+        #best_metric = evaluate.evaluate(model, eval_dataset, class2idx, FLAGS.steps_per_eval_epoch)
+        best_metric = run_eval_epoch(eval_dataset, FLAGS.steps_per_eval_epoch)
         logger.info('initial validation metric: {:.3f}'.format(best_metric))
 
         if FLAGS.only_test:
@@ -576,8 +640,8 @@ def train():
     num_vars = len(model.trainable_variables)
     num_params = np.sum([np.prod(v.shape) for v in model.trainable_variables])
 
-    logger.info('nodes: {}, checkpoint_dir: {}, model: D: {}, image_size: {}, model trainable variables/params: {}/{}'.format(
-        num_replicas, checkpoint_dir, FLAGS.d, image_size,
+    logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, model trainable variables/params: {}/{}'.format(
+        num_replicas, checkpoint_dir, FLAGS.model_name, image_size,
         num_vars, int(num_params)))
 
     learning_rate.assign(FLAGS.initial_learning_rate)
@@ -589,12 +653,14 @@ def train():
             new_metric = evaluate.evaluate(model, eval_dataset, class2idx, FLAGS.steps_per_eval_epoch)
             FLAGS.run_evaluation_first = False
 
-        train_steps = run_train_epoch(train_dataset, train_step, FLAGS.steps_per_train_epoch, (epoch == 0))
+        train_steps = run_train_epoch(train_dataset, FLAGS.steps_per_train_epoch, (epoch == 0))
 
         if hvd.rank() == 0:
             saved_path = manager.save()
 
-        new_metric = evaluate.evaluate(model, eval_dataset, class2idx, FLAGS.steps_per_eval_epoch)
+        new_metric = 0
+        #new_metric = evaluate.evaluate(model, eval_dataset, class2idx, FLAGS.steps_per_eval_epoch)
+        new_metric = run_eval_epoch(eval_dataset, FLAGS.steps_per_eval_epoch)
 
         new_lr = learning_rate.numpy()
 
