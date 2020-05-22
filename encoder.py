@@ -176,7 +176,11 @@ class EfnHead(tf.keras.layers.Layer):
         return stage2_output, stage1_output, stage0_output
 
 class EfnYolo(tf.keras.Model):
-    def __init__(self, params, num_classes, **kwargs):
+    def __init__(self,
+                 params: collections.namedtuple,
+                 num_classes: int,
+                 image_size: int,
+                 **kwargs: dict):
         super(EfnYolo, self).__init__(**kwargs)
 
         self.num_classes = num_classes
@@ -184,7 +188,11 @@ class EfnYolo(tf.keras.Model):
         self.body = EfnBody(params, name='body')
         self.head = EfnHead(params, num_classes, name='head')
 
-        self.image_size = self.body.image_size
+        if image_size > 0:
+            self.image_size = image_size
+        else:
+            self.image_size = self.body.image_size
+
         os = {
                 'efficientnet-b0': [7, 14, 28],
                 'efficientnet-b1': [8, 16, 32],
@@ -209,9 +217,7 @@ class EfnYolo(tf.keras.Model):
         outputs = tf.concat(outputs, axis=1)
         return outputs
 
-
-
-def create_model(model_name, num_classes, name='efn_yolo'):
+def create_model(model_name, num_classes, image_size=-1, name='efn_yolo'):
     data_format='channels_last'
 
     if data_format == 'channels_first':
@@ -233,5 +239,5 @@ def create_model(model_name, num_classes, name='efn_yolo'):
 
     params = GlobalParams(**params)
 
-    model = EfnYolo(params, num_classes, name=name)
+    model = EfnYolo(params, num_classes, image_size=image_size, name=name)
     return model
