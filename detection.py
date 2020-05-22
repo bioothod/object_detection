@@ -637,8 +637,8 @@ def train():
     num_vars = len(model.trainable_variables)
     num_params = np.sum([np.prod(v.shape) for v in model.trainable_variables])
 
-    logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, model trainable variables/params: {}/{}'.format(
-        num_replicas, checkpoint_dir, FLAGS.model_name, image_size,
+    logger.info('nodes: {}, checkpoint_dir: {}, model: {}, image_size: {}, num_classes: {}, model trainable variables/params: {}/{}'.format(
+        num_replicas, checkpoint_dir, FLAGS.model_name, image_size, train_num_classes,
         num_vars, int(num_params)))
 
     learning_rate.assign(FLAGS.initial_learning_rate)
