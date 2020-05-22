@@ -1,13 +1,18 @@
 import copy
 import logging
+import os
 import time
 import typing
 
+import numpy as np
 import tensorflow as tf
 
 from pycocotools.coco import COCO
 
 from cocoeval import COCOeval
+
+import bndbox
+import image as image_draw
 
 logger = logging.getLogger('detection')
 
@@ -24,7 +29,7 @@ def _COCO_result(image_id: int,
     labels = labels.numpy().tolist()
     scores = scores.numpy().tolist()
 
-    return [dict(image_id=image_id, category_id=l, bbox=b,score=s)
+    return [dict(image_id=image_id, category_id=l, bbox=b, score=s)
             for l, b, s in zip(labels, coco_bboxes, scores)]
 
 
@@ -58,10 +63,12 @@ def _COCO_gt_annot(image_id: int,
 def evaluate(model: tf.keras.Model,
              dataset: tf.data.Dataset,
              class2idx: typing.Mapping[str, int],
-             anchors_all: tf.Tensor,
-             output_xy_grids: tf.Tensor,
-             output_ratios: tf.Tensor,
+             all_anchors: tf.Tensor,
+             all_grid_xy: tf.Tensor,
+             all_ratios: tf.Tensor,
              steps: int,
+             data_dir: str,
+             save_examples: int = -1,
              print_every: int = 10):
 
     gt_coco = dict(images=[], annotations=[])
@@ -69,10 +76,24 @@ def evaluate(model: tf.keras.Model,
     image_id = 1
     annot_id = 1
 
+    all_ratios_ext = tf.expand_dims(all_ratios, -1)
+
     # Create COCO categories
     categories = [dict(supercategory='instance', id=i, name=n)
                   for n, i in class2idx.items()]
     gt_coco['categories'] = categories
+
+    cat_names = {}
+    for cname, cid in class2idx.items():
+        cat_names[cid] = cname
+
+    if save_examples > 0:
+        data_dir = os.path.join(data_dir, 'evaluation')
+        os.makedirs(data_dir, exist_ok=True)
+
+    min_obj_score = 0.3
+    min_score = 0.5
+    iou_threshold = 0.3
 
     start_time = time.time()
     total_time = 0.
@@ -81,72 +102,104 @@ def evaluate(model: tf.keras.Model,
 
     for filenames, image_ids, images, true_values in dataset:
         inference_start = time.time()
-        logits = model(images, training=False)
-        h, w = images.shape[1: 3]
+        pred_bboxes, pred_scores, pred_objs, pred_cat_ids = bndbox.make_predictions(model, images,
+                all_anchors, all_grid_xy, all_ratios,
+                min_obj_score=min_obj_score, min_score=min_score, iou_threshold=iou_threshold)
 
-        true_values = true_values.numpy()
+        h, w = images[0].shape[1 : 3]
 
         # Iterate through images in batch, and for each one
         # create the ground truth coco annotation
 
-        for batch_idx in range(true_values.shape[0]):
+        for batch_idx in range(pred_bboxes.shape[0]):
             val = true_values[batch_idx, ...]
+            #tf.print('val:', tf.shape(val), ', all_grid_xy:', tf.shape(all_grid_xy), ', all_ratios_ext:', tf.shape(all_ratios_ext), ', all_anchors:', tf.shape(all_anchors))
 
-            non_background_index = np.where(val[..., 4] != 0)[0]
+            non_background_index = tf.where(val[..., 4] != 0)
+            non_background_index = tf.squeeze(non_background_index, 1)
+            val = tf.gather(val, non_background_index)
+            #tf.print(filenames[batch_idx], ', non_background_index:', tf.shape(non_background_index), ', val:', tf.shape(val))
 
-            bboxes = val[non_background_index, 0:4]
-            true_labels = val[non_background_index, 5:]
-            true_labels = np.argmax(true_labels, axis=1)
+            true_bboxes = val[:, 0:4]
+            true_labels = val[:, 5:]
+            true_labels = tf.argmax(true_labels, axis=1)
 
-            anchors = anchors_all[non_background_index, :]
-            grid_xy = output_xy_grids[non_background_index, :]
-            ratios = output_ratios[non_background_index]
+            grid_xy = tf.gather(all_grid_xy, non_background_index)
+            ratios = tf.gather(all_ratios_ext, non_background_index)
+            anchors_wh = tf.gather(all_anchors, non_background_index)
 
-            cx, cy, w, h = np.split(bboxes, 4, axis=1)
-            cx = np.squeeze(cx)
-            cy = np.squeeze(cy)
-            w = np.squeeze(w)
-            h = np.squeeze(h)
+            #tf.print('grid_xy:', tf.shape(grid_xy), ', ratios:', tf.shape(ratios), ', anchors_wh:', tf.shape(anchors_wh), ', true_bboxes:', tf.shape(true_bboxes))
 
-            #logger.info('bboxes: {}, grid_xy: {}, anchors: {}, ratios: {}'.format(bboxes, grid_xy, anchors, ratios))
-            #logger.info('cx: {}, cy: {}, w: {}, h: {}'.format(cx, cy, w, h))
+            true_xy = (true_bboxes[:, 0:2] + grid_xy) * ratios
+            true_wh = tf.math.exp(true_bboxes[:, 2:4]) * anchors_wh[:, 2:4]
 
-            cx = (cx + grid_xy[:, 0]) * ratios
-            cy = (cy + grid_xy[:, 1]) * ratios
-
-            #logger.info('cx: {}, anchors: {}'.format(cx, anchors))
-            w = np.power(np.math.e, w) * anchors[:, 2]
-            h = np.power(np.math.e, h) * anchors[:, 3]
+            cx = true_xy[..., 0]
+            cy = true_xy[..., 1]
+            w = true_wh[..., 0]
+            h = true_wh[..., 1]
 
             x0 = cx - w/2
             x1 = cx + w/2
             y0 = cy - h/2
             y1 = cy + h/2
 
-            true_bboxes = np.stack([x0, y0, x1, y1], axis=1)
+            true_bboxes = tf.stack([x0, y0, x1, y1], axis=1)
 
-            gt_labels, gt_boxes = true_labels[batch_idx], true_bboxes[batch_idx]
-            no_padding_mask = gt_labels != -1
-
-            gt_labels = tf.boolean_mask(gt_labels, no_padding_mask)
-            gt_boxes = tf.boolean_mask(gt_boxes, no_padding_mask)
-
-            im_annot, annots = _COCO_gt_annot(image_id, annot_id, (h, w), gt_labels, gt_boxes)
+            im_annot, annots = _COCO_gt_annot(image_id, annot_id, (h, w), true_labels, true_bboxes)
             gt_coco['annotations'].extend(annots)
             gt_coco['images'].append(im_annot)
 
-            preds = categories[batch_idx], bboxes[batch_idx], scores[batch_idx]
-            pred_labels, pred_boxes, pred_scores = preds
+            pred_bboxes_for_image = pred_bboxes[batch_idx, ...]
+            pred_objs_for_image = pred_objs[batch_idx, ...]
+            pred_scores_for_image = pred_scores[batch_idx, ...]
+            pred_labels_for_image = pred_cat_ids[batch_idx, ...]
 
-            if pred_labels.shape[0] > 0:
-                results = _COCO_result(image_id, pred_labels, pred_boxes, pred_scores)
+            good_idx = tf.where(pred_objs_for_image >= min_obj_score)
+            good_idx = tf.squeeze(good_idx, 1)
+            pred_bboxes_for_image = tf.gather(pred_bboxes_for_image, good_idx)
+            pred_scores_for_image = tf.gather(pred_scores_for_image, good_idx)
+            pred_labels_for_image = tf.gather(pred_labels_for_image, good_idx)
+
+            #tf.print(filenames[batch_idx], ', pred_scores_for_image:', pred_scores_for_image, ', labels:', pred_labels_for_image)
+
+            if tf.shape(pred_labels_for_image)[0] > 0:
+                results = _COCO_result(image_id, pred_labels_for_image, pred_bboxes_for_image, pred_scores_for_image)
                 results_coco.extend(results)
+
+            if save_examples > 0:
+                new_anns = []
+                for bb, label in zip(true_bboxes, true_labels):
+                    if label == -1:
+                        continue
+
+                    label = 0
+                    new_anns.append((bb, None, label))
+
+                for bb, label in zip(pred_bboxes_for_image, pred_labels_for_image):
+                    if label == -1:
+                        continue
+
+                    label = 1
+                    new_anns.append((bb, None, label))
+
+                filename = filenames[batch_idx]
+                filename = str(filename.numpy(), 'utf8')
+                filename_base = os.path.basename(filename)
+                filename_base = os.path.splitext(filename_base)[0]
+
+                image = images[batch_idx]
+                image = image.numpy()
+                image = image * 128 + 128
+                image = image.astype(np.uint8)
+
+                dst = os.path.join(data_dir, filename_base) + '.png'
+                image_draw.draw_im(image, new_anns, dst, {})
 
             annot_id += len(annots)
             image_id += 1
+            num_images += 1
 
         total_time += time.time() - inference_start
-        num_images += len(bboxes)
 
         if i % print_every == 0:
             logger.info('validated steps: {}/{}, images: {}, perf: {:.1f} img/s, time_per_image: {:.1f} ms'.format(

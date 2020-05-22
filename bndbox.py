@@ -1,7 +1,7 @@
 import logging
+import typing
 
 from functools import partial
-from typing import Tuple, List, Union
 
 import tensorflow as tf
 
@@ -92,7 +92,9 @@ def per_image_supression(logits, image_size, num_classes, min_obj_score, min_sco
     sampled_labels = tf.gather(labels, non_background_index)
     sampled_objs = tf.gather(objectness, non_background_index)
 
-    ret_coords, ret_scores, ret_cat_ids, ret_objs = [], [], [], []
+    image_size = tf.cast(image_size, coords.dtype)
+
+    ret_coords_yx, ret_scores, ret_cat_ids, ret_objs = [], [], [], []
     for cat_id in range(0, num_classes):
         class_index = tf.where(tf.equal(sampled_labels, cat_id))
         #tf.print('class_index:', class_index)
@@ -136,8 +138,8 @@ def per_image_supression(logits, image_size, num_classes, min_obj_score, min_sco
 
         xmin = tf.maximum(0., xmin)
         ymin = tf.maximum(0., ymin)
-        xmax = tf.minimum(float(image_size), xmax)
-        ymax = tf.minimum(float(image_size), ymax)
+        xmax = tf.minimum(image_size, xmax)
+        ymax = tf.minimum(image_size, ymax)
 
         coords_yx = tf.stack([ymin, xmin, ymax, xmax], axis=1)
 
@@ -149,11 +151,11 @@ def per_image_supression(logits, image_size, num_classes, min_obj_score, min_sco
             selected_indexes = non_max_suppression(coords_yx, scores_to_sort, max_ret, iou_threshold=iou_threshold)
 
         #logger.info('selected_indexes: {}, selected_coords: {}, selected_scores: {}'.format(selected_indexes, selected_coords, selected_scores))
-        selected_coords = tf.gather(coords_yx, selected_indexes)
+        selected_coords_yx = tf.gather(coords_yx, selected_indexes)
         selected_scores = tf.gather(selected_scores, selected_indexes)
         selected_objs = tf.gather(selected_objs, selected_indexes)
 
-        ret_coords.append(selected_coords)
+        ret_coords_yx.append(selected_coords_yx)
         ret_scores.append(selected_scores)
         ret_objs.append(selected_objs)
 
@@ -161,7 +163,7 @@ def per_image_supression(logits, image_size, num_classes, min_obj_score, min_sco
         tile = tf.tile([cat_id], [num])
         ret_cat_ids.append(tile)
 
-    ret_coords = tf.concat(ret_coords, 0)
+    ret_coords_yx = tf.concat(ret_coords_yx, 0)
     ret_scores = tf.concat(ret_scores, 0)
     ret_objs = tf.concat(ret_objs, 0)
     ret_cat_ids = tf.concat(ret_cat_ids, 0)
@@ -173,9 +175,12 @@ def per_image_supression(logits, image_size, num_classes, min_obj_score, min_sco
     _, best_index = tf.math.top_k(scores_to_sort, tf.minimum(max_ret, tf.shape(ret_scores)[0]), sorted=True)
 
     best_scores = tf.gather(ret_scores, best_index)
-    best_coords = tf.gather(ret_coords, best_index)
+    best_coords_yx = tf.gather(ret_coords_yx, best_index)
     best_objs = tf.gather(ret_objs, best_index)
     best_cat_ids = tf.gather(ret_cat_ids, best_index)
+
+    y0, x0, y1, x1 = tf.split(best_coords_yx, 4, axis=1)
+    best_coords = tf.concat([x0, y0, x1, y1], 1)
 
     #logger.info('best_coords: {}, best_scores: {}, best_cat_ids: {}'.format(best_coords, best_scores, best_cat_ids))
 
@@ -190,3 +195,42 @@ def per_image_supression(logits, image_size, num_classes, min_obj_score, min_sco
     #    ret_coords, ret_scores, ret_cat_ids, best_index, best_scores, best_coords, best_cat_ids))
 
     return best_coords, best_scores, best_objs, best_cat_ids
+
+def make_predictions(model: tf.keras.Model,
+                     images: tf.Tensor,
+                     all_anchors: tf.Tensor,
+                     all_grid_xy: tf.Tensor,
+                     all_ratios: tf.Tensor,
+                     min_obj_score: float = 0.7,
+                     min_score: float = 0.8,
+                     min_size: int = 16,
+                     max_ret: int = 100,
+                     iou_threshold: float = 0.45,
+                     ) -> typing.Tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+
+        image_size = tf.shape(images)[1]
+
+        pred_values = model(images, training=False)
+
+        pred_objs = tf.math.sigmoid(pred_values[..., 4])
+
+        pred_bboxes = pred_values[..., 0:4]
+        pred_scores_all = tf.math.sigmoid(pred_values[..., 5:])
+        pred_scores = tf.reduce_max(pred_scores_all, axis=-1)
+        pred_labels = tf.argmax(pred_scores_all, axis=-1)
+
+        num_classes = tf.shape(pred_scores_all)[-1].numpy()
+
+        all_ratios = tf.expand_dims(all_ratios, -1)
+
+        pred_xy = (tf.sigmoid(pred_bboxes[..., 0:2]) + all_grid_xy) * all_ratios
+        pred_wh = tf.math.exp(pred_bboxes[..., 2:4]) * all_anchors[..., 2:4]
+
+        pred_bboxes = tf.concat([pred_xy, pred_wh], axis=-1)
+
+        return tf.map_fn(lambda out: per_image_supression(out, image_size, num_classes, min_obj_score, min_score, min_size, max_ret, iou_threshold),
+                         (pred_bboxes, pred_scores, pred_labels, pred_objs),
+                         parallel_iterations=16,
+                         back_prop=False,
+                         dtype=(tf.float32, tf.float32, tf.float32, tf.int32))
+

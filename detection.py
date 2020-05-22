@@ -59,7 +59,6 @@ parser.add_argument('--reg_loss_weight', type=float, default=0, help='L2 regular
 parser.add_argument('--only_test', action='store_true', help='Exist after running initial validation')
 parser.add_argument('--run_evaluation_first', action='store_true', help='Run evaluation before the first training epoch')
 parser.add_argument('--train_echo_factor', type=int, default=1, help='Repeat augmented examples this many times in shuffle buffer before batching and training')
-parser.add_argument('--class_activation', type=str, default='softmax', help='Classification activation function')
 parser.add_argument('--rotation_augmentation', type=int, default=-1, help='Angle for rotation augmentation')
 parser.add_argument('--use_augmentation', type=str, help='Use efficientnet random/v0/distort augmentation')
 parser.add_argument('--save_examples', type=int, default=0, help='Save this many train examples')
@@ -287,7 +286,8 @@ def train():
 
 
     logger.info('start: {}'.format(' '.join(sys.argv)))
-    logger.info('FLAGS: {}'.format(FLAGS))
+    for k, v in FLAGS.__dict__.items():
+        logger.info('  --{}={}'.format(k, v))
 
     gpus = tf.config.experimental.list_physical_devices('GPU')
     for gpu in gpus:
@@ -319,11 +319,8 @@ def train():
     epoch_var = tf.Variable(0, dtype=tf.int64, name='epoch_number', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
     learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
 
-    model = encoder.create_model(FLAGS.model_name, FLAGS.num_classes)
-    if FLAGS.image_size < 0:
-        image_size = model.image_size
-    else:
-        image_size = FLAGS.image_size
+    model = encoder.create_model(FLAGS.model_name, FLAGS.num_classes, FLAGS.image_size)
+    image_size = model.image_size
 
     dummy_input = tf.ones((int(FLAGS.batch_size / num_replicas), image_size, image_size, 3), dtype=dtype)
     model(dummy_input, training=True)
@@ -625,8 +622,8 @@ def train():
 
         best_saved_path = restore_path
 
-        #best_metric = evaluate.evaluate(model, eval_dataset, class2idx, FLAGS.steps_per_eval_epoch)
-        best_metric = run_eval_epoch(eval_dataset, FLAGS.steps_per_eval_epoch)
+        best_metric = evaluate.evaluate(model, eval_dataset, class2idx, anchors_all, output_xy_grids, output_ratios, FLAGS.steps_per_eval_epoch, data_dir=FLAGS.train_dir)
+        run_eval_epoch(eval_dataset, FLAGS.steps_per_eval_epoch)
         logger.info('initial validation metric: {:.3f}'.format(best_metric))
 
         if FLAGS.only_test:
@@ -650,7 +647,7 @@ def train():
         want_reset = False
 
         if FLAGS.run_evaluation_first:
-            new_metric = evaluate.evaluate(model, eval_dataset, class2idx, FLAGS.steps_per_eval_epoch)
+            new_metric = evaluate.evaluate(model, eval_dataset, class2idx, anchors_all, output_xy_grids, output_ratios, FLAGS.steps_per_eval_epoch, data_dir=FLAGS.train_dir)
             FLAGS.run_evaluation_first = False
 
         train_steps = run_train_epoch(train_dataset, FLAGS.steps_per_train_epoch, (epoch == 0))
@@ -659,8 +656,8 @@ def train():
             saved_path = manager.save()
 
         new_metric = 0
-        #new_metric = evaluate.evaluate(model, eval_dataset, class2idx, FLAGS.steps_per_eval_epoch)
-        new_metric = run_eval_epoch(eval_dataset, FLAGS.steps_per_eval_epoch)
+        new_metric = evaluate.evaluate(model, eval_dataset, class2idx, anchors_all, output_xy_grids, output_ratios, FLAGS.steps_per_eval_epoch, data_dir=FLAGS.train_dir)
+        run_eval_epoch(eval_dataset, FLAGS.steps_per_eval_epoch)
 
         new_lr = learning_rate.numpy()
 
