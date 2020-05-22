@@ -239,7 +239,7 @@ class ModelMetric:
             m = self.eval_metric
 
         object_mask = tf.expand_dims(y_true[..., 4], -1)
-        object_mask_bool = tf.cast(object_mask[..., 0], 'bool')
+        object_mask_bool = tf.cast(object_mask, 'bool')
 
         num_objects = tf.cast(tf.math.count_nonzero(object_mask), tf.int32)
         m.num_positive_labels_metric.update_state(num_objects)
