@@ -91,7 +91,8 @@ class Metric:
         self.accuracy_metric = tf.keras.metrics.BinaryAccuracy(name='accuracy')
         self.obj_accuracy_metric = tf.keras.metrics.BinaryAccuracy(name='objectness_accuracy')
 
-        self.iou_metric = tf.keras.metrics.Mean(name='iou')
+        self.best_ious_for_true_bboxes_metric = tf.keras.metrics.Mean(name='best_ious')
+        self.mean_ious_for_true_bboxes_metric = tf.keras.metrics.Mean(name='mean_ious')
         self.num_good_ious_metric = tf.keras.metrics.Mean(name='num_good_ious')
 
         self.num_positive_labels_metric = tf.keras.metrics.Mean(name='num_positive_labels_ious')
@@ -108,13 +109,14 @@ class Metric:
         self.accuracy_metric.reset_states()
         self.obj_accuracy_metric.reset_states()
 
-        self.iou_metric.reset_states()
+        self.best_ious_for_true_bboxes_metric.reset_states()
+        self.mean_ious_for_true_bboxes_metric.reset_states()
 
         self.num_good_ious_metric.reset_states()
         self.num_positive_labels_metric.reset_states()
 
     def str_result(self):
-        return 'total_loss: {:.3f}, reg_loss: {:.3f}, dist: {:.3f}, class: {:.3f}, conf: {:.3f}/{:.3f}, masked_acc: {:.3f}, m_obj_acc: {:.3f}, good_ious: {:.1f}/{:.1f}, iou: {:.3f}'.format(
+        return 'total_loss: {:.3f}, reg_loss: {:.3f}, dist: {:.3f}, class: {:.3f}, conf: {:.3f}/{:.3f}, m_acc: {:.3f}, m_obj_acc: {:.3f}, num_ious: {:.1f}/{:.1f}, best/mean_ious: {:.3f}/{:.3f}'.format(
                 self.total_loss.result(),
                 self.reg_loss.result(),
                 self.dist_loss.result(),
@@ -129,7 +131,8 @@ class Metric:
                 self.num_good_ious_metric.result(),
                 self.num_positive_labels_metric.result(),
 
-                self.iou_metric.result(),
+                self.best_ious_for_true_bboxes_metric.result(),
+                self.mean_ious_for_true_bboxes_metric.result(),
                 )
 
 
@@ -172,14 +175,22 @@ class ModelMetric:
     def gen_ignore_mask(self, input_tuple, object_mask, true_bboxes, m):
         idx, pred_boxes_for_single_image = input_tuple
         valid_true_boxes = tf.boolean_mask(true_bboxes[idx, ..., 0:4], tf.cast(object_mask[idx, ..., 0], tf.bool))
-        iou = box_iou(pred_boxes_for_single_image, valid_true_boxes)
-        best_iou = tf.reduce_max(iou, axis=-1)
-        m.iou_metric.update_state(best_iou)
+        ious = box_iou(pred_boxes_for_single_image, valid_true_boxes)
 
-        good_ious = tf.where(best_iou > 0.5)
-        m.num_good_ious_metric.update_state(tf.shape(good_ious)[0])
+        # ious: [N, V] shape
+        # N - number of anchors
+        # V - number of objects in the image, number of the true bounding boxes
 
-        ignore_mask = tf.cast(best_iou < 0.5, tf.float32)
+        best_ious_for_anchors = tf.reduce_max(ious, axis=1)
+
+        best_ious_for_true_bboxes = tf.reduce_max(ious, axis=0)
+        mean_ious_for_true_bboxes = tf.reduce_mean(ious, axis=0)
+        good_ious_num = tf.where(best_ious_for_true_bboxes > 0.5)
+        m.best_ious_for_true_bboxes_metric.update_state(best_ious_for_true_bboxes)
+        m.mean_ious_for_true_bboxes_metric.update_state(mean_ious_for_true_bboxes)
+        m.num_good_ious_metric.update_state(tf.shape(good_ious_num)[0])
+
+        ignore_mask = tf.cast(best_ious_for_anchors < 0.5, tf.float32)
         #logger.info('pred_boxes_for_single_image: {}, valid_true_boxes: {}, iou: {}, best_iou: {}, ignore_mask_tmp: {}'.format(
         #    pred_boxes_for_single_image.shape, valid_true_boxes.shape, iou.shape, best_iou.shape, ignore_mask_tmp.shape))
         # shape: [B, N, 1]
