@@ -26,6 +26,7 @@ import metric
 import preprocess
 
 parser = argparse.ArgumentParser()
+parser.add_argument('--optimizer', type=str, default='sgd', choices=['adam', 'sgd', 'radam_lookahead', 'modern'], help='Optimizer')
 parser.add_argument('--category_json', type=str, required=True, help='Category to ID mapping json file.')
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch.')
 parser.add_argument('--eval_batch_size', type=int, default=128, help='Number of images to process in a batch.')
@@ -433,9 +434,17 @@ def train():
         steps_per_train_epoch, train_num_images,
         steps_per_eval_epoch, eval_num_images))
 
-    #opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
-    opt = tfa.optimizers.RectifiedAdam(lr=learning_rate, min_lr=FLAGS.min_learning_rate)
-    opt = tfa.optimizers.Lookahead(opt, sync_period=6, slow_step_size=0.5)
+    if FLAGS.optimizer == 'adam':
+        opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    elif FLAGS.optimizer == 'sgd':
+        opt = tf.keras.optimizers.SGD(learning_rate=learning_rate, momentum=0.9)
+    elif FLAGS.optimizer == 'modern' or FLAGS.optimizer == 'radam_lookahead':
+        opt = tfa.optimizers.RectifiedAdam(lr=learning_rate, min_lr=FLAGS.min_learning_rate)
+        opt = tfa.optimizers.Lookahead(opt, sync_period=6, slow_step_size=0.5)
+    else:
+        logger.error('Unsupported optimized \'{}\''.format(FLAGS.optimizer))
+        exit(-1)
+
     if FLAGS.use_fp16:
         opt = mixed_precision.LossScaleOptimizer(opt, loss_scale='dynamic')
 
