@@ -201,6 +201,7 @@ def make_predictions(model: tf.keras.Model,
                      all_anchors: tf.Tensor,
                      all_grid_xy: tf.Tensor,
                      all_ratios: tf.Tensor,
+                     num_classes: int,
                      min_obj_score: float = 0.7,
                      min_score: float = 0.8,
                      min_size: int = 16,
@@ -218,8 +219,6 @@ def make_predictions(model: tf.keras.Model,
         pred_scores_all = tf.math.sigmoid(pred_values[..., 5:])
         pred_scores = tf.reduce_max(pred_scores_all, axis=-1)
         pred_labels = tf.argmax(pred_scores_all, axis=-1)
-
-        num_classes = tf.shape(pred_scores_all)[-1].numpy()
 
         all_ratios = tf.expand_dims(all_ratios, -1)
 

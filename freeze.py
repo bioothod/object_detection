@@ -33,7 +33,6 @@ parser.add_argument('--min_score', type=float, default=0.7, help='Minimal class 
 parser.add_argument('--min_obj_score', type=float, default=0.3, help='Minimal class probability')
 parser.add_argument('--min_size', type=float, default=4, help='Minimal size of the bounding box')
 parser.add_argument('--iou_threshold', type=float, default=0.45, help='Minimal IoU threshold for non-maximum suppression')
-parser.add_argument('--output_dir', type=str, help='Path to directory, where images will be stored')
 
 def main(argv=None):
     if FLAGS.checkpoint:
@@ -65,17 +64,15 @@ def main(argv=None):
 
             pred_bboxes, pred_scores, pred_objs, pred_cat_ids = bndbox.make_predictions(self.model, images,
                     self.all_anchors, self.all_grid_xy, self.all_ratios,
+                    num_classes=FLAGS.num_classes,
                     min_obj_score=FLAGS.min_obj_score, min_score=FLAGS.min_score, min_size=FLAGS.min_size, iou_threshold=FLAGS.iou_threshold)
 
-            return pred_coords, pred_scores, pred_objs, pred_cat_ids
+            return pred_bboxes, pred_scores, pred_objs, pred_cat_ids
 
 
     model = MyModel()
 
-    logger.info('model with {} backend has been created, image size: {}'.format(FLAGS.model_name, FLAGS.image_size))
-    #x = tf.keras.layers.Input(shape=(FLAGS.image_size * FLAGS.image_size * 3), dtype=tf.uint8, name='input/images')
-    x = tf.zeros((1, FLAGS.image_size * FLAGS.image_size * 3), dtype=tf.uint8)
-    _ = model(x)
+    logger.info('model: backbone: {}, image size: {}'.format(FLAGS.model_name, FLAGS.image_size))
 
     output_dir = '{}_saved_model'.format(checkpoint_prefix)
     tf.saved_model.save(model, output_dir)

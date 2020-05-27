@@ -104,6 +104,7 @@ def evaluate(model: tf.keras.Model,
         inference_start = time.time()
         pred_bboxes, pred_scores, pred_objs, pred_cat_ids = bndbox.make_predictions(model, images,
                 all_anchors, all_grid_xy, all_ratios,
+                num_classes=len(categories),
                 min_obj_score=min_obj_score, min_score=min_score, iou_threshold=iou_threshold)
 
         h, w = images[0].shape[1 : 3]
