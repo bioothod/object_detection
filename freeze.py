@@ -63,7 +63,7 @@ def main(argv=None):
             images = tf.reshape(inputs, [-1, FLAGS.image_size, FLAGS.image_size, 3])
             images = preprocess.preprocess_for_evaluation(images, tf.float32)
 
-            pred_bboxes, pred_scores, pred_objs, pred_cat_ids = bndbox.make_predictions(model, images,
+            pred_bboxes, pred_scores, pred_objs, pred_cat_ids = bndbox.make_predictions(self.model, images,
                     self.all_anchors, self.all_grid_xy, self.all_ratios,
                     min_obj_score=FLAGS.min_obj_score, min_score=FLAGS.min_score, min_size=FLAGS.min_size, iou_threshold=FLAGS.iou_threshold)
 
