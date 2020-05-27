@@ -6,9 +6,8 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.python.compiler.tensorrt import trt_convert as trt
 
-import anchors_gen
 import encoder
-import preprocess_ssd
+import preprocess
 
 from infdet import eval_step_logits
 
@@ -24,21 +23,13 @@ logger.addHandler(__handler)
 parser = argparse.ArgumentParser()
 parser.add_argument('--num_classes', type=int, action='store', required=True, help='Number of classes')
 parser.add_argument('--image_size', type=int, default=528, help='Input image size')
-parser.add_argument('--model_name', type=str, action='store', required=True, help='Model name')
+parser.add_argument('--d', type=int, default=0, help='Model name suffix: 0-7')
 parser.add_argument('--checkpoint', type=str, help='Load model weights from this file')
 parser.add_argument('--checkpoint_dir', type=str, help='Load model weights from the latest checkpoint in this directory')
 parser.add_argument('--max_ret', type=int, default=100, help='Maximum number of returned boxes')
 parser.add_argument('--min_score', type=float, default=0.7, help='Minimal class probability')
-parser.add_argument('--min_obj_score', type=float, default=0.3, help='Minimal class probability')
-parser.add_argument('--min_size', type=float, default=4, help='Minimal size of the bounding box')
 parser.add_argument('--iou_threshold', type=float, default=0.45, help='Minimal IoU threshold for non-maximum suppression')
-parser.add_argument('--output_dir', type=str, help='Path to directory, where images will be stored')
-
-def normalize_image(image, dtype):
-    image = tf.cast(image, dtype)
-
-    image = preprocess_ssd.normalize_image(image)
-    return image
+parser.add_argument('--class_activation', type=str, default='softmax', help='Classification activation function')
 
 def main(argv=None):
     if FLAGS.checkpoint:
@@ -53,9 +44,7 @@ def main(argv=None):
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
 
-            self.model = encoder.create_model(FLAGS.model_name, FLAGS.num_classes)
-
-            self.all_anchors, self.all_grid_xy, self.all_ratios = anchors_gen.generate_anchors(FLAGS.image_size, self.model.output_sizes)
+            self.model = encoder.create_model(FLAGS.d, FLAGS.num_classes, class_activation=FLAGS.class_activation, dtype=tf.float32)
 
             checkpoint = tf.train.Checkpoint(model=self.model)
 
@@ -66,21 +55,16 @@ def main(argv=None):
         @tf.function(input_signature=[tf.TensorSpec([None, FLAGS.image_size * FLAGS.image_size * 3], tf.uint8, name='model_input_images')])
         def __call__(self, inputs):
             images = tf.reshape(inputs, [-1, FLAGS.image_size, FLAGS.image_size, 3])
-            images = normalize_image(images, tf.float32)
+            images = preprocess.preprocess_for_evaluation(images, dtype=tf.float32)
 
-            best_coords, best_scores, best_objs, best_cat_ids = eval_step_logits(self.model, images, FLAGS.image_size, FLAGS.num_classes,
-                    self.all_anchors, self.all_grid_xy, self.all_ratios,
-                    FLAGS.min_obj_score, FLAGS.min_score, FLAGS.min_size, FLAGS.max_ret, FLAGS.iou_threshold)
+            bboxes, scores, categories = self.model(images, training=False, score_threshold=FLAGS.min_score, iou_threshold=FLAGS.iou_threshold, max_ret=FLAGS.max_ret)
 
-            return best_coords, best_scores, best_objs, best_cat_ids
+            return bboxes, scores, scores, categories
 
 
     model = MyModel()
 
-    logger.info('model with {} backend has been created, image size: {}'.format(FLAGS.model_name, FLAGS.image_size))
-    #x = tf.keras.layers.Input(shape=(FLAGS.image_size * FLAGS.image_size * 3), dtype=tf.uint8, name='input/images')
-    x = tf.zeros((1, FLAGS.image_size * FLAGS.image_size * 3), dtype=tf.uint8)
-    _ = model(x)
+    logger.info('model: d: {}, image size: {}'.format(FLAGS.d, FLAGS.image_size))
 
     output_dir = '{}_saved_model'.format(checkpoint_prefix)
     tf.saved_model.save(model, output_dir)
