@@ -25,6 +25,7 @@ import metric
 import preprocess
 
 parser = argparse.ArgumentParser()
+parser.add_argument('--optimizer', type=str, default='sgd', choices=['adam', 'sgd', 'radam_lookahead', 'modern'], help='Optimizer')
 parser.add_argument('--category_json', type=str, required=True, help='Category to ID mapping json file.')
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch.')
 parser.add_argument('--eval_batch_size', type=int, default=128, help='Number of images to process in a batch.')
@@ -458,9 +459,17 @@ def train():
         steps_per_train_epoch, train_num_images,
         steps_per_eval_epoch, eval_num_images))
 
-    #opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
-    opt = tfa.optimizers.RectifiedAdam(lr=learning_rate, min_lr=FLAGS.min_learning_rate)
-    opt = tfa.optimizers.Lookahead(opt, sync_period=6, slow_step_size=0.5)
+    if FLAGS.optimizer == 'adam':
+        opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    elif FLAGS.optimizer == 'sgd':
+        opt = tf.keras.optimizers.SGD(learning_rate=learning_rate, momentum=0.9)
+    elif FLAGS.optimizer == 'modern' or FLAGS.optimizer == 'radam_lookahead':
+        opt = tfa.optimizers.RectifiedAdam(lr=learning_rate, min_lr=FLAGS.min_learning_rate)
+        opt = tfa.optimizers.Lookahead(opt, sync_period=6, slow_step_size=0.5)
+    else:
+        logger.error('Unsupported optimized \'{}\''.format(FLAGS.optimizer))
+        exit(-1)
+
     if FLAGS.use_fp16:
         opt = mixed_precision.LossScaleOptimizer(opt, loss_scale='dynamic')
 
@@ -622,8 +631,8 @@ def train():
 
         best_saved_path = restore_path
 
-        best_metric = evaluate.evaluate(model, eval_dataset, class2idx, anchors_all, output_xy_grids, output_ratios, FLAGS.steps_per_eval_epoch, data_dir=FLAGS.train_dir)
-        run_eval_epoch(eval_dataset, FLAGS.steps_per_eval_epoch)
+        best_metric = evaluate.evaluate(model, eval_dataset, class2idx, anchors_all, output_xy_grids, output_ratios, steps_per_eval_epoch, data_dir=FLAGS.train_dir)
+        #run_eval_epoch(eval_dataset, steps_per_eval_epoch)
         logger.info('initial validation metric: {:.3f}'.format(best_metric))
 
         if FLAGS.only_test:
@@ -647,17 +656,17 @@ def train():
         want_reset = False
 
         if FLAGS.run_evaluation_first:
-            new_metric = evaluate.evaluate(model, eval_dataset, class2idx, anchors_all, output_xy_grids, output_ratios, FLAGS.steps_per_eval_epoch, data_dir=FLAGS.train_dir)
+            new_metric = evaluate.evaluate(model, eval_dataset, class2idx, anchors_all, output_xy_grids, output_ratios, steps_per_eval_epoch, data_dir=FLAGS.train_dir)
             FLAGS.run_evaluation_first = False
 
-        train_steps = run_train_epoch(train_dataset, FLAGS.steps_per_train_epoch, (epoch == 0))
+        train_steps = run_train_epoch(train_dataset, steps_per_train_epoch, (epoch == 0))
 
         if hvd.rank() == 0:
             saved_path = manager.save()
 
         new_metric = 0
-        new_metric = evaluate.evaluate(model, eval_dataset, class2idx, anchors_all, output_xy_grids, output_ratios, FLAGS.steps_per_eval_epoch, data_dir=FLAGS.train_dir)
-        run_eval_epoch(eval_dataset, FLAGS.steps_per_eval_epoch)
+        new_metric = evaluate.evaluate(model, eval_dataset, class2idx, anchors_all, output_xy_grids, output_ratios, steps_per_eval_epoch, data_dir=FLAGS.train_dir)
+        #run_eval_epoch(eval_dataset, steps_per_eval_epoch)
 
         new_lr = learning_rate.numpy()
 
