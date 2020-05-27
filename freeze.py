@@ -7,8 +7,9 @@ import tensorflow as tf
 from tensorflow.python.compiler.tensorrt import trt_convert as trt
 
 import anchors_gen
+import bndbox
 import encoder
-import preprocess_ssd
+import preprocess
 
 from infdet import eval_step_logits
 
@@ -33,12 +34,6 @@ parser.add_argument('--min_obj_score', type=float, default=0.3, help='Minimal cl
 parser.add_argument('--min_size', type=float, default=4, help='Minimal size of the bounding box')
 parser.add_argument('--iou_threshold', type=float, default=0.45, help='Minimal IoU threshold for non-maximum suppression')
 parser.add_argument('--output_dir', type=str, help='Path to directory, where images will be stored')
-
-def normalize_image(image, dtype):
-    image = tf.cast(image, dtype)
-
-    image = preprocess_ssd.normalize_image(image)
-    return image
 
 def main(argv=None):
     if FLAGS.checkpoint:
@@ -66,13 +61,13 @@ def main(argv=None):
         @tf.function(input_signature=[tf.TensorSpec([None, FLAGS.image_size * FLAGS.image_size * 3], tf.uint8, name='model_input_images')])
         def __call__(self, inputs):
             images = tf.reshape(inputs, [-1, FLAGS.image_size, FLAGS.image_size, 3])
-            images = normalize_image(images, tf.float32)
+            images = preprocess.preprocess_for_evaluation(images, tf.float32)
 
-            best_coords, best_scores, best_objs, best_cat_ids = eval_step_logits(self.model, images, FLAGS.image_size, FLAGS.num_classes,
+            pred_bboxes, pred_scores, pred_objs, pred_cat_ids = bndbox.make_predictions(model, images,
                     self.all_anchors, self.all_grid_xy, self.all_ratios,
-                    FLAGS.min_obj_score, FLAGS.min_score, FLAGS.min_size, FLAGS.max_ret, FLAGS.iou_threshold)
+                    min_obj_score=FLAGS.min_obj_score, min_score=FLAGS.min_score, min_size=FLAGS.min_size, iou_threshold=FLAGS.iou_threshold)
 
-            return best_coords, best_scores, best_objs, best_cat_ids
+            return pred_coords, pred_scores, pred_objs, pred_cat_ids
 
 
     model = MyModel()
