@@ -90,16 +90,23 @@ class FastFusion(tf.keras.layers.Layer):
         ----------
         inputs: List[tf.Tensor] of shape (BATCH, H, W, C)
         """
-        # The last feature map has to be resized according to the
-        # other inputs
-        inputs[-1] = self.resize(inputs[-1], tf.shape(inputs[0]), training=training)
 
         # wi has to be larger than 0 -> Apply ReLU
         w = self.relu(self.w)
         w_sum = EPSILON + tf.reduce_sum(w, axis=0)
 
         # [INPUTS, BATCH, H, W, C]
-        weighted_inputs = [w[i] * inputs[i] for i in range(self.size)]
+        # The last feature map has to be resized according to the
+        # other inputs
+
+        weighted_inputs = []
+        for i in range(self.size):
+            if i == self.size - 1:
+                inp = self.resize(inputs[-1], tf.shape(inputs[0]), training=training)
+            else:
+                inp = inputs[i]
+
+            weighted_inputs.append(w[i] * inp)
 
         # Sum weighted inputs
         # (BATCH, H, W, C)
