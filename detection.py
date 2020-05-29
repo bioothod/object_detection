@@ -256,7 +256,8 @@ def train():
         class2idx = json.load(f)
 
     logger.info('start: {}'.format(' '.join(sys.argv)))
-    logger.info('FLAGS: {}'.format(FLAGS))
+    for k, v in FLAGS.__dict__.items():
+        logger.info('  --{}={}'.format(k, v))
 
     gpus = tf.config.experimental.list_physical_devices('GPU')
     for gpu in gpus:
