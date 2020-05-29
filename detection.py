@@ -554,10 +554,13 @@ def train():
 
         return total_loss, gradients
 
-    def run_train_epoch(dataset, max_steps, is_training, broadcast_variables=False):
+    def run_train_epoch(lr_sched, dataset, max_steps, is_training, broadcast_variables=False):
         step = 0
         acc_gradients = []
         for filenames, image_ids, images, true_values in dataset:
+            new_lr = lr_sched(global_step.numpy())
+            learning_rate.assign(new_lr)
+
             total_loss, gradients = train_step(filenames, images, true_values)
 
             if tf.math.is_nan(total_loss):
@@ -661,9 +664,6 @@ def train():
         lr_sched = callbacks.ResetLRScheduler(learning_rate=FLAGS.initial_learning_rate, min_learning_rate=FLAGS.min_learning_rate,
                 epochs_lr_update=FLAGS.epochs_lr_update, warmup_steps=FLAGS.lr_warmup_steps, reset_on_lr_update=FLAGS.reset_on_lr_update)
 
-    new_lr, want_reset = lr_sched(epoch_var.numpy(), global_step.numpy(), new_metric=0)
-    learning_rate.assign(new_lr)
-
     for epoch in range(FLAGS.num_epochs):
         met.reset_states()
 
@@ -671,7 +671,7 @@ def train():
             new_metric = evaluate.evaluate(model, eval_dataset, class2idx, anchors_all, output_xy_grids, output_ratios, steps_per_eval_epoch, data_dir=FLAGS.train_dir)
             FLAGS.run_evaluation_first = False
 
-        train_steps = run_train_epoch(train_dataset, steps_per_train_epoch, (epoch == 0))
+        train_steps = run_train_epoch(lr_sched, train_dataset, steps_per_train_epoch, (epoch == 0))
 
         if hvd.rank() == 0:
             saved_path = manager.save()
@@ -694,7 +694,7 @@ def train():
 
             best_metric = new_metric
 
-        new_lr, want_reset = lr_sched(epoch_var.numpy(), global_step.numpy(), new_metric)
+        want_reset = lr_sched.update(epoch_var.numpy(), global_step.numpy(), new_metric)
 
         if want_reset:
             restore_path = tf.train.latest_checkpoint(good_checkpoint_dir)
@@ -712,8 +712,6 @@ def train():
                 epoch_var.assign(epoch_num)
                 global_step.assign(step_num)
 
-        # update learning rate even without resetting model
-        learning_rate.assign(new_lr)
         epoch_var.assign_add(1)
 
 

@@ -33,9 +33,12 @@ class WarmupCosineDecayLRScheduler(tf.keras.optimizers.schedules.LearningRateSch
                        lambda: tf.multiply(self.linear_increase, self.last_step),
                        lambda: self.run_decay())
 
-    def __call__(self, epoch, step, new_metric):
+    def __call__(self, step):
         self.last_step = step
-        return self.current_lr, False
+        return self.current_lr
+
+    def update(self, epoch, step, new_metric):
+        return False
 
     def get_config(self):
         config = {
@@ -72,7 +75,10 @@ class ResetLRScheduler(tf.keras.optimizers.schedules.LearningRateSchedule):
         self.learning_rate_multiplier = self.initial_learning_rate_multiplier
         self.best_metric = best_metric
 
-    def __call__(self, epoch, step, new_metric):
+    def __call__(self, step):
+        return self.learning_rate
+
+    def update(self, epoch, step, new_metric):
         if new_metric > self.best_metric:
             self.reset(new_metric)
         else:
