@@ -59,6 +59,8 @@ def evaluate(model: tf.keras.Model,
              dataset: tf.data.Dataset,
              class2idx: typing.Mapping[str, int],
              steps: int,
+             save_examples: int = 0,
+             data_dir: str = None,
              print_every: int = 10):
 
     gt_coco = dict(images=[], annotations=[])
@@ -101,6 +103,35 @@ def evaluate(model: tf.keras.Model,
             if pred_labels.shape[0] > 0:
                 results = _COCO_result(image_id, pred_labels, pred_boxes, pred_scores)
                 results_coco.extend(results)
+
+            if save_examples > 0 and data_dir is not None:
+                new_anns = []
+                for bb, label in zip(gt_boxes, gt_labels):
+                    if label == -1:
+                        continue
+
+                    label = 0
+                    new_anns.append((bb, None, label))
+
+                for bb, label in zip(pred_bboxes, pred_labels):
+                    if label == -1:
+                        continue
+
+                    label = 1
+                    new_anns.append((bb, None, label))
+
+                filename = filenames[batch_idx]
+                filename = str(filename.numpy(), 'utf8')
+                filename_base = os.path.basename(filename)
+                filename_base = os.path.splitext(filename_base)[0]
+
+                image = images[batch_idx]
+                image = image.numpy()
+                image = image * 128 + 128
+                image = image.astype(np.uint8)
+
+                dst = os.path.join(data_dir, filename_base) + '.png'
+                image_draw.draw_im(image, new_anns, dst, {})
 
             annot_id += len(annots)
             image_id += 1
