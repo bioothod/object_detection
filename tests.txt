@@ -7,7 +7,7 @@ badoo/21
 /shared2/object_detection/train/det/gpurnd3/det1
 efficientdet-d2, class_activation: sigmoid, iamge_size: default/768
 badoo/21
-0.1795
+0.2109
 
 ========= gpurnd4
 /shared2/object_detection/train/det/gpurnd4/efn0
@@ -18,27 +18,27 @@ badoo/21
 /shared2/object_detection/train/det/gpurnd4/efn1
 yolov3 old, efficientnet-b0, image_size: 512
 mscoco/80
-0.0300
+0.0303
 
 ========= gpurnd5
 /shared2/object_detection/train/det/gpurnd5/efn0
 yolov3 old, efficientnet-b6, image_size: default/528
 badoo/21
 0.1246 - older, augmentation: v0
-0.0410
+0.0929
 
 /shared2/object_detection/train/det/gpurnd5/det1
 efficientdet-d2, class_activation: sigmoid, image_size: 512
 mscoco/80
-0.0669
+0.0671
 
 ========= gpurnd6
 /shared2/object_detection/train/det/gpurnd6/efn/efn0
 yolov3 old, efficientnet-b0, image_size: 512
 badoo/21
-0.1562
+0.1650
 
 /shared2/object_detection/train/det/gpurnd6/efn/efn1
 yolov3 old, efficientnet-b0, image_size: default/224
 mscoco/80
-0.0391
+0.0396
