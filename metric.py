@@ -229,7 +229,7 @@ class ModelMetric:
 
         return giou
 
-    def focal_loss(self, y_true, y_pred, alpha=1, gamma=2):
+    def focal_loss(self, y_true, y_pred, alpha=1, gamma=1.5):
         focal_loss = alpha * tf.pow(tf.abs(y_true - y_pred), gamma)
         return focal_loss
 
