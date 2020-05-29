@@ -17,6 +17,7 @@ logger = logging.getLogger('detection')
 
 import anchors_gen
 import autoaugment
+import callbacks
 import config
 import encoder
 import evaluate
@@ -46,6 +47,9 @@ parser.add_argument('--print_per_train_steps', default=100, type=int, help='Prin
 parser.add_argument('--min_eval_metric', default=0.2, type=float, help='Minimal evaluation metric to start saving models')
 parser.add_argument('--epochs_lr_update', default=10, type=int, help='Maximum number of epochs without improvement used to reset or decrease learning rate')
 parser.add_argument('--reset_on_lr_update', action='store_true', help='Whether to reset to the best model after learning rate update')
+parser.add_argument('--lr_scheduler', type=str, choices=['reset', 'cosine'], default='reset', help='Learning rate scheduler')
+parser.add_argument('--lr_warmup_steps', default=0, type=int, help='Learning rate warmup steps')
+parser.add_argument('--lr_decay_epochs', default=0, type=int, help='Learning rate decays epochs')
 parser.add_argument('--use_fp16', action='store_true', help='Whether to use fp16 training/inference')
 parser.add_argument('--dataset_type', type=str, choices=['tfrecords', 'annotations'], default='tfrecords', help='Dataset type')
 parser.add_argument('--train_tfrecord_pattern', type=str, help='Training TFRecords pattern')
@@ -264,7 +268,6 @@ def wrap_dataset(ds, dtype, is_training):
     ds = ds.repeat()
 
     return ds
-
 
 def train():
     checkpoint_dir = os.path.join(FLAGS.train_dir, 'checkpoints')
@@ -621,9 +624,6 @@ def train():
 
     best_metric = 0
     best_saved_path = None
-    num_epochs_without_improvement = 0
-    initial_learning_rate_multiplier = 0.2
-    learning_rate_multiplier = initial_learning_rate_multiplier
 
     if restore_path:
         met.reset_states()
@@ -650,10 +650,22 @@ def train():
         num_replicas, checkpoint_dir, FLAGS.model_name, image_size, train_num_classes,
         num_vars, int(num_params)))
 
-    learning_rate.assign(FLAGS.initial_learning_rate)
+    if FLAGS.lr_scheduler == 'cosine':
+        decay_steps = FLAGS.num_epochs * steps_per_train_epoch
+        if FLAGS.lr_decay_epochs > 0:
+            decay_steps = FLAGS.lr_decay_epochs * steps_per_train_epoch
+
+        lr_sched = callbacks.WarmupCosineDecayLRScheduler(max_lr=FLAGS.initial_learning_rate, min_lr=FLAGS.min_learning_rate,
+                warmup_steps=FLAGS.lr_warmup_steps, decay_steps=decay_steps)
+    elif FLAGS.lr_scheduler == 'reset':
+        lr_sched = callbacks.ResetLRScheduler(learning_rate=FLAGS.initial_learning_rate, min_learning_rate=FLAGS.min_learning_rate,
+                epochs_lr_update=FLAGS.epochs_lr_update, warmup_steps=FLAGS.lr_warmup_steps, reset_on_lr_update=FLAGS.reset_on_lr_update)
+
+    new_lr, want_reset = lr_sched(epoch_var.numpy(), global_step.numpy(), new_metric=0)
+    learning_rate.assign(new_lr)
+
     for epoch in range(FLAGS.num_epochs):
         met.reset_states()
-        want_reset = False
 
         if FLAGS.run_evaluation_first:
             new_metric = evaluate.evaluate(model, eval_dataset, class2idx, anchors_all, output_xy_grids, output_ratios, steps_per_eval_epoch, data_dir=FLAGS.train_dir)
@@ -664,14 +676,11 @@ def train():
         if hvd.rank() == 0:
             saved_path = manager.save()
 
-        new_metric = 0
         new_metric = evaluate.evaluate(model, eval_dataset, class2idx, anchors_all, output_xy_grids, output_ratios, steps_per_eval_epoch, data_dir=FLAGS.train_dir)
         #run_eval_epoch(eval_dataset, steps_per_eval_epoch)
 
-        new_lr = learning_rate.numpy()
-
-        logger.info('epoch: {}/{}, train: steps: {}, lr: {:.2e}, train: {}, val_metric: {:.4f}/{:.4f}'.format(
-            epoch_var.numpy(), num_epochs_without_improvement, global_step.numpy(),
+        logger.info('epoch: {}, train: steps: {}, lr: {:.2e}, train: {}, val_metric: {:.4f}/{:.4f}'.format(
+            epoch_var.numpy(), global_step.numpy(),
             learning_rate.numpy(),
             met.str_result(True),
             new_metric, best_metric))
@@ -685,45 +694,15 @@ def train():
 
             best_metric = new_metric
 
-            num_epochs_without_improvement = 0
-            learning_rate_multiplier = initial_learning_rate_multiplier
-        else:
-            num_epochs_without_improvement += 1
-
-
-        if num_epochs_without_improvement >= FLAGS.epochs_lr_update:
-            if learning_rate > FLAGS.min_learning_rate:
-                new_lr = learning_rate.numpy() * learning_rate_multiplier
-                if new_lr < FLAGS.min_learning_rate:
-                    new_lr = FLAGS.min_learning_rate
-
-                if FLAGS.reset_on_lr_update:
-                    want_reset = True
-
-                logger.info('epoch: {}/{}, global_step: {}, epochs without metric improvement: {}, best metric: {:.5f}, updating learning rate: {:.2e} -> {:.2e}, will reset: {}'.format(
-                    epoch_var.numpy(), num_epochs_without_improvement, global_step.numpy(), num_epochs_without_improvement, best_metric, learning_rate.numpy(), new_lr, want_reset))
-                num_epochs_without_improvement = 0
-                if learning_rate_multiplier > 0.1:
-                    learning_rate_multiplier /= 2
-
-
-            elif num_epochs_without_improvement >= FLAGS.epochs_lr_update:
-                new_lr = FLAGS.initial_learning_rate
-                want_reset = True
-
-                logger.info('epoch: {}/{}, global_step: {}, epochs without metric improvement: {}, best metric: {:.5f}, resetting learning rate: {:.2e} -> {:.2e}, will reset: {}'.format(
-                    epoch_var.numpy(), num_epochs_without_improvement, global_step.numpy(), num_epochs_without_improvement, best_metric, learning_rate.numpy(), new_lr, want_reset))
-
-                num_epochs_without_improvement = 0
-                learning_rate_multiplier = initial_learning_rate_multiplier
+        new_lr, want_reset = lr_sched(epoch_var.numpy(), global_step.numpy(), new_metric)
 
         if want_reset:
             restore_path = tf.train.latest_checkpoint(good_checkpoint_dir)
             if restore_path:
                 epoch_num = epoch_var.numpy()
                 step_num = global_step.numpy()
-                logger.info('epoch: {}/{}, global_step: {}, best metric: {:.5f}, learning rate: {:.2e} -> {:.2e}, restoring best checkpoint: {}'.format(
-                    epoch_var.numpy(), num_epochs_without_improvement, global_step.numpy(), best_metric, learning_rate.numpy(), new_lr, best_saved_path))
+                logger.info('epoch: {}, global_step: {}, best metric: {:.5f}, learning rate: {:.2e} -> {:.2e}, restoring best checkpoint: {}'.format(
+                    epoch_var.numpy(), global_step.numpy(), best_metric, learning_rate.numpy(), new_lr, best_saved_path))
 
                 num_epochs_without_improvement = 0
                 learning_rate_multiplier = initial_learning_rate_multiplier
