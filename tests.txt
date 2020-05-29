@@ -28,9 +28,12 @@ badoo/21
 0.0929
 
 /shared2/object_detection/train/det/gpurnd5/det1
-efficientdet-d2, class_activation: sigmoid, image_size: 512
+efficientdet-d0, class_activation: sigmoid, image_size: default/512
 mscoco/80
 0.0671
+/shared2/object_detection/train/det/gpurnd5/det2
+efficientdet-d0, class_activation: sigmoid, image_size: default/512
+mscoco/80
 
 ========= gpurnd6
 /shared2/object_detection/train/det/gpurnd6/efn/efn0
