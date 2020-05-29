@@ -652,7 +652,6 @@ def train():
                 global_step.assign(step_num)
 
         # update learning rate even without resetting model
-        learning_rate.assign(new_lr)
         epoch_var.assign_add(1)
 
 
