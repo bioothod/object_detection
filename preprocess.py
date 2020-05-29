@@ -220,8 +220,7 @@ def rotate_points(points, theta):
 def preprocess_for_train(image, word_poly, text_labels, rotation_augmentation, use_augmentation, dtype):
     # image is a squared dtype already
 
-    resize_rnd = tf.random.uniform([], 0, 1)
-    if resize_rnd > 0.4:
+    if tf.random.uniform([], 0, 1) > 0.5:
         x = word_poly[..., 0]
         y = word_poly[..., 1]
         max_ratio = 1.3
@@ -248,7 +247,7 @@ def preprocess_for_train(image, word_poly, text_labels, rotation_augmentation, u
 
         min_dist = tf.minimum(dx, dy)
 
-        if min_dist >= max_ratio * min_size and resize_rnd > 0.7 and tf.shape(x)[0] > 0:
+        if min_dist >= max_ratio * min_size and tf.random.uniform([], 0, 1) > 0.5 and tf.shape(x)[0] > 0:
             maxval = min_dist/min_size
             ratio = tf.random.uniform([], minval=1.01, maxval=maxval, dtype=word_poly.dtype)
 
