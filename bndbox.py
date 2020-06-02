@@ -230,6 +230,5 @@ def make_predictions(model: tf.keras.Model,
         return tf.map_fn(lambda out: per_image_supression(out, image_size, num_classes, min_obj_score, min_score, min_size, max_ret, iou_threshold),
                          (pred_bboxes, pred_scores, pred_labels, pred_objs),
                          parallel_iterations=16,
-                         back_prop=False,
                          dtype=(tf.float32, tf.float32, tf.float32, tf.int32))
 
