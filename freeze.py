@@ -47,7 +47,9 @@ def main(argv=None):
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
 
-            self.model = encoder.create_model(FLAGS.model_name, FLAGS.num_classes)
+            self.model = encoder.create_model(FLAGS.model_name, FLAGS.num_classes, FLAGS.image_size)
+            dummy_input = tf.ones((1, FLAGS.image_size, FLAGS.image_size, 3), dtype=tf.float32)
+            _ = self.model(dummy_input, training=False)
 
             self.all_anchors, self.all_grid_xy, self.all_ratios = anchors_gen.generate_anchors(FLAGS.image_size, self.model.output_sizes)
 
