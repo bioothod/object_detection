@@ -64,6 +64,7 @@ parser.add_argument('--grad_accumulate_steps', type=int, default=1, help='Number
 parser.add_argument('--reg_loss_weight', type=float, default=0, help='L2 regularization weight')
 parser.add_argument('--only_test', action='store_true', help='Exist after running initial validation')
 parser.add_argument('--run_evaluation_first', action='store_true', help='Run evaluation before the first training epoch')
+parser.add_argument('--skip_initial_evaluation', action='store_true', help='Skip initial evaluation if there is a checkpoint')
 parser.add_argument('--train_echo_factor', type=int, default=1, help='Repeat augmented examples this many times in shuffle buffer before batching and training')
 parser.add_argument('--class_activation', type=str, default='softmax', help='Classification activation function')
 parser.add_argument('--rotation_augmentation', type=int, default=-1, help='Angle for rotation augmentation')
@@ -571,12 +572,13 @@ def train():
 
     if restore_path:
         met.reset_states()
-        logger.info('there is a checkpoint {}, running initial validation'.format(restore_path))
 
         best_saved_path = restore_path
+        if not FLAGS.skip_initial_evaluation:
+            logger.info('there is a checkpoint {}, running initial validation'.format(restore_path))
 
-        best_metric = evaluate.evaluate(model, eval_dataset, class2idx, FLAGS.steps_per_eval_epoch)
-        logger.info('initial validation metric: {:.3f}'.format(best_metric))
+            best_metric = evaluate.evaluate(model, eval_dataset, class2idx, steps_per_eval_epoch)
+            logger.info('initial validation metric: {:.3f}'.format(best_metric))
 
         if FLAGS.only_test:
             logger.info('Exiting...')
