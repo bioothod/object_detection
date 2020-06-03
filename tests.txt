@@ -20,7 +20,7 @@ yolov3 old, efficientnet-b0, image_size: 512
 mscoco/80
 0.0303
 yolov3 old, efficientnet-b0, image_size: 380, new lr cosine scheduler
-0.0320
+0.0330
 
 ========= gpurnd5
 /shared2/object_detection/train/det/gpurnd5/efn0
@@ -36,7 +36,7 @@ mscoco/80
 /shared2/object_detection/train/det/gpurnd5/det2
 efficientdet-d0, class_activation: sigmoid, image_size: default/512
 mscoco/80
-0.0988
+0.1005
 
 ========= gpurnd6
 /shared2/object_detection/train/det/gpurnd6/efn/efn0
