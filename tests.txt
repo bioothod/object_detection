@@ -36,7 +36,7 @@ mscoco/80
 /shared2/object_detection/train/det/gpurnd5/det2
 efficientdet-d0, class_activation: sigmoid, image_size: default/512
 mscoco/80
-0.1005
+0.1343
 
 ========= gpurnd6
 /shared2/object_detection/train/det/gpurnd6/efn/efn0
