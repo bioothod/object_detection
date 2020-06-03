@@ -608,15 +608,15 @@ def train():
         met.reset_states()
 
         if FLAGS.run_evaluation_first:
-            new_metric = evaluate.evaluate(model, eval_dataset, class2idx, FLAGS.steps_per_eval_epoch)
+            new_metric = evaluate.evaluate(model, eval_dataset, class2idx, steps_per_eval_epoch)
             FLAGS.run_evaluation_first = False
 
-        train_steps = run_train_epoch(lr_sched, train_dataset, train_step, FLAGS.steps_per_train_epoch, (epoch == 0))
+        train_steps = run_train_epoch(lr_sched, train_dataset, train_step, steps_per_train_epoch, (epoch == 0))
 
         if hvd.rank() == 0:
             saved_path = manager.save()
 
-        new_metric = evaluate.evaluate(model, eval_dataset, class2idx, FLAGS.steps_per_eval_epoch)
+        new_metric = evaluate.evaluate(model, eval_dataset, class2idx, steps_per_eval_epoch)
 
         logger.info('epoch: {}, train: steps: {}, lr: {:.2e}, train: {}, val_metric: {:.4f}/{:.4f}'.format(
             epoch_var.numpy(), global_step.numpy(),
