@@ -55,7 +55,31 @@ class generator(object):
         return len(self.image_categories)
 
     def get_images_from_categories(self, category_ids, cat2ann, max_num):
-        cat_ids = np.random.choice(category_ids, max_num, replace=True)
+        cat_counts = []
+        cat_total = 0
+        for cat_id in category_ids:
+            anns = cat2ann[cat_id]
+            ann_num = len(anns)
+
+            cat_counts.append(ann_num)
+            cat_total += ann_num
+
+        cat_counts = np.array(cat_counts, dtype=np.float32)
+        cat_max = cat_counts.max()
+        cat_min = cat_counts.min()
+
+        M = min(50, cat_max / cat_min)
+        K = (1 - cat_min / cat_max) * M / (M - 1)
+
+        new_counts = []
+        for count in cat_counts:
+            new_count = cat_max - (cat_max - count) / K
+            new_counts.append(new_count)
+
+        new_counts = np.array(new_counts)
+        cat_probs = new_counts / new_counts.sum()
+
+        cat_ids = np.random.choice(category_ids, max_num, replace=True, p=cat_probs)
         cat_nums = defaultdict(int)
         for cat_id in cat_ids:
             cat_nums[cat_id] += 1
