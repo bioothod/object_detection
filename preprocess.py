@@ -220,7 +220,7 @@ def rotate_points(points, theta):
 def preprocess_for_train(image, word_poly, text_labels, rotation_augmentation, use_augmentation, dtype):
     # image is a squared dtype already
 
-    if tf.random.uniform([], 0, 1) > 0.5:
+    if tf.shape(word_poly)[0] != 0 and tf.random.uniform([], 0, 1) > 0.5:
         x = word_poly[..., 0]
         y = word_poly[..., 1]
         max_ratio = 1.3
@@ -297,11 +297,12 @@ def preprocess_for_train(image, word_poly, text_labels, rotation_augmentation, u
 
         image = tfa.image.rotate(image, angle, interpolation='BILINEAR')
 
-        angle = tf.cast(angle, word_poly.dtype)
-        current_image_size = tf.cast(tf.shape(image)[1], word_poly.dtype)
-        word_poly -= [current_image_size/2, current_image_size/2]
-        word_poly = rotate_points(word_poly, angle)
-        word_poly += [current_image_size/2, current_image_size/2]
+        if tf.shape(word_poly)[0] != 0:
+            angle = tf.cast(angle, word_poly.dtype)
+            current_image_size = tf.cast(tf.shape(image)[1], word_poly.dtype)
+            word_poly -= [current_image_size/2, current_image_size/2]
+            word_poly = rotate_points(word_poly, angle)
+            word_poly += [current_image_size/2, current_image_size/2]
 
     image = tf.cast(image, dtype)
     image -= 128
