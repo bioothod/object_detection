@@ -30,7 +30,7 @@ parser.add_argument('--optimizer', type=str, default='sgd', choices=['adam', 'sg
 parser.add_argument('--category_json', type=str, required=True, help='Category to ID mapping json file.')
 parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch.')
 parser.add_argument('--eval_batch_size', type=int, default=128, help='Number of images to process in a batch.')
-parser.add_argument('--max_items_in_image', type=int, default=32, help='Limit number of true objects in image.')
+parser.add_argument('--max_items_in_image', type=int, default=64, help='Limit number of true objects in image.')
 parser.add_argument('--num_epochs', type=int, default=1000, help='Number of epochs to run.')
 parser.add_argument('--epoch', type=int, default=0, help='Initial epoch\'s number')
 parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel preprocessing jobs.')
@@ -57,7 +57,8 @@ parser.add_argument('--train_tfrecord_pattern', type=str, help='Training TFRecor
 parser.add_argument('--eval_tfrecord_pattern', type=str, help='Evaluation TFRecords pattern')
 parser.add_argument('--train_annotations_json', type=str, help='Training annotations pattern')
 parser.add_argument('--eval_annotations_json', type=str, help='Evaluation annotations pattern')
-parser.add_argument('--num_classes', type=int, help='Number of classes in the dataset')
+parser.add_argument('--num_classes', type=int, required=True, help='Number of classes in the dataset')
+parser.add_argument('--num_image_classes', type=int, required=True, help='Number of classes in the dataset')
 parser.add_argument('--train_num_images', type=int, default=-1, help='Number of images in train epoch')
 parser.add_argument('--eval_num_images', type=int, default=-1, help='Number of images in eval epoch')
 parser.add_argument('--grad_accumulate_steps', type=int, default=1, help='Number of batches to accumulate before gradient update')
@@ -65,6 +66,7 @@ parser.add_argument('--reg_loss_weight', type=float, default=0, help='L2 regular
 parser.add_argument('--only_test', action='store_true', help='Exist after running initial validation')
 parser.add_argument('--run_evaluation_first', action='store_true', help='Run evaluation before the first training epoch')
 parser.add_argument('--skip_initial_evaluation', action='store_true', help='Skip initial evaluation if there is a checkpoint')
+parser.add_argument('--enable_debugging', action='store_true', help='Whether to enable runtime TF debugging')
 parser.add_argument('--train_echo_factor', type=int, default=1, help='Repeat augmented examples this many times in shuffle buffer before batching and training')
 parser.add_argument('--class_activation', type=str, default='softmax', help='Classification activation function')
 parser.add_argument('--rotation_augmentation', type=int, default=-1, help='Angle for rotation augmentation')
@@ -91,7 +93,7 @@ def polygon2bbox(poly, want_yx=False, want_wh=False):
 
     return bbox
 
-def prepare_example(filename, image_id, image, orig_bboxes, orig_labels, image_size, num_classes, is_training, data_format):
+def prepare_example(filename, image_id, image, orig_bboxes, orig_labels, orig_image_labels, image_size, is_training, data_format):
     x0, y0, w, h = tf.split(orig_bboxes, num_or_size_splits=4, axis=1)
 
     orig_image_height = tf.cast(tf.shape(image)[0], tf.float32)
@@ -137,9 +139,29 @@ def prepare_example(filename, image_id, image, orig_bboxes, orig_labels, image_s
     new_bboxes = new_bboxes[:FLAGS.max_items_in_image, ...]
     new_labels = new_labels[:FLAGS.max_items_in_image]
 
-    return filename, image_id, image, new_bboxes, new_labels
+    new_image_labels = tf.zeros([0], dtype=tf.float32)
+    if FLAGS.num_image_classes > 0:
+        indexes = tf.expand_dims(orig_image_labels, 1)
+        updates = tf.ones_like(orig_image_labels, dtype=tf.float32)
+        shape = [FLAGS.num_image_classes]
+        new_image_labels = tf.scatter_nd(indexes, updates, shape)
 
-def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, data_format, dtype):
+    def check_nan(x):
+        x = tf.cast(x, tf.float32)
+        x = tf.math.is_nan(x)
+        x = tf.cast(x, tf.int32)
+        x = tf.reduce_sum(x)
+        return tf.math.not_equal(x, 0)
+
+    bn = check_nan(new_bboxes)
+    ln = check_nan(new_labels)
+    iln = check_nan(new_image_labels)
+    if bn or ln or iln:
+        tf.print(filename, ', new_bboxes:', bn, ', new_labels:', ln, ', new_image_labels:', iln)
+
+    return filename, image_id, image, new_bboxes, new_labels, new_image_labels
+
+def unpack_tfrecord(serialized_example, image_size, is_training, data_format, dtype):
     features = tf.io.parse_single_example(serialized_example,
             features={
                 'image_id': tf.io.FixedLenFeature([], tf.int64),
@@ -159,13 +181,13 @@ def unpack_tfrecord(serialized_example, image_size, num_classes, is_training, da
     image = tf.image.decode_jpeg(features['image'], channels=3)
     image = tf.cast(image, dtype)
 
-    return prepare_example(filename, image_id, image, orig_bboxes, orig_labels, image_size, num_classes, is_training, data_format)
+    return prepare_example(filename, image_id, image, orig_bboxes, orig_labels, [], image_size, is_training, data_format)
 
-def tf_read_image(filename, image_id, bboxes, labels, image_labels, image_size, num_classes, is_training, data_format, dtype):
+def tf_read_image(filename, image_id, bboxes, labels, image_labels, image_size, is_training, data_format, dtype):
     image = tf.io.read_file(filename)
     image = tf.io.decode_jpeg(image, channels=3)
     image = tf.cast(image, dtype)
-    return prepare_example(filename, image_id, image, bboxes, labels, image_size, num_classes, is_training, data_format)
+    return prepare_example(filename, image_id, image, bboxes, labels, image_labels, image_size, is_training, data_format)
 
 def calc_epoch_steps(num_files, batch_size):
     return (num_files + batch_size - 1) // batch_size
@@ -174,7 +196,7 @@ def draw_bboxes(dataset, cat_names, num_examples):
     data_dir = os.path.join(FLAGS.train_dir, 'tmp')
     os.makedirs(data_dir, exist_ok=True)
 
-    for filename, image_id, image, true_bboxes, true_labels in dataset.unbatch().take(num_examples):
+    for filename, image_id, image, true_bboxes, true_labels, true_image_labels in dataset.unbatch().take(num_examples):
         filename = str(filename.numpy(), 'utf8')
         filename_base = os.path.basename(filename)
         filename_base = os.path.splitext(filename_base)[0]
@@ -212,14 +234,13 @@ def generate_anchors(anchors_config: config.AnchorsConfig,
 
     return tf.concat(anchors_all, axis=0)
 
-def filter_fn(filename, image_id, image, true_bboxes, true_labels):
+def filter_fn(filename, image_id, image, true_bboxes, true_labels, true_image_labels):
     index = tf.math.not_equal(true_labels, -1)
-    index = tf.cast(index, tf.int32)
-    index_sum = tf.reduce_sum(index)
+    image_sum = tf.reduce_sum(true_image_labels)
 
-    return tf.math.logical_and(
-            tf.math.not_equal(index_sum, 0),
-            tf.math.not_equal(tf.shape(true_labels)[0], 0))
+    return tf.math.logical_or(
+            tf.math.not_equal(tf.shape(index)[0], 0),
+            tf.math.not_equal(image_sum, 0))
 
 def wrap_dataset(ds, image_size, dtype, is_training):
     ds = ds.filter(filter_fn)
@@ -228,7 +249,7 @@ def wrap_dataset(ds, image_size, dtype, is_training):
         batch_size = FLAGS.batch_size
         if FLAGS.train_echo_factor > 1:
             ds = ds.flat_map(lambda *t: tf.data.Dataset.from_tensors(t).repeat(FLAGS.train_echo_factor))
-        ds = ds.shuffle(256)
+        ds = ds.shuffle(batch_size * 10)
     else:
         batch_size = FLAGS.eval_batch_size
 
@@ -236,8 +257,8 @@ def wrap_dataset(ds, image_size, dtype, is_training):
 
     ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
     ds = ds.padded_batch(batch_size=batch_size,
-            padded_shapes=((), (), (image_size, image_size, 3), (FLAGS.max_items_in_image, 4), (FLAGS.max_items_in_image,)),
-            padding_values=('', tf.constant(0, dtype=tf.int64), 0*pad_value, -1*pad_value, -1))
+            padded_shapes=([], [], [image_size, image_size, 3], [FLAGS.max_items_in_image, 4], [FLAGS.max_items_in_image], [FLAGS.num_image_classes]),
+            padding_values=('', tf.constant(0, dtype=tf.int64), 0*pad_value, -1*pad_value, -1, 0.))
 
     ds = ds.repeat()
 
@@ -259,6 +280,9 @@ def train():
     logger.info('start: {}'.format(' '.join(sys.argv)))
     for k, v in FLAGS.__dict__.items():
         logger.info('  --{}={}'.format(k, v))
+
+    if FLAGS.enable_debugging:
+        tf.debugging.enable_check_numerics()
 
     gpus = tf.config.experimental.list_physical_devices('GPU')
     for gpu in gpus:
@@ -290,7 +314,7 @@ def train():
     epoch_var = tf.Variable(0, dtype=tf.int64, name='epoch_number', aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
     learning_rate = tf.Variable(FLAGS.initial_learning_rate, dtype=tf.float32, name='learning_rate')
 
-    model = encoder.create_model(FLAGS.d, FLAGS.num_classes, class_activation=FLAGS.class_activation, dtype=dtype)
+    model = encoder.create_model(FLAGS.d, FLAGS.num_classes, FLAGS.num_image_classes, class_activation=FLAGS.class_activation, dtype=dtype)
     image_size = model.config.input_size
 
     anchors_all = generate_anchors(model.anchors_config, model.config.input_size)
@@ -298,7 +322,7 @@ def train():
     if FLAGS.dataset_type == 'tfrecords':
         import glob
 
-        def create_dataset_from_tfrecord(name, dataset_pattern, image_size, num_classes, is_training):
+        def create_dataset_from_tfrecord(name, dataset_pattern, image_size, is_training):
             filenames = []
             for fn in glob.glob(dataset_pattern):
                 if os.path.isfile(fn):
@@ -312,7 +336,7 @@ def train():
 
             ds = tf.data.TFRecordDataset(filenames, num_parallel_reads=16)
             ds = ds.map(lambda record: unpack_tfrecord(record,
-                            image_size, num_classes, is_training,
+                            image_size, is_training,
                             FLAGS.data_format, dtype),
                     num_parallel_calls=FLAGS.num_cpus)
 
@@ -323,18 +347,13 @@ def train():
 
         train_num_images = FLAGS.train_num_images
         eval_num_images = FLAGS.eval_num_images
-        train_num_classes = FLAGS.num_classes
-
-        if train_num_classes is None:
-            logger.error('If there is no train_num_classes (tfrecord dataset), you must provide --num_classes')
-            exit(-1)
 
         train_cat_names = {}
         for cname, cid in class2idx.items():
             train_cat_names[cid] = cname
 
-        train_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_pattern, image_size, train_num_classes, is_training=True)
-        eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_pattern, image_size, train_num_classes, is_training=False)
+        train_dataset = create_dataset_from_tfrecord('train', FLAGS.train_tfrecord_pattern, image_size, is_training=True)
+        eval_dataset = create_dataset_from_tfrecord('eval', FLAGS.eval_tfrecord_pattern, image_size, is_training=False)
 
         steps_per_train_epoch = FLAGS.steps_per_train_epoch
         if FLAGS.train_num_images > 0:
@@ -386,10 +405,8 @@ def train():
                 yield_num_images += 1
                 yield filename, image_id, bboxes, labels, image_labels
 
-        def create_dataset_from_annotations(name, ann_file, image_size, num_classes, num_images, is_training):
+        def create_dataset_from_annotations(name, ann_file, image_size, num_images, is_training):
             bg = batch.generator(ann_file)
-            if num_classes is None:
-                num_classes = bg.num_classes()
 
             if num_images is None:
                 num_images = bg.num_images()
@@ -399,13 +416,13 @@ def train():
                                     output_shapes=(tf.TensorShape([]), tf.TensorShape([]), tf.TensorShape([None, 4]), tf.TensorShape([None]), tf.TensorShape([None])))
             ds = ds.map(lambda filename, image_id, bboxes, labels, image_labels:
                             tf_read_image(filename, image_id, bboxes, labels, image_labels,
-                                image_size, num_classes, is_training, FLAGS.data_format, dtype),
+                                image_size, is_training, FLAGS.data_format, dtype),
                         num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
             ds = wrap_dataset(ds, image_size, dtype, is_training)
 
             logger.info('{} dataset has been created, total images: {}, categories: {}, image_categories: {}'.format(name, bg.num_images(), bg.num_classes(), bg.num_image_classes()))
-            return ds, num_classes, num_images
+            return ds, num_images
 
         def calc_num_images(num_images, steps_per_epoch, batch_size):
             if num_images <= 0:
@@ -419,10 +436,8 @@ def train():
         train_num_images = calc_num_images(FLAGS.train_num_images, FLAGS.steps_per_train_epoch, FLAGS.batch_size)
         eval_num_images = calc_num_images(FLAGS.eval_num_images, FLAGS.steps_per_eval_epoch, FLAGS.batch_size)
 
-        train_dataset, train_num_classes, train_num_images = create_dataset_from_annotations('train', FLAGS.train_annotations_json, image_size,
-                num_classes=None, num_images=train_num_images, is_training=True)
-        eval_dataset, eval_num_classes, eval_num_images = create_dataset_from_annotations('eval', FLAGS.eval_annotations_json, image_size,
-                train_num_classes, num_images=eval_num_images, is_training=False)
+        train_dataset, train_num_images = create_dataset_from_annotations('train', FLAGS.train_annotations_json, image_size, num_images=train_num_images, is_training=True)
+        eval_dataset, eval_num_images = create_dataset_from_annotations('eval', FLAGS.eval_annotations_json, image_size, num_images=eval_num_images, is_training=False)
 
         steps_per_train_epoch = calc_epoch_steps(train_num_images, FLAGS.batch_size)
         steps_per_eval_epoch = calc_epoch_steps(eval_num_images, FLAGS.eval_batch_size)
@@ -484,15 +499,15 @@ def train():
 
             exit(0)
 
-    met = metric.ModelMetric(anchors_all, train_num_classes)
+    met = metric.ModelMetric(anchors_all, FLAGS.num_classes)
 
     @tf.function(experimental_relax_shapes=True)
-    def train_step(filenames, images, true_bboxes, true_labels):
+    def train_step(filenames, images, true_bboxes, true_labels, true_image_labels):
         with tf.GradientTape() as tape:
-            bboxes, class_scores = model(images, training=True)
+            bboxes, class_scores, image_scores = model(images, training=True)
 
-            dist_loss, class_loss = met(images, true_bboxes, true_labels, bboxes, class_scores, training=True)
-            total_loss = dist_loss + class_loss
+            dist_loss, class_loss, image_class_loss = met(images, true_bboxes, true_labels, true_image_labels, bboxes, class_scores, image_scores, training=True)
+            total_loss = dist_loss + class_loss + image_class_loss
 
             if FLAGS.reg_loss_weight != 0:
                 regex = r'.*(kernel|weight):0$'
@@ -514,11 +529,11 @@ def train():
     def run_train_epoch(lr_sched, dataset, step_func, max_steps, broadcast_variables=False):
         step = 0
         acc_gradients = []
-        for filenames, image_ids, images, true_bboxes, true_labels in dataset:
+        for filenames, image_ids, images, true_bboxes, true_labels, true_image_labels in dataset:
             new_lr = lr_sched(global_step.numpy())
             learning_rate.assign(new_lr)
 
-            total_loss, gradients = train_step(filenames, images, true_bboxes, true_labels)
+            total_loss, gradients = train_step(filenames, images, true_bboxes, true_labels, true_image_labels)
 
             if tf.math.is_nan(total_loss):
                 logger.info('Loss is NaN, skipping training step')
@@ -588,6 +603,7 @@ def train():
         logger.info('setting minimal evaluation metric {:.4f} -> {} from command line arguments'.format(best_metric, FLAGS.min_eval_metric))
         best_metric = FLAGS.min_eval_metric
 
+    model(tf.ones((1, image_size, image_size, 3), dtype=dtype), training=True)
     num_vars = len(model.trainable_variables)
     num_params = np.sum([np.prod(v.shape) for v in model.trainable_variables])
 

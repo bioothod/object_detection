@@ -45,25 +45,31 @@ class Metric:
         self.reg_loss = tf.keras.metrics.Mean()
         self.dist_loss = tf.keras.metrics.Mean()
         self.ce_loss = tf.keras.metrics.Mean()
+        self.ce_image_loss = tf.keras.metrics.Mean()
 
         self.ce_acc = tf.keras.metrics.CategoricalAccuracy()
+        self.ce_image_acc = tf.keras.metrics.CategoricalAccuracy()
 
     def reset_states(self):
         self.total_loss.reset_states()
         self.reg_loss.reset_states()
         self.dist_loss.reset_states()
         self.ce_loss.reset_states()
+        self.ce_image_loss.reset_states()
 
         self.ce_acc.reset_states()
+        self.ce_image_acc.reset_states()
 
     def str_result(self):
-        return 'total_loss: {:.4f}, reg_loss: {:.3f}, dist: {:.3f}, ce: {:.3f}, acc: {:.3f}'.format(
+        return 'total_loss: {:.4f}, reg_loss: {:.3f}, dist: {:.3f}, ce: {:.3f}, image_ce: {:.3f}, acc: {:.3f}, image_acc: {:.3f}'.format(
                 self.total_loss.result(),
                 self.reg_loss.result(),
                 self.dist_loss.result(),
                 self.ce_loss.result(),
+                self.ce_image_loss.result(),
 
                 self.ce_acc.result(),
+                self.ce_image_acc.result(),
                 )
 
 
@@ -88,7 +94,7 @@ class ModelMetric:
     def reset_states(self):
         self.train_metric.reset_states()
 
-    def __call__(self, images, true_bboxes, true_labels, pred_bboxes, pred_scores, training):
+    def __call__(self, images, true_bboxes, true_labels, true_image_labels, pred_bboxes, pred_scores, pred_image_scores, training):
         true_bboxes, true_labels = anchors.anchor_targets_bbox(self.all_anchors, images, true_bboxes, true_labels, self.num_classes, dtype=self.dtype)
 
         y_shape = tf.shape(true_labels)
@@ -111,8 +117,10 @@ class ModelMetric:
         dist_loss = self.dist_loss(true_bboxes, pred_bboxes)
         class_loss = focal_loss(true_not_ignore_labels, pred_not_ignore_scores, reduction='sum')
 
-        dist_loss = tf.divide(dist_loss, normalizer)
-        class_loss = tf.divide(class_loss, normalizer)
+        # normalizer equals zero when there are no bboxes and there are only image classes
+        if normalizer != 0:
+            dist_loss = tf.divide(dist_loss, normalizer)
+            class_loss = tf.divide(class_loss, normalizer)
 
         self.train_metric.dist_loss.update_state(dist_loss)
         self.train_metric.ce_loss.update_state(class_loss)
@@ -121,4 +129,10 @@ class ModelMetric:
         pred_fg_scores = tf.gather_nd(pred_scores, true_idx)
         self.train_metric.ce_acc.update_state(true_fg_labels, pred_fg_scores)
 
-        return dist_loss, class_loss
+        image_class_loss = 0.
+        if pred_image_scores is not None:
+            image_class_loss = focal_loss(true_image_labels, pred_image_scores, reduction='sum')
+            self.train_metric.ce_image_loss.update_state(image_class_loss)
+            self.train_metric.ce_image_acc.update_state(true_image_labels, pred_image_scores)
+
+        return dist_loss, class_loss, image_class_loss

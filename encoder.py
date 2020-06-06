@@ -47,7 +47,7 @@ class EfnBody(tf.keras.layers.Layer):
             endpoint = self.base_model.endpoints['reduction_{}'.format(reduction_idx)]
             self.endpoints.append(endpoint)
 
-        return self.endpoints
+        return self.endpoints, outputs
 
 class EfnBB(tf.keras.layers.Layer):
     def __init__(self, width, depth, num_anchors, **kwargs):
@@ -105,8 +105,48 @@ class EfnClassifier(tf.keras.layers.Layer):
         x = tf.reshape(x, [batch_size, -1, self.num_features])
         return x
 
+class EfnWholeImageClassifier(tf.keras.layers.Layer):
+    def __init__(self, params, num_features, width, depth, **kwargs):
+        super().__init__(**kwargs)
+
+        self.num_features = num_features
+        self.relu_fn = params.relu_fn or local_swish
+
+        if params.data_format == 'channels_first':
+            channel_axis = 1
+        else:
+            channel_axis = -1
+
+        self.conv_head = tf.keras.layers.Conv2D(
+            filters=efn.round_filters(1280, params),
+            kernel_size=[1, 1],
+            strides=[1, 1],
+            kernel_initializer=efn.conv_kernel_initializer,
+            padding='same',
+            use_bias=False)
+        self.bn = tf.keras.layers.BatchNormalization(
+            axis=channel_axis,
+            momentum=params.batch_norm_momentum,
+            epsilon=params.batch_norm_epsilon)
+
+        self.avg_pooling = tf.keras.layers.GlobalAveragePooling2D(data_format=params.data_format)
+        self.dropout = tf.keras.layers.Dropout(params.dropout_rate)
+        self.fc = tf.keras.layers.Dense(num_features, kernel_initializer=efn.dense_kernel_initializer)
+
+    def call(self, inputs, training=True):
+        x = self.conv_head(inputs)
+        x = self.bn(x, training=training)
+        x = self.relu_fn(x)
+
+        x = self.avg_pooling(x)
+        x = self.dropout(x, training=training)
+        x = self.fc(x)
+        x = tf.nn.sigmoid(x)
+
+        return x
+
 class EfnDet(tf.keras.Model):
-    def __init__(self, params, d, num_classes, class_activation='softmax', dtype: tf.dtypes.DType = tf.float32, **kwargs):
+    def __init__(self, params, d, num_classes, num_image_classes, class_activation='softmax', dtype: tf.dtypes.DType = tf.float32, **kwargs):
         super().__init__(**kwargs)
 
         self.num_classes = num_classes
@@ -121,6 +161,11 @@ class EfnDet(tf.keras.Model):
                 num_anchors=num_anchors, activation=class_activation, name='class_head')
         self.bb_head = EfnBB(width=self.config.bifpn_width, depth=self.config.class_depth, num_anchors=num_anchors, name='bb_head')
 
+        self.image_class_head = None
+        if num_image_classes != 0:
+            self.image_class_head = EfnWholeImageClassifier(params=self.body.base_model._global_params, num_features=num_image_classes,
+                    width=self.config.bifpn_width, depth=self.config.class_depth, name='image_class_head')
+
         self.anchors_gen = [anchors.AnchorGenerator(
             size=self.anchors_config.sizes[i - 3],
             aspect_ratios=self.anchors_config.ratios,
@@ -134,7 +179,7 @@ class EfnDet(tf.keras.Model):
              iou_threshold: float = 0.45,
              max_ret: int = 100
             ):
-        backend_features = self.body(images, training=training)
+        backend_features, backend_outputs = self.body(images, training=training)
         bifnp_features = self.neck(backend_features, training=training)
         bboxes = [self.bb_head(bf, training=training) for bf in bifnp_features]
         class_scores = [self.class_head(bf, training=training) for bf in bifnp_features]
@@ -142,8 +187,15 @@ class EfnDet(tf.keras.Model):
         bboxes = tf.concat(bboxes, axis=1)
         class_scores = tf.concat(class_scores, axis=1)
 
+
+        image_class_scores = None
+        if self.image_class_head:
+            image_class_scores = self.image_class_head(backend_outputs, training=training)
+            image_class_scores = tf.concat(image_class_scores, axis=1)
+
+
         if training:
-            return bboxes, class_scores
+            return bboxes, class_scores, image_class_scores
 
         im_shape = tf.shape(images)
         batch_size, h, w = im_shape[0], im_shape[1], im_shape[2]
@@ -159,9 +211,9 @@ class EfnDet(tf.keras.Model):
         boxes = bndbox.clip_boxes(boxes, [h, w])
         boxes, scores, labels = bndbox.nms(boxes, class_scores, score_threshold=score_threshold, iou_threshold=iou_threshold, max_ret=max_ret)
 
-        return boxes, scores, labels
+        return boxes, scores, labels, image_class_scores
 
-def create_model(d, num_classes, class_activation='softmax', name='efndet', dtype: tf.dtypes.DType = tf.float32):
+def create_model(d, num_classes, num_image_classes, class_activation='softmax', name='efndet', dtype: tf.dtypes.DType = tf.float32):
     data_format='channels_last'
 
     if data_format == 'channels_first':
@@ -182,5 +234,5 @@ def create_model(d, num_classes, class_activation='softmax', name='efndet', dtyp
 
     params = GlobalParams(**params)
 
-    model = EfnDet(params, d, num_classes, name=name, class_activation=class_activation, dtype=dtype)
+    model = EfnDet(params, d, num_classes, num_image_classes, name=name, class_activation=class_activation, dtype=dtype)
     return model

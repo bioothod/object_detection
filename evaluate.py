@@ -78,10 +78,14 @@ def evaluate(model: tf.keras.Model,
     num_images = 0
     i = 0
 
-    for filenames, image_ids, images, true_bboxes, true_labels in dataset:
+    image_metric = tf.keras.metrics.CategoricalAccuracy()
+
+    for filenames, image_ids, images, true_bboxes, true_labels, true_image_labels in dataset:
         inference_start = time.time()
-        bboxes, scores, categories = model(images, training=False)
+        bboxes, scores, categories, image_scores = model(images, training=False)
         h, w = images.shape[1: 3]
+
+        image_metric.update_state(true_image_labels, image_scores)
 
         # Iterate through images in batch, and for each one
         # create the ground truth coco annotation
@@ -97,11 +101,12 @@ def evaluate(model: tf.keras.Model,
             gt_coco['annotations'].extend(annots)
             gt_coco['images'].append(im_annot)
 
-            preds = categories[batch_idx], bboxes[batch_idx], scores[batch_idx]
-            pred_labels, pred_boxes, pred_scores = preds
+            pred_bboxes = bboxes[batch_idx]
+            pred_labels = categories[batch_idx]
+            pred_scores = scores[batch_idx]
 
             if pred_labels.shape[0] > 0:
-                results = _COCO_result(image_id, pred_labels, pred_boxes, pred_scores)
+                results = _COCO_result(image_id, pred_labels, pred_bboxes, pred_scores)
                 results_coco.extend(results)
 
             if save_examples > 0 and data_dir is not None:
@@ -152,8 +157,8 @@ def evaluate(model: tf.keras.Model,
         logger.info('there are no validation images, returning 0 from evaluation')
         return 0.
 
-    logger.info('validated steps: {}, images: {}, perf: {:.1f}  img/s, time_per_image: {:.1f} ms'.format(
-        i, num_images, num_images / total_time, total_time / num_images * 1000))
+    logger.info('validated steps: {}, images: {}, perf: {:.1f}  img/s, time_per_image: {:.1f} ms, whole_image_labels_accuracy: {:.3f}'.format(
+        i, num_images, num_images / total_time, total_time / num_images * 1000, image_metric.result().numpy()))
 
     # Convert custom annotations to COCO annots
     gtCOCO = COCO()
