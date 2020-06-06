@@ -158,6 +158,9 @@ def nms(bboxes: tf.Tensor,
     @tf.function
     def body(c, written, c_bboxes, c_scores, c_labels, sampled_bboxes, sampled_scores, sampled_labels):
         class_index = tf.where(tf.equal(sampled_labels, c))
+        #class_index = tf.where(tf.logical_and(
+        #                            tf.equal(sampled_labels, c),
+        #                            tf.less(sampled_scores, 1.)))
         selected_scores = tf.gather_nd(sampled_scores, class_index)
         selected_bboxes = tf.gather_nd(sampled_bboxes, class_index)
 
