@@ -122,7 +122,7 @@ def run_eval(model, dataset, num_images, image_size, num_classes, dst_dir, cat_n
     dump_js = []
     for filenames, images in dataset:
         start_time = time.time()
-        coords_batch, scores_batch, cat_ids_batch = model(images, training=False, score_threshold=FLAGS.min_score, iou_threshold=FLAGS.iou_threshold, max_ret=FLAGS.max_ret)
+        coords_batch, scores_batch, cat_ids_batch, image_scores_batch = model(images, training=False, score_threshold=FLAGS.min_score, iou_threshold=FLAGS.iou_threshold, max_ret=FLAGS.max_ret)
 
         num_files += len(filenames)
         time_per_image_ms = (time.time() - start_time) / len(filenames) * 1000
@@ -212,7 +212,7 @@ def run_inference(FLAGS):
     num_images = len(FLAGS.filenames)
 
     dtype = tf.float32
-    model = encoder.create_model(FLAGS.d, FLAGS.num_classes, class_activation=FLAGS.class_activation)
+    model = encoder.create_model(FLAGS.d, FLAGS.num_classes, FLAGS.num_image_classes, class_activation=FLAGS.class_activation, dtype=dtype)
     image_size = model.config.input_size
 
     if FLAGS.checkpoint:
@@ -288,6 +288,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=24, help='Number of images to process in a batch')
     parser.add_argument('--num_cpus', type=int, default=6, help='Number of parallel preprocessing jobs')
     parser.add_argument('--num_classes', type=int, required=True, help='Number of the output classes in the model')
+    parser.add_argument('--num_image_classes', type=int, required=True, help='Number of classes in the dataset')
     parser.add_argument('--max_ret', type=int, default=100, help='Maximum number of returned boxes')
     parser.add_argument('--min_score', type=float, default=0.7, help='Minimal class probability')
     parser.add_argument('--min_size', type=float, default=10, help='Minimal size of the bounding box')
