@@ -1,50 +1,37 @@
+========= gpurnd6
+/shared2/object_detection/train/det/gpurnd6/det2
+efficientdet-d0, class_activation: sigmoid, image_size: default/512
+badoo/21
+50: mAP: 0.1171, image_ce: 0.426
+
 ========= gpurdn3
 /shared2/object_detection/train/det/gpurnd3/det0
 efficientdet-d0, class_activation: sigmoid, image_size: default/512
 badoo/21
 0.2103
+107: mAP: 0.2039
 
-/shared2/object_detection/train/det/gpurnd3/det1
+========= gpurdn11
+/shared2/object_detection/train/det/gpurnd11/det1
 efficientdet-d2, class_activation: sigmoid, iamge_size: default/768
 badoo/21
 0.2322
+82: mAP: 0.1887
 
 ========= gpurnd4
-/shared2/object_detection/train/det/gpurnd4/efn0
-yolov3 old, efficientnet-b2, image_size: 640
+/shared2/object_detection/train/det/gpurnd4/det2
+efficientdet-d2, class_activation: sigmoid, iamge_size: default/768
 badoo/21
-0.1960
+61: mAP: 0.1549, image_ce: 0.698
 
-/shared2/object_detection/train/det/gpurnd4/efn1
-yolov3 old, efficientnet-b0, image_size: 512
-mscoco/80
-0.0303
-yolov3 old, efficientnet-b0, image_size: 380, new lr cosine scheduler
-0.0330
-
-========= gpurnd5
-/shared2/object_detection/train/det/gpurnd5/efn0
-yolov3 old, efficientnet-b6, image_size: default/528
+========= gpurnd12
+/shared2/object_detection/train/det/gpurnd12/det0
+efficientdet-d4, class_activation: sigmoid, iamge_size: default/1024
 badoo/21
-0.1246 - older, augmentation: v0
-0.1104
+61: mAP: 0.1380, image_ce: 0.824
 
-/shared2/object_detection/train/det/gpurnd5/det1
+========= gpurnd13
+/shared2/object_detection/train/det/gpurnd13/det2
 efficientdet-d0, class_activation: sigmoid, image_size: default/512
 mscoco/80
-0.0671
-/shared2/object_detection/train/det/gpurnd5/det2
-efficientdet-d0, class_activation: sigmoid, image_size: default/512
-mscoco/80
-0.1343
-
-========= gpurnd6
-/shared2/object_detection/train/det/gpurnd6/efn/efn0
-yolov3 old, efficientnet-b0, image_size: 512
-badoo/21
-0.1650
-
-/shared2/object_detection/train/det/gpurnd6/efn/efn1
-yolov3 old, efficientnet-b0, image_size: default/224
-mscoco/80
-0.0398
+85: mAP: 0.1907
