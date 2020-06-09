@@ -59,6 +59,7 @@ parser.add_argument('--train_annotations_json', type=str, help='Training annotat
 parser.add_argument('--eval_annotations_json', type=str, help='Evaluation annotations pattern')
 parser.add_argument('--num_classes', type=int, required=True, help='Number of classes in the dataset')
 parser.add_argument('--num_image_classes', type=int, required=True, help='Number of classes in the dataset')
+parser.add_argument('--annotations_max_min_ratio', type=float, default=100, help='Maximum ratio of the largest and the smallest classes probabilities')
 parser.add_argument('--train_num_images', type=int, default=-1, help='Number of images in train epoch')
 parser.add_argument('--eval_num_images', type=int, default=-1, help='Number of images in eval epoch')
 parser.add_argument('--grad_accumulate_steps', type=int, default=1, help='Number of batches to accumulate before gradient update')
@@ -406,7 +407,7 @@ def train():
                 yield filename, image_id, bboxes, labels, image_labels
 
         def create_dataset_from_annotations(name, ann_file, image_size, num_images, is_training):
-            bg = batch.generator(ann_file, split_to=hvd.size(), use_chunk=hvd.rank())
+            bg = batch.generator(ann_file, split_to=hvd.size(), use_chunk=hvd.rank(), max_min_ratio=FLAGS.annotations_max_min_ratio)
 
             if num_images is None:
                 num_images = bg.num_images()

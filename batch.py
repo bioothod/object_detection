@@ -12,8 +12,10 @@ import error
 logger = logging.getLogger('detection')
 
 class generator(object):
-    def __init__(self, ann_file, split_to=1, use_chunk=0, seed=None):
+    def __init__(self, ann_file, split_to=1, use_chunk=0, max_min_ratio=50., seed=None):
         np.random.seed(seed)
+
+        self.max_min_ratio = max_min_ratio
 
         with open(ann_file, 'r') as fin:
             js = json.load(fin)
@@ -70,7 +72,7 @@ class generator(object):
         cat_max = cat_counts.max()
         cat_min = cat_counts.min()
 
-        M = min(50, cat_max / cat_min)
+        M = min(self.max_min_ratio, cat_max / cat_min)
         K = (1 - cat_min / cat_max) * M / (M - 1)
 
         new_counts = []
