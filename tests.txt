@@ -9,7 +9,7 @@ badoo/21
 efficientdet-d0, class_activation: sigmoid, image_size: default/512
 badoo/21
 0.2103
-107: mAP: 0.2039
+120: mAP: 0.2080
 
 ========= gpurdn11
 /shared2/object_detection/train/det/gpurnd11/det1
