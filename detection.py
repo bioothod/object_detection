@@ -406,7 +406,7 @@ def train():
                 yield filename, image_id, bboxes, labels, image_labels
 
         def create_dataset_from_annotations(name, ann_file, image_size, num_images, is_training):
-            bg = batch.generator(ann_file)
+            bg = batch.generator(ann_file, split_to=hvd.size(), use_chunk=hvd.rank())
 
             if num_images is None:
                 num_images = bg.num_images()
@@ -421,7 +421,8 @@ def train():
 
             ds = wrap_dataset(ds, image_size, dtype, is_training)
 
-            logger.info('{} dataset has been created, total images: {}, categories: {}, image_categories: {}'.format(name, bg.num_images(), bg.num_classes(), bg.num_image_classes()))
+            logger.info('{} dataset has been created, total images: {}, categories: {}/{}, image_categories: {}/{}'.format(
+                name, bg.num_images(), bg.num_classes(), FLAGS.num_classes, bg.num_image_classes(), FLAGS.num_image_classes))
             return ds, num_images
 
         def calc_num_images(num_images, steps_per_epoch, batch_size):

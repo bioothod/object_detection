@@ -30,12 +30,14 @@ class generator(object):
         # image_id to structure
         self.images = {img['id']:img for img in js['images']}
 
-        self.cat2ann, self.img2ann = self.parse_annotations(self.annotations)
-        self.whole_cat2ann, self.whole_img2ann = self.parse_annotations(self.image_annotations)
+        self.cat2ann, self.img2ann = self.parse_annotations(self.annotations, split_to, use_chunk)
+        self.whole_cat2ann, self.whole_img2ann = self.parse_annotations(self.image_annotations, split_to, use_chunk)
 
-    def parse_annotations(self, annotations):
+    def parse_annotations(self, annotations, split_to, use_chunk):
         cat2ann = defaultdict(list)
         img2ann = defaultdict(list)
+
+        annotations = np.array_split(annotations, split_to)[use_chunk]
 
         for ann in annotations:
             image_id = ann['image_id']
